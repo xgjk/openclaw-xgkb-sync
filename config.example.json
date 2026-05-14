@@ -1,0 +1,66 @@
+{
+  "serverUrl": "https://your-kb-server/open-api/",
+  "appKey": "your-app-key-here",
+  "syncDirection": "bidirectional",
+  "autoSyncIntervalSec": 60,
+  "stateDbPath": "./openclaw-sync-state.db",
+  "maxConcurrentMappings": 2,
+
+  "_comment_ratelimit": "以下限速参数可选，括号内为默认值。多实例共用同一 appKey 时，建议将 maxRequestsPerMinute 设为 总限额/实例数",
+  "maxRequestsPerMinute": 60,
+  "rateLimitBurst": 8,
+  "rateLimitCooldownSec": 60,
+  "downloadConcurrency": 5,
+  "uploadConcurrency": 3,
+  "startupJitterMaxSec": 20,
+
+  "mappings": [
+    {
+      "_comment": "极简配置：仅填 projectId，同步该空间根目录下所有 .md 文件",
+      "mappingId": "map-personal-root",
+      "enabled": false,
+      "localRoot": "/data/openclaw/personal",
+      "filePatterns": ["**/*.md"]
+    },
+    {
+      "_comment": "子目录配置：只填路径，projectId 自动使用个人空间，remoteRootFileId 自动解析并缓存",
+      "mappingId": "map-task-output-a",
+      "enabled": true,
+      "localRoot": "/data/openclaw/tasks/output-a",
+      "remoteRootFolderPath": "OpenClaw/OutputA",
+      "filePatterns": ["**/*.md"],
+      "excludePatterns": ["**/_conflict_*", "**/.tmp/**"]
+    },
+    {
+      "_comment": "完整配置：全部手动指定，启动最快（0 额外 API 调用）",
+      "mappingId": "map-research-notes",
+      "enabled": false,
+      "localRoot": "/data/openclaw/research",
+      "projectId": "12345",
+      "remoteRootFileId": "11111",
+      "remoteRootFolderPath": "OpenClaw/Research",
+      "filePatterns": ["**/*.md"],
+      "excludePatterns": ["**/_conflict_*", "**/.tmp/**", "**/draft/**"]
+    },
+    {
+      "_comment": "指定空间 + 子目录：projectId + 路径，不填 remoteRootFileId（自动解析路径→ID）",
+      "mappingId": "map-team-docs",
+      "enabled": false,
+      "localRoot": "/data/openclaw/team",
+      "projectId": "99999",
+      "remoteRootFolderPath": "AI研发/同步区",
+      "filePatterns": ["**/*.md"]
+    },
+    {
+      "_comment": "多身份场景：该 mapping 使用独立 appKey，覆盖全局身份（如用于不同业务空间授权）",
+      "mappingId": "map-biz-space",
+      "enabled": false,
+      "localRoot": "/data/openclaw/biz",
+      "appKey": "biz-specific-app-key",
+      "projectId": "88888",
+      "remoteRootFolderPath": "业务A/输出",
+      "syncDirection": "push",
+      "filePatterns": ["**/*.md"]
+    }
+  ]
+}

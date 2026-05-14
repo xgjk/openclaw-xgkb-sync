@@ -1,0 +1,84 @@
+export declare const API_PATHS: {
+    readonly getChildFiles: "document-database/file/getChildFiles";
+    readonly listDescendantFiles: "document-database/file/listDescendantFiles";
+    readonly listChanges: "document-database/file/listChanges";
+    readonly batchGetMeta: "document-database/file/batchGetMeta";
+    readonly createFolder: "document-database/file/createFolder";
+    readonly getDownloadInfo: "document-database/file/getDownloadInfo";
+    readonly getFileContent: "document-database/file/getFileContent";
+    readonly getFullFileContent: "document-database/file/getFullFileContent";
+    readonly uploadContent: "document-database/file/uploadContent";
+    readonly searchFile: "document-database/file/searchFile";
+    readonly getLevel1Folders: "document-database/file/getLevel1Folders";
+    readonly deleteFile: "document-database/file/deleteFile";
+    readonly getVersionList: "document-database/file/getVersionList";
+    readonly getPersonalProjectId: "document-database/project/personal/getProjectId";
+    readonly getProjectList: "document-database/project/list";
+    /** 见《03-AI与纯文本高速通道》4.15，建议单次不超过 10 个文件 */
+    readonly batchGetContent: "document-database/ai/batchGetContent";
+};
+/** batchGetContent 单批最大文件数 */
+export declare const BATCH_GET_CONTENT_MAX = 10;
+/** batchGetMeta 单批最大文件数 */
+export declare const BATCH_GET_META_MAX = 50;
+/** 并发下载 OSS 文件的最大并发数（默认值，可被 config.downloadConcurrency 覆盖） */
+export declare const DOWNLOAD_CONCURRENCY = 5;
+/** 并发上传文件的最大并发数（默认值，可被 config.uploadConcurrency 覆盖） */
+export declare const UPLOAD_CONCURRENCY = 3;
+/** 每批执行完成后的间隔（毫秒），为限速器补充令牌、平滑突发 */
+export declare const EXECUTE_BATCH_PAUSE_MS = 300;
+/** 默认每分钟最大 API 请求数（令牌桶稳态速率） */
+export declare const DEFAULT_MAX_REQUESTS_PER_MINUTE = 60;
+/** 默认令牌桶突发容量 */
+export declare const DEFAULT_RATE_LIMIT_BURST = 8;
+/** 收到 429 后限速器默认冷却时间（毫秒） */
+export declare const RATE_LIMIT_COOLDOWN_MS = 60000;
+/**
+ * 知识库业务层限流错误码集合。
+ * 收到这些 resultCode 时应视为可恢复的限流，触发限速器冷却后重试，而非永久错误。
+ * 610012 = "请求太过频繁，请稍候再试！"（按 appKey 全局限流）
+ */
+export declare const RATE_LIMIT_RESULT_CODES: Set<number>;
+/** 启动时随机抖动最大值（毫秒），分散多实例同时启动导致的请求突刺 */
+export declare const STARTUP_JITTER_MAX_MS = 20000;
+/** listChanges 安全回拨窗口（毫秒），避免时钟偏差漏事件 */
+export declare const CHANGES_SAFETY_WINDOW_MS = 5000;
+/** HTTP 请求最大重试次数 */
+export declare const MAX_RETRIES = 3;
+/** 指数退避基础延迟（毫秒） */
+export declare const RETRY_BASE_DELAY_MS = 1000;
+/** HTTP 请求超时（毫秒），防止服务端挂起永久阻塞 */
+export declare const REQUEST_TIMEOUT_MS = 30000;
+/** API 失败时控制台诊断日志中单段文本最大长度 */
+export declare const API_ERROR_LOG_MAX_CHARS = 4096;
+/** API 失败时写入 ApiResult.error / SQLite lastError 的响应摘要最大长度 */
+export declare const API_ERROR_MESSAGE_BODY_MAX = 800;
+/** mtime 比较容差（毫秒），消除精度误差 */
+export declare const MTIME_TOLERANCE_MS = 1000;
+/** 默认同步文件匹配模式 */
+export declare const DEFAULT_FILE_PATTERNS: string[];
+/** 默认排除匹配模式 */
+export declare const DEFAULT_EXCLUDE_PATTERNS: string[];
+/** 默认状态库文件路径 */
+export declare const DEFAULT_DB_PATH = "./openclaw-sync-state.db";
+/** 默认最大并发 mapping 数 */
+export declare const DEFAULT_MAX_CONCURRENT_MAPPINGS = 2;
+/** 版本备注 */
+export declare const VERSION_REMARK = "OpenClaw Sync Agent";
+/**
+ * 清理知识库返回的正文（去除分页页脚等）。
+ * raw 为 null/undefined 时返回空字符串。
+ */
+export declare function cleanContent(raw: string | null | undefined): string;
+/**
+ * 从 filePatterns 中提取唯一的文件扩展名，用于 API 级别的 suffix 过滤。
+ * - 若所有 pattern 均为 `**\/*.ext` 形式且扩展名相同，返回该扩展名
+ * - 否则返回 undefined（由调用方做客户端过滤）
+ *
+ * @example
+ *   extractUniqueSuffix(['**\/*.md']) => 'md'
+ *   extractUniqueSuffix(['**\/*.md', '**\/*.txt']) => undefined
+ *   extractUniqueSuffix(['**\/*.md', '**\/subdir\/*.md']) => 'md'
+ */
+export declare function extractUniqueSuffix(patterns: string[]): string | undefined;
+//# sourceMappingURL=constants.d.ts.map

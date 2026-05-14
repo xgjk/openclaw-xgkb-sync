@@ -1,0 +1,6 @@
+# 本地含密钥的配置，勿提交（使用 config.example.json）
+config.json
+
+node_modules/
+*.db
+.env

@@ -1,0 +1,26 @@
+{
+  "name": "openclaw-xgkb-sync",
+  "version": "1.0.0",
+  "description": "OpenClaw 节点与玄关知识库文件双向同步 Agent",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "start:config": "node dist/index.js --config config.json",
+    "dev": "ts-node src/index.ts",
+    "dev:config": "ts-node src/index.ts --config config.json"
+  },
+  "dependencies": {
+    "node-sqlite3-wasm": "^0.8.57",
+    "micromatch": "^4.0.8"
+  },
+  "devDependencies": {
+    "@types/micromatch": "^4.0.9",
+    "@types/node": "^20.12.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.5"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
