@@ -3,7 +3,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { SyncScheduler } from './scheduler';
 import { SyncConfig, SyncMapping } from './types';
-import { validateMapping } from './config';
+import { generateUniqueMappingId, validateMapping } from './config';
+import { getMappingCredentialsViolation } from './managementApiCredentials';
 
 /** 读取 package.json 里的版本号，失败则返回 'unknown' */
 function readVersion(): string {
@@ -35,12 +36,7 @@ export interface ManagementApiOptions {
 /**
  * HTTP 管理 API 服务
  *
- * 路由：
- *   GET  /health              存活探针，返回版本、uptime、mapping 概况
- *   GET  /status              详细状态，含所有 mapping 的同步情况
- *   POST /sync/:mappingId     手动触发指定 mapping 同步
- *   POST /sync                手动触发所有 mapping 同步
- *   POST /reload              热重载配置文件（无需重启进程）
+ * 路由速览见类内 `start()` 日志。完整契约见仓库 **docs/MANAGEMENT_API.md**（给 AI / 自动化）；appKey 保存规则见 **src/managementApiCredentials.ts**。
  */
 export class ManagementApi {
   private readonly opts: ManagementApiOptions;
@@ -266,6 +262,8 @@ export class ManagementApi {
     this.sendJson(res, 200, {
       ok: true,
       total: config.mappings.length,
+      /** 根级全局 appKey 是否已配置（非空）。为 false 时，新建/更新 mapping 必须在请求体中带非空 appKey，见 docs/MANAGEMENT_API.md */
+      hasGlobalAppKey: !!(config.appKey && config.appKey.trim()),
       mappings: config.mappings.map((m) => this.mappingSummary(m)),
     });
   }
@@ -281,12 +279,33 @@ export class ManagementApi {
       return this.sendJson(res, 400, { ok: false, error: `请求体解析失败: ${e instanceof Error ? e.message : String(e)}` });
     }
 
-    // 校验 mapping 字段
+    if (typeof body !== 'object' || body === null) {
+      return this.sendJson(res, 400, { ok: false, error: '请求体必须是 JSON 对象' });
+    }
+
+    const bodyObj = { ...(body as Record<string, unknown>) };
+    const existingIds = this.opts.getScheduler().getConfig().mappings.map((m) => m.mappingId);
+    const mid = bodyObj.mappingId;
+    if (typeof mid !== 'string' || !mid.trim()) {
+      bodyObj.mappingId = generateUniqueMappingId(existingIds);
+    }
+
+    // 校验 mapping 字段（配置文件中的条目仍要求 mappingId；此处已为 POST 补全）
     let mapping: SyncMapping;
     try {
-      mapping = validateMapping(body, 0, '<API 请求>');
+      mapping = validateMapping(bodyObj, 0, '<API 请求>');
     } catch (e) {
       return this.sendJson(res, 400, { ok: false, error: e instanceof Error ? e.message : String(e) });
+    }
+
+    const cfg = this.opts.getScheduler().getConfig();
+    const cred = getMappingCredentialsViolation(cfg, mapping);
+    if (cred) {
+      return this.sendJson(res, 400, {
+        ok: false,
+        error: cred.error,
+        errorCode: cred.errorCode,
+      });
     }
 
     // 写入 config.json
@@ -358,6 +377,13 @@ export class ManagementApi {
       const merged: Record<string, unknown> = { ...existingMapping, ...bodyObj, mappingId };
       mapping = validateMapping(merged, 0, '<API 请求>');
 
+      const cred = getMappingCredentialsViolation(this.opts.getScheduler().getConfig(), mapping);
+      if (cred) {
+        const err = new Error(cred.error) as Error & { errorCode: string };
+        err.errorCode = cred.errorCode;
+        throw err;
+      }
+
       const updated = [...mappings];
       updated[idx] = mapping;
       return updated;
@@ -365,7 +391,11 @@ export class ManagementApi {
 
     if (!writeResult.ok) {
       const status = writeResult.error.includes('未找到') ? 404 : 400;
-      return this.sendJson(res, status, { ok: false, error: writeResult.error });
+      return this.sendJson(res, status, {
+        ok: false,
+        error: writeResult.error,
+        ...(writeResult.errorCode ? { errorCode: writeResult.errorCode } : {}),
+      });
     }
 
     // 检测实际发生了哪些变化
@@ -440,7 +470,7 @@ export class ManagementApi {
    */
   private modifyConfigMappings(
     modifier: (mappings: SyncMapping[]) => SyncMapping[],
-  ): { ok: true } | { ok: false; error: string } {
+  ): { ok: true } | { ok: false; error: string; errorCode?: string } {
     let raw: Record<string, unknown>;
     try {
       raw = JSON.parse(fs.readFileSync(this.opts.configPath, 'utf-8')) as Record<string, unknown>;
@@ -456,7 +486,15 @@ export class ManagementApi {
     try {
       newMappings = modifier(existingMappings);
     } catch (e) {
-      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      const msg = e instanceof Error ? e.message : String(e);
+      const errorCode =
+        e &&
+        typeof e === 'object' &&
+        'errorCode' in e &&
+        typeof (e as { errorCode: unknown }).errorCode === 'string'
+          ? (e as { errorCode: string }).errorCode
+          : undefined;
+      return errorCode ? { ok: false, error: msg, errorCode } : { ok: false, error: msg };
     }
 
     raw.mappings = newMappings;

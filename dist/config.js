@@ -35,8 +35,10 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.loadConfig = loadConfig;
 exports.validateMapping = validateMapping;
+exports.generateUniqueMappingId = generateUniqueMappingId;
 const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
+const crypto_1 = require("crypto");
 const constants_1 = require("./constants");
 const DEFAULT_CONFIG_PATH = './config.json';
 /**
@@ -64,7 +66,8 @@ function validateConfig(raw, filePath) {
     const obj = raw;
     // 必填字段
     assertString(obj, 'serverUrl', filePath);
-    assertString(obj, 'appKey', filePath);
+    const rawAppKey = obj.appKey;
+    const globalAppKey = typeof rawAppKey === 'string' && rawAppKey.trim() !== '' ? rawAppKey.trim() : undefined;
     if (!Array.isArray(obj.mappings)) {
         throw new Error(`配置 "mappings" 必须是数组: ${filePath}`);
     }
@@ -84,7 +87,7 @@ function validateConfig(raw, filePath) {
     }
     return {
         serverUrl: obj.serverUrl,
-        appKey: obj.appKey,
+        ...(globalAppKey !== undefined ? { appKey: globalAppKey } : {}),
         syncDirection: syncDirection,
         autoSyncIntervalSec: typeof obj.autoSyncIntervalSec === 'number' ? obj.autoSyncIntervalSec : 60,
         stateDbPath: typeof obj.stateDbPath === 'string' ? obj.stateDbPath : constants_1.DEFAULT_DB_PATH,
@@ -151,6 +154,18 @@ function validateMapping(raw, idx, filePath) {
         excludePatterns,
         syncDirection: mappingSyncDirection,
     };
+}
+/**
+ * 为 POST /mappings 生成不与现有列表冲突的 mappingId。
+ */
+function generateUniqueMappingId(existingIds) {
+    const used = new Set(existingIds);
+    for (let n = 0; n < 64; n++) {
+        const id = `map-${(0, crypto_1.randomBytes)(8).toString('hex')}`;
+        if (!used.has(id))
+            return id;
+    }
+    throw new Error('无法自动生成唯一 mappingId，请在请求体中显式指定 mappingId');
 }
 function assertString(obj, key, filePath, prefix) {
     const label = prefix ? `${prefix}.${key}` : key;

@@ -21,8 +21,9 @@ src/
 ├── remoteFs.ts       远端知识库文件适配器（listFiles、createFile、deleteFile 等）
 ├── syncStateDb.ts    SQLite 状态库（node-sqlite3-wasm，WAL 模式）
 ├── syncEngine.ts     核心同步决策与执行引擎
-├── scheduler.ts      多 mapping 调度器（防重入、按 appKey 限速、并发控制）
-└── managementApi.ts  HTTP 管理 API（health / status / sync / reload）
+├── scheduler.ts                  多 mapping 调度器（防重入、按 appKey 限速、并发控制）
+├── managementApi.ts              HTTP 管理 API（health / status / mappings CRUD / sync / reload）
+└── managementApiCredentials.ts   管理 API：有效 appKey 推导与保存前校验（与 docs/MANAGEMENT_API.md 一致）
 ```
 
 ---
@@ -193,7 +194,7 @@ resolveFileIdFromPath("OpenClaw/OutputA/2026")
 
 ## HTTP 管理 API 内部设计
 
-`ManagementApi` 使用 Node.js 内置 `http` 模块，无额外依赖。
+`ManagementApi` 使用 Node.js 内置 `http` 模块，无额外依赖。**HTTP 路由的请求/响应契约、错误码与 AI 调用说明**以 [docs/MANAGEMENT_API.md](./docs/MANAGEMENT_API.md) 为准；本节仅保留路由表与实现要点。
 
 路由表（method + path 精确匹配，无正则路由框架）：
 
@@ -201,13 +202,15 @@ resolveFileIdFromPath("OpenClaw/OutputA/2026")
 GET    /health              → handleHealth()         读 scheduler.getConfig()
 GET    /status              → handleStatus()         读 scheduler.getStatus() + getConfig()
 GET    /mappings            → handleListMappings()   列出所有 mapping 摘要（appKey 不回显）
-POST   /mappings            → handleCreateMapping()  新增 mapping，写 config.json + reload
+POST   /mappings            → handleCreateMapping()  新增 mapping，写 config.json + reload（请求体可省略 mappingId，自动生成；见下）
 PUT    /mappings/:id        → handleUpdateMapping()  部分合并更新，写 config.json + reload
 DELETE /mappings/:id        → handleDeleteMapping()  删除 mapping，写 config.json + reload
 POST   /sync                → handleSyncAll()        遍历 enabled mappings 逐个 triggerMapping()
 POST   /sync/:mappingId     → handleSyncOne()        triggerMapping(mappingId)
 POST   /reload              → handleReload()         调用 onReload() 回调
 ```
+
+**`POST /mappings`：** 请求体可为合法 JSON 对象；`mappingId` 可省略或空白，服务端在写入前生成唯一 id。合并后仍经 `validateMapping()` 校验。保存前另经「有效 API 密钥」校验：根级全局 `appKey` 为空时，本条必须带非空 `appKey`，否则 `400` 且 `errorCode=MAPPING_APPKEY_REQUIRED_WHEN_NO_GLOBAL_APPKEY`（详见 [docs/MANAGEMENT_API.md](./docs/MANAGEMENT_API.md)）。
 
 **`PUT /mappings/:id` 合并规则：**
 

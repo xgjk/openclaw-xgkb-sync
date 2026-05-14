@@ -70,7 +70,7 @@ npm run dev
 | 字段 | 必填 | 默认值 | 说明 |
 |------|------|--------|------|
 | `serverUrl` | 是 | — | 知识库 Open API 地址，如 `https://your-server/open-api/` |
-| `appKey` | 是 | — | 全局 API 鉴权密钥，单条 mapping 未单独配置时使用此值 |
+| `appKey` | 否 | — | **玄关开放平台**签发的 Open API 密钥（个人/应用 `appKey`）；可省略或留空。单条 mapping 未单独配置 `appKey` 时使用此值；**通过管理 API 新建/更新 mapping 时，若此处为空则必须在请求体中为该条提供非空 `appKey`**（见 [docs/MANAGEMENT_API.md](./docs/MANAGEMENT_API.md)）。**全局与各 mapping 均无有效密钥时，同步会失败** |
 | `syncDirection` | 否 | `bidirectional` | 全局同步方向：`bidirectional` / `push`（仅上传）/ `pull`（仅下载） |
 | `autoSyncIntervalSec` | 否 | `60` | 自动同步间隔（秒），`0` = 关闭定时同步 |
 | `stateDbPath` | 否 | `./openclaw-sync-state.db` | SQLite 状态库路径 |
@@ -88,12 +88,12 @@ npm run dev
 
 | 字段 | 必填 | 说明 |
 |------|------|------|
-| `mappingId` | 是 | 唯一标识，同一节点内不可重复 |
+| `mappingId` | 是\* | 唯一标识，同一节点内不可重复。\*`POST /mappings` 请求体可省略，由服务端自动生成 |
 | `localRoot` | 是 | 本地绝对目录路径 |
 | `enabled` | 否 | 是否启用此映射，默认 `true` |
-| `appKey` | 否 | 该 mapping 独立使用的 API 密钥，填写后**优先于全局 `appKey`**。多用户场景下每个 mapping 使用不同 appKey，限速器按 appKey 独立计算，互不影响 |
+| `appKey` | 否\* | **玄关开放平台** Open API 密钥；填写后**优先于全局 `appKey`**。\***当根级全局 `appKey` 未配置时，通过管理 API 新建或更新后的本条 mapping 必须带非空 `appKey`**（见 [docs/MANAGEMENT_API.md](./docs/MANAGEMENT_API.md)） |
 | `projectId` | 否 | 知识库空间 ID。不填则自动调用 `getPersonalProjectId` 获取个人空间 |
-| `remoteRootFileId` | 否 | 远端根目录 fileId。填写时零额外 API 调用，启动最快 |
+| `remoteRootFileId` | 否 | 远端根目录 fileId。 |
 | `remoteRootFolderPath` | 否 | 远端根目录路径，如 `"OpenClaw/OutputA"`。**路径在远端不存在时会自动逐级创建**；不填表示同步 projectId 空间根目录 |
 | `filePatterns` | 否 | 匹配文件的 glob 模式，默认 `["**/*.md"]` |
 | `excludePatterns` | 否 | 排除文件的 glob 模式，默认 `["**/_conflict_*", "**/.tmp/**"]` |
@@ -137,7 +137,7 @@ npm run dev
 
 ## HTTP 管理 API
 
-服务启动后，内置 HTTP 管理接口可供运维使用，无需 SSH 进服务器。
+服务启动后，内置 HTTP 管理接口可供运维与自动化使用。**完整契约（参数、返回值、必填/默认、错误码、给 AI 的决策表）**见 **[docs/MANAGEMENT_API.md](./docs/MANAGEMENT_API.md)**；以下仅为速查与常用示例。
 
 ### 接口一览
 
@@ -199,21 +199,6 @@ curl -X POST http://10.0.0.5:9090/sync/user-alice
 
 # 触发所有 mapping 立即同步
 curl -X POST http://10.0.0.5:9090/sync
-```
-
-### `/health` 返回示例
-
-```json
-{
-  "ok": true,
-  "version": "1.0.0",
-  "pid": 12345,
-  "uptime": 3600,
-  "startedAt": "2026-05-11T06:05:00.000Z",
-  "mappingCount": 3,
-  "enabledMappingCount": 2,
-  "nodeVersion": "v20.11.0"
-}
 ```
 
 ### 热重载说明

@@ -1,5 +1,6 @@
 {
   "serverUrl": "https://your-kb-server/open-api/",
+  "_comment_appKey": "全局 appKey 可省略或留空；需与各 mapping 的 appKey 至少其一有值才能调用知识库 API",
   "appKey": "your-app-key-here",
   "syncDirection": "bidirectional",
   "autoSyncIntervalSec": 60,

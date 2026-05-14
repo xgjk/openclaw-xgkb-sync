@@ -202,10 +202,10 @@ export class SyncScheduler {
       : '无（首次全量）';
     console.log(`[Scheduler][${mapping.mappingId}] 模式=${isIncremental ? '增量' : '全量'} lastSyncSince=${sinceStr}`);
 
-    const effectiveAppKey = mapping.appKey ?? this.config.appKey;
+    const effectiveAppKey = (mapping.appKey ?? this.config.appKey ?? '').trim();
     const limiter = this.getLimiter(effectiveAppKey);
     const api = new KbApiClient(this.config.serverUrl, effectiveAppKey, limiter);
-    if (mapping.appKey) {
+    if (mapping.appKey?.trim()) {
       console.log(`[Scheduler][${mapping.mappingId}] 使用 mapping 独立 appKey（身份隔离），独立限速器`);
     }
     const localFs = new LocalFsAdapter(

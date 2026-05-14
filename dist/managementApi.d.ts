@@ -20,12 +20,7 @@ export interface ManagementApiOptions {
 /**
  * HTTP 管理 API 服务
  *
- * 路由：
- *   GET  /health              存活探针，返回版本、uptime、mapping 概况
- *   GET  /status              详细状态，含所有 mapping 的同步情况
- *   POST /sync/:mappingId     手动触发指定 mapping 同步
- *   POST /sync                手动触发所有 mapping 同步
- *   POST /reload              热重载配置文件（无需重启进程）
+ * 路由速览见类内 `start()` 日志。完整契约见仓库 **docs/MANAGEMENT_API.md**（给 AI / 自动化）；appKey 保存规则见 **src/managementApiCredentials.ts**。
  */
 export declare class ManagementApi {
     private readonly opts;

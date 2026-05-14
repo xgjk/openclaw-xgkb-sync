@@ -38,6 +38,7 @@ const http = __importStar(require("http"));
 const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
 const config_1 = require("./config");
+const managementApiCredentials_1 = require("./managementApiCredentials");
 /** 读取 package.json 里的版本号，失败则返回 'unknown' */
 function readVersion() {
     try {
@@ -54,12 +55,7 @@ const VERSION = readVersion();
 /**
  * HTTP 管理 API 服务
  *
- * 路由：
- *   GET  /health              存活探针，返回版本、uptime、mapping 概况
- *   GET  /status              详细状态，含所有 mapping 的同步情况
- *   POST /sync/:mappingId     手动触发指定 mapping 同步
- *   POST /sync                手动触发所有 mapping 同步
- *   POST /reload              热重载配置文件（无需重启进程）
+ * 路由速览见类内 `start()` 日志。完整契约见仓库 **docs/MANAGEMENT_API.md**（给 AI / 自动化）；appKey 保存规则见 **src/managementApiCredentials.ts**。
  */
 class ManagementApi {
     opts;
@@ -255,6 +251,8 @@ class ManagementApi {
         this.sendJson(res, 200, {
             ok: true,
             total: config.mappings.length,
+            /** 根级全局 appKey 是否已配置（非空）。为 false 时，新建/更新 mapping 必须在请求体中带非空 appKey，见 docs/MANAGEMENT_API.md */
+            hasGlobalAppKey: !!(config.appKey && config.appKey.trim()),
             mappings: config.mappings.map((m) => this.mappingSummary(m)),
         });
     }
@@ -266,13 +264,31 @@ class ManagementApi {
         catch (e) {
             return this.sendJson(res, 400, { ok: false, error: `请求体解析失败: ${e instanceof Error ? e.message : String(e)}` });
         }
-        // 校验 mapping 字段
+        if (typeof body !== 'object' || body === null) {
+            return this.sendJson(res, 400, { ok: false, error: '请求体必须是 JSON 对象' });
+        }
+        const bodyObj = { ...body };
+        const existingIds = this.opts.getScheduler().getConfig().mappings.map((m) => m.mappingId);
+        const mid = bodyObj.mappingId;
+        if (typeof mid !== 'string' || !mid.trim()) {
+            bodyObj.mappingId = (0, config_1.generateUniqueMappingId)(existingIds);
+        }
+        // 校验 mapping 字段（配置文件中的条目仍要求 mappingId；此处已为 POST 补全）
         let mapping;
         try {
-            mapping = (0, config_1.validateMapping)(body, 0, '<API 请求>');
+            mapping = (0, config_1.validateMapping)(bodyObj, 0, '<API 请求>');
         }
         catch (e) {
             return this.sendJson(res, 400, { ok: false, error: e instanceof Error ? e.message : String(e) });
+        }
+        const cfg = this.opts.getScheduler().getConfig();
+        const cred = (0, managementApiCredentials_1.getMappingCredentialsViolation)(cfg, mapping);
+        if (cred) {
+            return this.sendJson(res, 400, {
+                ok: false,
+                error: cred.error,
+                errorCode: cred.errorCode,
+            });
         }
         // 写入 config.json
         const writeResult = this.modifyConfigMappings((mappings) => {
@@ -330,13 +346,23 @@ class ManagementApi {
             existingMapping = mappings[idx];
             const merged = { ...existingMapping, ...bodyObj, mappingId };
             mapping = (0, config_1.validateMapping)(merged, 0, '<API 请求>');
+            const cred = (0, managementApiCredentials_1.getMappingCredentialsViolation)(this.opts.getScheduler().getConfig(), mapping);
+            if (cred) {
+                const err = new Error(cred.error);
+                err.errorCode = cred.errorCode;
+                throw err;
+            }
             const updated = [...mappings];
             updated[idx] = mapping;
             return updated;
         });
         if (!writeResult.ok) {
             const status = writeResult.error.includes('未找到') ? 404 : 400;
-            return this.sendJson(res, status, { ok: false, error: writeResult.error });
+            return this.sendJson(res, status, {
+                ok: false,
+                error: writeResult.error,
+                ...(writeResult.errorCode ? { errorCode: writeResult.errorCode } : {}),
+            });
         }
         // 检测实际发生了哪些变化
         const changedFields = Object.keys(bodyObj).filter((k) => JSON.stringify(existingMapping[k]) !== JSON.stringify(mapping[k]));
@@ -411,7 +437,14 @@ class ManagementApi {
             newMappings = modifier(existingMappings);
         }
         catch (e) {
-            return { ok: false, error: e instanceof Error ? e.message : String(e) };
+            const msg = e instanceof Error ? e.message : String(e);
+            const errorCode = e &&
+                typeof e === 'object' &&
+                'errorCode' in e &&
+                typeof e.errorCode === 'string'
+                ? e.errorCode
+                : undefined;
+            return errorCode ? { ok: false, error: msg, errorCode } : { ok: false, error: msg };
         }
         raw.mappings = newMappings;
         const tmpPath = this.opts.configPath + '.tmp';

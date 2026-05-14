@@ -1,0 +1,390 @@
+# HTTP 管理 API 契约说明（给 AI / 自动化调用）
+
+本文描述进程内嵌的 **管理 HTTP 服务** 的全部路由。实现代码位于 `src/managementApi.ts`；**appKey 与密钥相关的业务规则**与校验辅助函数位于 `src/managementApiCredentials.ts`。
+
+- **Base URL**：`http://{managementHost}:{managementPort}`，默认 `http://127.0.0.1:9090`（以 `config.json` 为准）。
+- **字符编码**：请求/响应体均为 **UTF-8 JSON**。
+- **鉴权**：当前版本 **无** HTTP 头鉴权；请仅在可信网络暴露 `managementHost`/`managementPort`。
+- **通用错误体**（`4xx` / `5xx` 且 body 为 JSON 时）：
+
+```json
+{
+  "ok": false,
+  "error": "人类可读的中文错误说明，应原样展示给用户或上游系统",
+  "errorCode": "仅在部分业务错误时出现，见各接口说明"
+}
+```
+
+---
+
+## 全局规则：appKey 与「能否保存 mapping」
+
+以下规则适用于 **`POST /mappings`**（新建）与 **`PUT /mappings/:id`**（更新后合并结果）。文中 **`appKey`** 均指 **玄关开放平台**签发的 Open API 鉴权密钥（个人或应用维度以平台控制台为准）；与字段语义、限速等并列说明见仓库 [README.md](../README.md) **「## 配置参考」**。
+
+1. **有效 appKey**指：经 `trim()` 后长度大于 `0` 的字符串。
+2. **根级全局 appKey**：指当前已加载配置 `config.json` 中根字段 `appKey`（与 `mappings` 数组同级）。未出现、为 `null`、为 `""`、或仅空白，均视为 **未配置全局 appKey**。
+3. **本条 mapping 的 appKey**：指该 mapping 对象上的可选字段 `appKey`。
+4. **最终用于调用知识库 API 的密钥**（「有效密钥」）为：  
+   `mapping.appKey`（若为非空字符串）**否则** `config` 根级 `appKey`。
+5. **保存条件**：在写入 `config.json` 且执行校验时，**必须**存在有效密钥（上一条非空）。否则接口返回 **HTTP 400**，且：
+   - `error`：固定风格的长文案，说明必须配置根级或本条 `appKey`；
+   - `errorCode`：固定为字符串 **`MAPPING_APPKEY_REQUIRED_WHEN_NO_GLOBAL_APPKEY`**。
+
+**给 AI 的决策表**：
+
+| 根级全局 `appKey` 已配置（非空） | 请求体中本条 mapping 的 `appKey` | 是否允许保存 |
+|----------------------------------|-----------------------------------|----------------|
+| 是 | 省略 / 空（则使用全局） | 允许 |
+| 是 | 非空 | 允许（本条优先于全局） |
+| 否 | 非空 | 允许 |
+| 否 | 省略 / 空 | **不允许** → 400 + 上述 `errorCode` |
+
+**如何在不读完整配置文件的情况下判断**：先调用 **`GET /mappings`**，读取响应根字段 **`hasGlobalAppKey`**（布尔值）。若为 `false`，则 **`POST /mappings` 与 `PUT /mappings/:id` 的请求体必须包含非空 `appKey`**（针对被创建/被更新的那条 mapping）。
+
+---
+
+## 数据类型约定
+
+| 类型 | 含义 |
+|------|------|
+| `string` | JSON 字符串 |
+| `number` | JSON 数字 |
+| `boolean` | JSON `true` / `false` |
+| `object` | JSON 对象 |
+| `array` | JSON 数组 |
+| `T \| null` | 允许 JSON `null` |
+| `可选` | 字段可省略；若省略则行为见「默认值」列 |
+
+---
+
+## 1. `GET /health`
+
+**功能**：存活探针；不读磁盘上的 `config.json`，使用**当前内存中**已加载的配置统计 mapping 数量。
+
+| 项目 | 说明 |
+|------|------|
+| 路径 | `/health` |
+| 方法 | `GET` |
+| 请求体 | 无 |
+| 成功码 | `200` |
+
+### 响应字段（`200`，根对象）
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `ok` | `boolean` | 是 | 恒为 `true` |
+| `version` | `string` | 是 | 进程内读取的 npm 包版本 |
+| `pid` | `number` | 是 | 进程号 |
+| `uptime` | `number` | 是 | 管理 HTTP 服务启动至今的秒数 |
+| `startedAt` | `string` | 是 | ISO8601 时间戳 |
+| `mappingCount` | `number` | 是 | 当前配置中 mapping 条数 |
+| `enabledMappingCount` | `number` | 是 | `enabled !== false` 的 mapping 条数 |
+| `nodeVersion` | `string` | 是 | Node.js 版本 |
+
+---
+
+## 2. `GET /status`
+
+**功能**：返回运行状态、配置摘要（**不含**任何 appKey 明文）、各 mapping 的同步运行态与 SQLite 中的上次状态。
+
+| 项目 | 说明 |
+|------|------|
+| 路径 | `/status` |
+| 方法 | `GET` |
+| 请求体 | 无 |
+| 成功码 | `200` |
+
+### 响应根字段（`200`）
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `version` | `string` | 同 `/health` |
+| `pid` | `number` | 同 `/health` |
+| `uptime` | `number` | 同 `/health` |
+| `startedAt` | `string` | 同 `/health` |
+| `nodeVersion` | `string` | 同 `/health` |
+| `config` | `object` | 非敏感配置摘要（无 `appKey`） |
+| `mappings` | `object` | **键**为 `mappingId`，**值**为该 mapping 的状态对象 |
+
+### `config` 子对象字段
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `serverUrl` | `string` | 知识库 API 根地址 |
+| `syncDirection` | `string` | `bidirectional` \| `push` \| `pull` |
+| `autoSyncIntervalSec` | `number` | 自动同步间隔秒 |
+| `maxConcurrentMappings` | `number` \| 省略 | 最大并发 mapping 数 |
+| `maxRequestsPerMinute` | `number` \| 省略 | 每 appKey 限速 |
+| `mappingCount` | `number` | mapping 总数 |
+| `enabledMappingCount` | `number` | 已启用 mapping 数 |
+
+### `mappings[mappingId]` 子对象字段
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `enabled` | `boolean` | 是否启用 |
+| `localRoot` | `string` | 本地根路径 |
+| `remoteRootFolderPath` | `string` \| 省略 | 远端路径 |
+| `syncDirection` | `string` | 本条或回退到全局 |
+| `isSyncing` | `boolean` | 是否正在同步 |
+| `pendingSync` | `boolean` | 是否在排队等待再次同步 |
+| `lastState` | `object` \| 省略 | SQLite 中该 mapping 的状态摘要 |
+
+---
+
+## 3. `GET /mappings`
+
+**功能**：列出所有 mapping 的**非敏感**配置摘要（**永不返回** `appKey` 原文）。
+
+| 项目 | 说明 |
+|------|------|
+| 路径 | `/mappings` |
+| 方法 | `GET` |
+| 请求体 | 无 |
+| 成功码 | `200` |
+
+### 响应根字段（`200`）
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `ok` | `boolean` | 是 | 恒为 `true` |
+| `total` | `number` | 是 | mapping 条数 |
+| `hasGlobalAppKey` | `boolean` | 是 | 根级全局 `appKey` 是否已配置且非空。**`false` 时，后续 `POST`/`PUT` 保存 mapping 必须在请求体中带非空 `appKey`**（见上文全局规则） |
+| `mappings` | `array` | 是 | 每项为 `mappingSummary`（见下表） |
+
+### `mappingSummary` 数组元素字段
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `mappingId` | `string` | 唯一 ID |
+| `enabled` | `boolean` | 是否启用 |
+| `localRoot` | `string` | 本地根路径 |
+| `hasOwnAppKey` | `boolean` | 本条是否单独配置了 `appKey`（不暴露值） |
+| `projectId` | `string` \| 省略 | 空间 ID |
+| `remoteRootFolderPath` | `string` \| 省略 | 远端路径 |
+| `remoteRootFileId` | `string` \| 省略 | 远端根 fileId |
+| `syncDirection` | `string` \| 省略 | 覆盖全局方向 |
+| `filePatterns` | `array` | glob 列表 |
+| `excludePatterns` | `array` | glob 列表 |
+
+---
+
+## 4. `POST /mappings`
+
+**功能**：**新增**一条 mapping：校验 → 写入磁盘 `config.json` → **热重载**使配置立即生效。
+
+| 项目 | 说明 |
+|------|------|
+| 路径 | `/mappings` |
+| 方法 | `POST` |
+| `Content-Type` | 应为 `application/json` |
+| 成功码 | `201` |
+| 失败码 | `400`（校验/业务）、`500`（已写入但重载失败） |
+
+### 请求体（JSON 对象）字段
+
+除另有说明外，语义与 `config.json` 中 `mappings[]` 单条一致，经 `validateMapping` 校验（实现：`src/config.ts`）。
+
+| 字段 | 必填 | 默认值 / 生成规则 | 说明 |
+|------|------|-------------------|------|
+| `mappingId` | **否** | 若省略、为 `null`、非字符串、或 trim 后为空，则服务端生成 **`map-` + 16 字节随机十六进制**，且与现有所有 `mappingId` 不冲突 | 唯一标识 |
+| `localRoot` | **是** | 无 | 本机磁盘上的**绝对路径**（同步根目录）。写法示例见下节 **「localRoot 与 remoteRootFolderPath 示例」** |
+| `enabled` | 否 | `true` | 是否启用 |
+| `appKey` | **条件必填** | 无 | **玄关开放平台**为个人/应用签发的 **Open API `appKey`**（鉴权密钥）。当 `hasGlobalAppKey === false` 时本条 **必填且非空**。与根级 `appKey`、限速等说明以 [README.md](../README.md) 为准，请在该文档中定位 **「## 配置参考」** → **「### 全局字段」**、**「### 每条 Mapping 字段」** |
+| `projectId` | 否 | 无 | 知识库空间 ID；不填则由 Agent 按接口拉取个人空间。说明见 [README.md](../README.md) 同节 **「### 每条 Mapping 字段」** |
+| `remoteRootFileId` | 否 | 无 | 远端根目录在知识库内的 **fileId**。**通过本接口新增 mapping 时，调用方通常无法预先知道该 id**，不建议作为首选；若已知可填以减少启动时解析调用 |
+| `remoteRootFolderPath` | 否 | 无 | 远端根目录在知识库内的**逻辑路径**（见下节）。**新建 mapping 时推荐传入本字段**；路径不存在时服务端会按知识库 API 约定逐级创建。与 `remoteRootFileId` 的组合行为见 [README.md](../README.md) 中带反引号字段名的 **「remoteRootFileId 与 remoteRootFolderPath 组合」** 小节表格 |
+| `filePatterns` | 否 | 省略时使用下方「默认 glob 常量」 | `string[]`，glob 规则与 [README.md](../README.md) **「### 每条 Mapping 字段」** 中 `filePatterns` 说明一致 |
+| `excludePatterns` | 否 | 省略时使用下方「默认 glob 常量」 | `string[]`，同上 |
+| `syncDirection` | 否 | 继承全局 `syncDirection` | `bidirectional` \| `push` \| `pull`；含义见 [README.md](../README.md) **「### 全局字段」** 中 `syncDirection` |
+
+#### 默认 glob 常量（与 `src/constants.ts` 一致，省略 `filePatterns` / `excludePatterns` 时生效）
+
+`filePatterns` 默认值：
+
+```json
+["**/*.md"]
+```
+
+`excludePatterns` 默认值：
+
+```json
+["**/_conflict_*", "**/.tmp/**"]
+```
+
+**`localRoot`（本机绝对路径）**
+
+- 必须为**绝对路径**；相对路径（如 `./data`）无效。
+- **Linux**：单层目录示例 `/srv/openclaw/out`；多层示例 `/home/alice/projects/openclaw/workspace/run-01`。
+- **macOS**：单层 `/Users/alice/OpenClaw`；多层 `/Users/alice/Library/Application Support/OpenClaw/workspace`（路径中含空格时 JSON 内照常写字符串即可）。
+- **Windows**：在 JSON 字符串中**推荐使用正斜杠**（避免反斜杠转义出错）：单层 `"C:/OpenClaw/out"`；多层 `"D:/Company/OpenClaw/TeamA/out"`。若必须使用 Windows 原生反斜杠，请在 JSON 中对每个 `\` 写成 `\\`（例如 `C:\\OpenClaw\\out`）。盘符与目录名以本机实际为准。
+
+**`remoteRootFolderPath`（知识库内逻辑路径）**
+
+- 与客户端操作系统无关，**一律使用正斜杠 `/`** 分段。
+- **单层**（根空间下一级目录名）：`"AgentOutput"`。
+- **多层**（多级目录）：`"OpenClaw/Output/Alice"`、`"团队文档/2026/归档"`（示例仅说明格式；实际目录名以知识库为准）。
+- 与 `remoteRootFileId` 同时填写时的优先级、以及「仅填其一 / 都不填」的行为，**以 [README.md](../README.md) 小节「remoteRootFileId 与 remoteRootFolderPath 组合」中的表格为准**；若与实现有出入，以 `README.md` + 源码为准。
+
+> **与 README 对齐**：`localRoot` 的补充提示见 [README.md](../README.md) **「### macOS 部署」** 下安装步骤中的注释（`# 编辑 config.json：mappings[].localRoot…`）；配置字段表见 **「## 配置参考」**。
+
+### 成功响应（`201`）
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `ok` | `boolean` | `true` |
+| `message` | `string` | 人类可读说明 |
+| `mapping` | `object` | 同 `GET /mappings` 中的 `mappingSummary`，含最终生效的 `mappingId` |
+
+### 失败响应要点
+
+| `errorCode` | 场景 |
+|-------------|------|
+| `MAPPING_APPKEY_REQUIRED_WHEN_NO_GLOBAL_APPKEY` | 全局无有效 `appKey` 且本条也未提供 |
+
+---
+
+## 5. `PUT /mappings/:mappingId`
+
+**功能**：**部分更新**指定 `mappingId` 的配置：与磁盘上现有记录合并 → 校验 → 若有实际变更则写 `config.json` 并热重载。未传的字段保留原值。
+
+| 项目 | 说明 |
+|------|------|
+| 路径 | `/mappings/{mappingId}`，`mappingId` 为 URL 路径段（应 `encodeURIComponent` 若含特殊字符） |
+| 方法 | `PUT` |
+| 请求体 | JSON 对象，**至少包含一个**要修改的字段（否则合并后无变化） |
+| 成功码 | `200`（含「无实际变化跳过重载」）、`404`（找不到该 id） |
+| 失败码 | `400` |
+
+### 请求体特殊规则
+
+| 规则 | 说明 |
+|------|------|
+| `mappingId` | 若请求体包含该字段，**必须**与 URL 中的 `mappingId` **完全一致**，否则 `400` |
+| 清空可选路径字段 | 对 `remoteRootFolderPath`、`remoteRootFileId` 传 `""` 表示清空 |
+
+**远端根**：与 **`POST /mappings`** 相同——调用方通常**不知道** `remoteRootFileId`，应优先维护 **`remoteRootFolderPath`**（知识库内 `/` 分隔逻辑路径）；组合语义仍以 [README.md](../README.md) 小节「remoteRootFileId 与 remoteRootFolderPath 组合」为准。
+
+### 合并后的「有效密钥」校验
+
+合并并 `validateMapping` 之后，对**合并后的整条 mapping** 执行与 `POST /mappings` 相同的 **appKey 全局规则**。不满足则 **`400`**，且带 `errorCode: MAPPING_APPKEY_REQUIRED_WHEN_NO_GLOBAL_APPKEY`。
+
+### 成功响应（`200`，有变更）
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `ok` | `boolean` | `true` |
+| `message` | `string` | 说明 |
+| `changed` | `array` | 实际发生变化的字段名列表 |
+| `warnings` | `array` \| 省略 | 若身份字段变更，提示下次全量对账 |
+| `mapping` | `object` | `mappingSummary` |
+
+### 成功响应（`200`，无变更）
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `ok` | `boolean` | `true` |
+| `message` | `string` | 说明未重载 |
+| `changed` | `array` | 空数组 |
+
+---
+
+## 6. `DELETE /mappings/:mappingId`
+
+**功能**：删除指定 mapping，写盘并热重载。
+
+| 项目 | 说明 |
+|------|------|
+| 路径 | `/mappings/{mappingId}` |
+| 方法 | `DELETE` |
+| 请求体 | 无 |
+| 成功码 | `200` |
+| 失败码 | `404`（不存在）、`500`（已删但重载失败） |
+
+### 成功响应（`200`）
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `ok` | `boolean` | `true` |
+| `message` | `string` | 说明 |
+
+---
+
+## 7. `POST /sync`
+
+**功能**：对当前所有 **`enabled` 为真** 的 mapping **异步**触发一次同步（不等待完成）。
+
+| 项目 | 说明 |
+|------|------|
+| 路径 | `/sync` |
+| 方法 | `POST` |
+| 请求体 | 无 |
+| 成功码 | `200` |
+
+### 成功响应（`200`）
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `ok` | `boolean` | `true` |
+| `message` | `string` | 说明 |
+| `triggered` | `array` | 字符串数组，为已触发同步的 `mappingId` 列表 |
+
+---
+
+## 8. `POST /sync/:mappingId`
+
+**功能**：对**单条** mapping 触发异步同步。
+
+| 项目 | 说明 |
+|------|------|
+| 路径 | `/sync/{mappingId}` |
+| 方法 | `POST` |
+| 请求体 | 无 |
+| 成功码 | `200` |
+| 失败码 | `404`（无此 id）、`400`（`enabled=false`） |
+
+### 成功响应（`200`）
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `ok` | `boolean` | `true` |
+| `message` | `string` | 说明 |
+
+### `404` 响应额外字段
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `availableMappings` | `array` | 当前存在的 `mappingId` 列表 |
+
+---
+
+## 9. `POST /reload`
+
+**功能**：从磁盘**重新读取** `config.json`，重建调度器；**不**重启 HTTP 监听端口。
+
+| 项目 | 说明 |
+|------|------|
+| 路径 | `/reload` |
+| 方法 | `POST` |
+| 请求体 | 无 |
+| 成功码 | `200` |
+| 失败码 | `400`（配置校验失败） |
+
+### 成功响应（`200`）
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `ok` | `boolean` | `true` |
+| `message` | `string` | 说明 |
+| `mappingCount` | `number` | 重载后 mapping 数 |
+| `enabledMappingCount` | `number` | 已启用数 |
+
+---
+
+## AI 操作清单（避免误判）
+
+1. **新增 mapping 前**：`GET /mappings` → 读 `hasGlobalAppKey`。若为 `false`，**必须在** `POST /mappings` 的 JSON 里写 **`appKey`: "<非空>"`**。
+2. **修改 mapping 前**：若打算删掉本条独立 `appKey`（改全局依赖），先确认根级已有全局 `appKey`，否则合并后会触发 **`MAPPING_APPKEY_REQUIRED_WHEN_NO_GLOBAL_APPKEY`**。
+3. **不要**依赖响应里的 `hasOwnAppKey` 推断全局是否有密钥；**仅以** `hasGlobalAppKey` **与**根配置文件为准。
+4. **`mappingId`**：仅在新建时可省略；更新、删除、单路同步的 URL 中 **`mappingId` 始终必填且须与磁盘一致**。
+5. **远端根**：新建或修改时，若不知道知识库内的 `remoteRootFileId`，**请传 `remoteRootFolderPath`**（`/`-分隔逻辑路径）；勿猜测 fileId。组合行为见 [README.md](../README.md) 小节「remoteRootFileId 与 remoteRootFolderPath 组合」。

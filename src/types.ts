@@ -40,7 +40,10 @@ export interface SyncMapping {
 
 export interface SyncConfig {
   serverUrl: string;
-  appKey: string;
+  /**
+   * 全局 API 密钥。可省略或留空；与单条 mapping 的 `appKey` 至少其一有值时才能正常调用知识库 API。
+   */
+  appKey?: string;
   syncDirection: 'bidirectional' | 'push' | 'pull';
   /** 自动同步间隔（秒），0 表示关闭 */
   autoSyncIntervalSec: number;

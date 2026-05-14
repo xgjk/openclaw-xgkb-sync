@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { randomBytes } from 'crypto';
 import { SyncConfig, SyncMapping } from './types';
 import {
   DEFAULT_DB_PATH,
@@ -45,7 +46,10 @@ function validateConfig(raw: unknown, filePath: string): SyncConfig {
 
   // 必填字段
   assertString(obj, 'serverUrl', filePath);
-  assertString(obj, 'appKey', filePath);
+
+  const rawAppKey = obj.appKey;
+  const globalAppKey =
+    typeof rawAppKey === 'string' && rawAppKey.trim() !== '' ? rawAppKey.trim() : undefined;
 
   if (!Array.isArray(obj.mappings)) {
     throw new Error(`配置 "mappings" 必须是数组: ${filePath}`);
@@ -74,7 +78,7 @@ function validateConfig(raw: unknown, filePath: string): SyncConfig {
 
   return {
     serverUrl: obj.serverUrl as string,
-    appKey: obj.appKey as string,
+    ...(globalAppKey !== undefined ? { appKey: globalAppKey } : {}),
     syncDirection: syncDirection as SyncConfig['syncDirection'],
     autoSyncIntervalSec: typeof obj.autoSyncIntervalSec === 'number' ? obj.autoSyncIntervalSec : 60,
     stateDbPath: typeof obj.stateDbPath === 'string' ? obj.stateDbPath : DEFAULT_DB_PATH,
@@ -162,6 +166,18 @@ export function validateMapping(raw: unknown, idx: number, filePath: string): Sy
     excludePatterns,
     syncDirection: mappingSyncDirection,
   };
+}
+
+/**
+ * 为 POST /mappings 生成不与现有列表冲突的 mappingId。
+ */
+export function generateUniqueMappingId(existingIds: readonly string[]): string {
+  const used = new Set(existingIds);
+  for (let n = 0; n < 64; n++) {
+    const id = `map-${randomBytes(8).toString('hex')}`;
+    if (!used.has(id)) return id;
+  }
+  throw new Error('无法自动生成唯一 mappingId，请在请求体中显式指定 mappingId');
 }
 
 function assertString(
