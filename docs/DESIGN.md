@@ -203,18 +203,23 @@ GET    /health              → handleHealth()         读 scheduler.getConfig()
 GET    /status              → handleStatus()         读 scheduler.getStatus() + getConfig()
 GET    /mappings            → handleListMappings()   列出所有 mapping 摘要（appKey 不回显）
 POST   /mappings            → handleCreateMapping()  新增 mapping，写 config.json + reload（请求体可省略 mappingId，自动生成；见下）
-PUT    /mappings/:id        → handleUpdateMapping()  部分合并更新，写 config.json + reload
+PUT    /mappings/:id        → handleUpsertMapping()   upsert（存在则部分更新，不存在则创建），写 config.json + reload
 DELETE /mappings/:id        → handleDeleteMapping()  删除 mapping，写 config.json + reload
 POST   /sync                → handleSyncAll()        遍历 enabled mappings 逐个 triggerMapping()
 POST   /sync/:mappingId     → handleSyncOne()        triggerMapping(mappingId)
 POST   /reload              → handleReload()         调用 onReload() 回调
+GET    /config              → handleGetConfig()      全局配置摘要（无 appKey）
+PUT    /config              → handleUpdateConfig()   部分更新全局配置 + reload
+GET    /                    → serveStaticFile()      管理控制台 index.html
+GET    /static/*             → serveStaticFile()      public/static/ 静态资源
 ```
 
 **`POST /mappings`：** 请求体可为合法 JSON 对象；`mappingId` 可省略或空白，服务端在写入前生成唯一 id。合并后仍经 `validateMapping()` 校验。保存前另经「有效 API 密钥」校验：根级全局 `appKey` 为空时，本条必须带非空 `appKey`，否则 `400` 且 `errorCode=MAPPING_APPKEY_REQUIRED_WHEN_NO_GLOBAL_APPKEY`（详见 [docs/MANAGEMENT_API.md](./docs/MANAGEMENT_API.md)）。
 
-**`PUT /mappings/:id` 合并规则：**
+**`PUT /mappings/:id` upsert 规则：**
 
-- 以现有 mapping 记录为基础，将请求体中的字段逐一覆盖（`{ ...existing, ...body }`）
+- **不存在**：`{ ...body, mappingId: urlId }` 校验后追加，响应 `201`、`created: true`
+- **已存在**：以现有记录为基础合并（`{ ...existing, ...body, mappingId: urlId }`），响应 `200`、`created: false`
 - 请求体中**不包含**的字段 → 保留原值（例如只传 `enabled` 不会清空 `localRoot` 等字段）
 - 请求体中包含且值为空字符串的可选路径字段（`remoteRootFolderPath`、`remoteRootFileId`）→ 视为清空该字段
 - 合并后的对象仍需通过 `validateMapping()` 校验，必填字段（`mappingId`、`localRoot`）由原值兜底

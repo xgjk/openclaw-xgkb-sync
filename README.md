@@ -4,7 +4,97 @@ OpenClaw 节点与玄关知识库（XGKB）文件双向同步 Agent。
 
 不依赖 Obsidian 客户端，直接作为 Node.js 后台服务运行，支持多台 OpenClaw 节点并行同步到同一知识库空间。
 
-> 架构设计、同步流程与可靠性说明详见 [DESIGN.md](./DESIGN.md)。
+> 架构设计、同步流程与可靠性说明详见 [DESIGN.md](./docs/DESIGN.md)。
+
+---
+
+## 给 AI / 部署者（请先读本节）
+
+若你（或你的 AI 助手）首次接触本项目，**按顺序完成下方「从零部署清单」即可独立部署**。本文 + `config.example.json` 已包含部署所需信息；HTTP 接口完整契约见 [docs/MANAGEMENT_API.md](./docs/MANAGEMENT_API.md)。
+
+### 文档导航
+
+| 文档 | 何时阅读 |
+|------|----------|
+| **本文 README.md** | 安装、配置、启动、Web 控制台、生产部署、排错 |
+| [config.example.json](./config.example.json) | 复制为 `config.json` 的配置模板 |
+| [docs/MANAGEMENT_API.md](./docs/MANAGEMENT_API.md) | 用 curl / 脚本 / AI 自动化增删改查 mapping 与全局配置 |
+| [docs/DESIGN.md](./docs/DESIGN.md) | 同步架构、增量策略、可靠性设计（非部署必读） |
+
+### 部署前向用户确认的信息
+
+| 信息 | 说明 | 写入位置 |
+|------|------|----------|
+| 知识库 Open API 地址 | 形如 `https://your-host/open-api/`（注意末尾斜杠） | `serverUrl` |
+| AppKey | 玄关开放平台签发的 Open API 密钥 | 全局 `appKey` **或** 每条 `mappings[].appKey`（至少一处非空） |
+| 本地同步目录 | **绝对路径**，Agent 产出文件所在文件夹 | `mappings[].localRoot` |
+| 远端目录路径 | 知识库内逻辑路径，用 `/` 分隔，如 `OpenClaw/Output` | `mappings[].remoteRootFolderPath`（推荐填写） |
+| 空间 ID（可选） | 不填则自动使用**个人空间** | `mappings[].projectId` |
+
+> **安全**：`config.json` 含密钥，已在 `.gitignore` 中忽略，**勿提交仓库**。分发项目时使用 `config.example.json`。
+
+### 从零部署清单
+
+按顺序执行，每步后用「验证」确认成功再继续：
+
+| 步骤 | 操作 | 验证 |
+|------|------|------|
+| 1 | 确认 Node.js >= 18：`node -v` | 输出版本号且无报错 |
+| 2 | 进入项目目录，安装依赖：`npm install` | `node_modules/` 已生成 |
+| 3 | 创建配置文件（见下方「各平台命令」） | 存在 `config.json` |
+| 4 | 编辑 `config.json`：填 `serverUrl`、密钥、至少 1 条 mapping（`localRoot` 必填） | JSON 可被编辑器正常解析 |
+| 5 | 构建：`npm run build` | 生成 `dist/index.js` |
+| 6 | 启动：`npm start`（或开发模式 `npm run dev`） | 控制台出现 `[OpenClaw Sync] 服务已启动` 与 `[ManagementApi] 已启动` |
+| 7 | 探活 | `GET /health` 返回 200 且 `"ok": true`（见下方 curl 示例） |
+| 8 | **（推荐）** 浏览器打开 `http://127.0.0.1:9090/` | 看到「OpenClaw 同步管理」控制台 |
+| 9 | 在控制台「同步映射」新增/确认 mapping，或编辑 `config.json` 后 `POST /reload` | `GET /mappings` 的 `total` >= 1 |
+| 10 | 触发同步：控制台「全部同步」或 `POST /sync` | `GET /status` 中对应 mapping 出现 `lastState.lastSuccessAt` |
+
+**各平台：创建 config.json**
+
+```bash
+# Linux / macOS
+cp config.example.json config.json
+
+# Windows（CMD）
+copy config.example.json config.json
+
+# Windows（PowerShell）
+Copy-Item config.example.json config.json
+```
+
+**各平台：验证 health（注意 Windows 请用 curl.exe）**
+
+```bash
+curl http://127.0.0.1:9090/health
+# Windows PowerShell 若 curl 报错，改用：
+curl.exe http://127.0.0.1:9090/health
+```
+
+### 部署完成标准
+
+满足以下全部条件即视为部署成功：
+
+1. 进程持续运行，无反复崩溃退出
+2. `GET /health` → `mappingCount >= 1`（至少一条 mapping）
+3. `GET /status` → 目标 mapping 的 `lastState.lastError` 为空，或已有 `lastSuccessAt`
+4. 在本地 `localRoot` 放入测试文件（匹配 `filePatterns`）后触发同步，远端对应目录可见该文件（push/bidirectional 场景）
+
+### 配置 mapping 的两种方式
+
+**方式 A — Web 控制台（推荐，适合人工或非技术用户）**
+
+1. 启动服务后访问 `http://127.0.0.1:9090/`
+2. 在「全局配置」填写 `serverUrl` 等并保存
+3. 在「同步映射」点击「新增映射」，填写本地目录、远端路径、AppKey（若全局未配置）
+4. 保存后自动写入 `config.json` 并热重载，无需重启进程
+
+**方式 B — 直接编辑 config.json**
+
+1. 参考 [config.example.json](./config.example.json) 与下方「配置参考」
+2. 保存文件后执行 `curl -X POST http://127.0.0.1:9090/reload`，或重启进程
+
+新建 mapping 时**若全局无 `appKey`**，必须在 mapping 或 Web 表单中填写非空 `appKey`，否则 API 返回 400（`errorCode: MAPPING_APPKEY_REQUIRED_WHEN_NO_GLOBAL_APPKEY`）。可先 `GET /mappings` 查看 `hasGlobalAppKey`。
 
 ---
 
@@ -14,52 +104,46 @@ OpenClaw 节点与玄关知识库（XGKB）文件双向同步 Agent。
 - **双向同步**：LWW 策略，支持 `bidirectional / push / pull` 三种方向
 - **多 Mapping**：单节点可配置多条本地目录 ↔ 云端目录映射，每条独立配置方向与文件过滤
 - **按用户限速**：每个 `appKey` 独享令牌桶，多用户场景互不干扰
-- **HTTP 管理 API**：内置轻量 HTTP 服务，支持远程查看状态、触发同步、热重载配置
+- **Web 管理控制台**：浏览器访问 `/` 即可可视化增删改查 mapping 与全局配置
+- **HTTP 管理 API**：内置轻量 HTTP 服务，支持远程查看状态、触发同步、热重载配置（供 AI / 脚本调用）
 - **SQLite 状态库**：持久化同步水位与文件状态，无需外部依赖
 
 ---
 
 ## 快速开始
 
-### 1. 安装依赖
+完整步骤见上文 **「从零部署清单」**。以下为常用命令速查：
 
 ```bash
 cd openclaw-xgkb-sync
 npm install
-```
-
-### 2. 配置
-
-```bash
-cp config.example.json config.json
-# 按实际情况修改 config.json
-```
-
-### 3. 构建
-
-```bash
+cp config.example.json config.json   # Windows: copy config.example.json config.json
+# 编辑 config.json
 npm run build
+npm start                            # 生产：读取 ./config.json
 ```
 
-### 4. 运行
-
 ```bash
-# 使用默认 config.json
-npm start
-
 # 指定配置文件
 node dist/index.js --config /path/to/my-config.json
 
-# 同时将日志落盘
+# 日志落盘（路径按系统调整）
 node dist/index.js --config config.json --log-file /var/log/openclaw-xgkb-sync.log
+# 或环境变量：OPENCLAW_SYNC_LOG_FILE=/var/log/openclaw-xgkb-sync.log
 
-# 也可通过环境变量指定日志文件
-export OPENCLAW_SYNC_LOG_FILE=/var/log/openclaw-xgkb-sync.log
-npm start
-
-# 开发模式（无需先 build）
+# 开发模式（改 TS 源码后需重启；无需先 build）
 npm run dev
+npm run dev:config                   # 显式使用 ./config.json
 ```
+
+**npm scripts 说明**
+
+| 命令 | 说明 |
+|------|------|
+| `npm run build` | 编译 TypeScript → `dist/` |
+| `npm start` | 运行 `dist/index.js`（默认 `./config.json`） |
+| `npm run start:config` | 同 `npm start`，显式 `--config config.json` |
+| `npm run dev` | `ts-node` 直接运行源码（开发调试） |
 
 ---
 
@@ -145,6 +229,8 @@ npm run dev
 |------|------|------|
 | `GET` | `/health` | 存活探针，返回版本、PID、uptime、mapping 数量 |
 | `GET` | `/status` | 详细状态：所有 mapping 的同步时间、是否正在同步、上次错误 |
+| `GET` | `/config` | 全局配置摘要（不含 appKey 明文） |
+| `PUT` | `/config` | 部分更新全局配置，自动写入并热重载 |
 | `GET` | `/mappings` | 列出所有 mapping 配置摘要（appKey 字段不回显） |
 | `POST` | `/mappings` | 新增一条 mapping，**自动写入 config.json 并热重载** |
 | `PUT` | `/mappings/:mappingId` | 更新指定 mapping，自动写入并热重载 |
@@ -152,6 +238,26 @@ npm run dev
 | `POST` | `/sync` | 立即触发**所有** mapping 同步 |
 | `POST` | `/sync/:mappingId` | 立即触发**指定** mapping 同步 |
 | `POST` | `/reload` | 手动热重载 `config.json` |
+| `GET` | `/` | **管理控制台**（内置 Web UI，见下文） |
+
+### 管理控制台（Web UI）
+
+服务启动后，在浏览器打开：
+
+```
+http://127.0.0.1:9090/
+```
+
+（若 `managementHost` 为 `0.0.0.0`，本机访问时用 `127.0.0.1` 或实际 IP；端口以 `config.json` 中 `managementPort` 为准。）
+
+控制台提供：
+
+- **同步映射**：列表展示、新增、编辑、删除、单条触发同步
+- **全局配置**：serverUrl、同步方向、自动间隔、限速等（AppKey 不回显，需输入新值才会覆盖）
+- **运行状态**：各 mapping 同步进度、上次成功/错误时间
+- 工具栏：**全部同步**、**重载配置**、**刷新**
+
+> 管理 API 当前无 HTTP 鉴权，请勿在公网暴露；跨机器访问时将 `managementHost` 设为 `0.0.0.0` 并做好防火墙隔离。
 
 ### 常用命令
 
@@ -349,6 +455,91 @@ curl http://127.0.0.1:9090/health
 
 > `config.json` 含密钥，勿提交仓库；生产路径与文件权限按安全规范收紧。
 
+### Windows 部署
+
+与 Linux/macOS 相同，纯 Node.js 进程，**无需 Visual Studio 或 native 编译**。
+
+#### 1. 安装 Node.js
+
+从 [Node.js 官网](https://nodejs.org/) 安装 LTS（>= 18），PowerShell 执行 `node -v` 确认。
+
+#### 2. 安装、配置、运行
+
+```powershell
+cd D:\path\to\openclaw-xgkb-sync
+npm install
+Copy-Item config.example.json config.json
+# 用编辑器修改 config.json（见下方路径说明）
+npm run build
+npm start
+```
+
+**Windows 路径写法（`config.json` 内）**
+
+- `localRoot` 必须为**绝对路径**
+- JSON 中**推荐正斜杠**：`"C:/Users/Alice/.openclaw/workspace/out"`
+- 若用反斜杠，每个 `\` 须写成 `\\`：`"C:\\Users\\Alice\\out"`
+
+**最小可运行 mapping 示例（Windows）**
+
+```json
+{
+  "serverUrl": "https://your-server/open-api/",
+  "appKey": "your-app-key",
+  "syncDirection": "bidirectional",
+  "autoSyncIntervalSec": 120,
+  "managementPort": 9090,
+  "managementHost": "127.0.0.1",
+  "mappings": [
+    {
+      "mappingId": "my-workspace",
+      "enabled": true,
+      "localRoot": "C:/Users/Alice/.openclaw/workspace",
+      "remoteRootFolderPath": "OpenClaw/Alice",
+      "filePatterns": ["**/*.md"]
+    }
+  ]
+}
+```
+
+#### 3. 开机自启（可选）
+
+可用 **任务计划程序** 创建「登录时运行」任务：
+
+- 程序：`C:\Program Files\nodejs\node.exe`（以 `where node` 为准）
+- 参数：`dist\index.js --config D:\path\to\config.json`
+- 起始于：项目根目录 `D:\path\to\openclaw-xgkb-sync`
+
+或使用 [nssm](https://nssm.cc/) 注册为 Windows 服务。
+
+#### 4. 验证与管理
+
+```powershell
+curl.exe http://127.0.0.1:9090/health
+# 浏览器打开管理控制台
+start http://127.0.0.1:9090/
+```
+
+> PowerShell 中 `curl` 默认是 `Invoke-WebRequest` 的别名，HTTP 调试请用 **`curl.exe`**。
+
+---
+
+## 常见问题（排错）
+
+| 现象 | 可能原因 | 处理 |
+|------|----------|------|
+| 启动报「配置文件不存在」 | 未创建 `config.json` | 从 `config.example.json` 复制 |
+| 启动报配置校验失败 | `serverUrl` / `localRoot` 等必填项缺失或格式错误 | 对照「配置参考」与 `config.example.json` |
+| `POST /mappings` 返回 400 + `MAPPING_APPKEY_REQUIRED_WHEN_NO_GLOBAL_APPKEY` | 全局与各 mapping 均无有效 AppKey | 在全局或该条 mapping 填写非空 `appKey` |
+| 同步失败 / `lastError` 含 401 / 鉴权 | AppKey 错误或过期 | 在玄关开放平台核对密钥 |
+| 同步失败 / 限流 429 或 610012 | API 调用过频 | 降低 `maxRequestsPerMinute` 或增大 `autoSyncIntervalSec` |
+| 本地文件未上传 | `enabled: false`、方向为 `pull`、或路径不匹配 `filePatterns` | 检查 mapping 配置与 `filePatterns` |
+| 管理控制台打不开 | 端口被占用、`managementPort: 0`、或防火墙拦截 | 查启动日志端口；本机用 `127.0.0.1` 访问 |
+| 修改 `managementPort` / `managementHost` 不生效 | 这两项需**重启进程**才改变监听 | 停止后重新 `npm start` |
+| PowerShell 下 curl 异常 | 别名冲突 | 使用 `curl.exe` |
+
+**日志位置**：默认仅输出到控制台；可通过 `--log-file` 或 `OPENCLAW_SYNC_LOG_FILE` 落盘（见「生产部署建议」）。
+
 ---
 
 ## 多实例与大规模部署
@@ -374,3 +565,24 @@ curl http://127.0.0.1:9090/health
 
 - Node.js >= 18（使用内置 `fetch`）
 - SQLite 通过 `node-sqlite3-wasm`（WebAssembly）提供，**无需 Visual Studio 或 native 编译工具**
+- 网络可访问 `config.json` 中的 `serverUrl`（知识库 Open API）
+
+## 仓库结构（供 AI 定位代码）
+
+```
+openclaw-xgkb-sync/
+├── config.example.json   # 配置模板（复制为 config.json）
+├── config.json           # 本地配置（gitignore，含密钥）
+├── public/               # Web 管理控制台静态文件
+│   ├── index.html
+│   └── static/
+├── src/
+│   ├── index.ts          # 进程入口
+│   ├── managementApi.ts  # HTTP 管理 API + 静态页面服务
+│   ├── scheduler.ts      # 定时调度
+│   └── syncEngine.ts     # 同步引擎
+├── docs/
+│   ├── MANAGEMENT_API.md # HTTP API 完整契约
+│   └── DESIGN.md         # 架构设计
+└── dist/                 # npm run build 输出（勿手改）
+```

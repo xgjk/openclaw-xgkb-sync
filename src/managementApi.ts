@@ -20,6 +20,29 @@ function readVersion(): string {
 
 const VERSION = readVersion();
 
+/** 静态管理页面目录（与 dist/ 或 src/ 同级的 public/） */
+const PUBLIC_DIR = path.resolve(__dirname, '../public');
+
+/** 可通过 PUT /config 修改的全局字段（managementPort/Host 需重启进程才生效） */
+const EDITABLE_CONFIG_FIELDS = [
+  'serverUrl',
+  'appKey',
+  'syncDirection',
+  'autoSyncIntervalSec',
+  'stateDbPath',
+  'maxConcurrentMappings',
+  'maxRequestsPerMinute',
+  'rateLimitBurst',
+  'rateLimitCooldownSec',
+  'downloadConcurrency',
+  'uploadConcurrency',
+  'startupJitterMaxSec',
+  'managementPort',
+  'managementHost',
+] as const;
+
+type EditableConfigField = (typeof EDITABLE_CONFIG_FIELDS)[number];
+
 export type ReloadResult = { ok: true; config: SyncConfig } | { ok: false; error: string };
 
 export interface ManagementApiOptions {
@@ -69,11 +92,14 @@ export class ManagementApi {
       console.log(`  GET    /status`);
       console.log(`  GET    /mappings`);
       console.log(`  POST   /mappings          新增 mapping`);
-      console.log(`  PUT    /mappings/:id       更新 mapping`);
+      console.log(`  PUT    /mappings/:id       upsert mapping（存在则更新，不存在则创建）`);
       console.log(`  DELETE /mappings/:id       删除 mapping`);
       console.log(`  POST   /sync/:mappingId`);
       console.log(`  POST   /sync  （触发所有）`);
       console.log(`  POST   /reload`);
+      console.log(`  GET    /config`);
+      console.log(`  PUT    /config`);
+      console.log(`  GET    /          管理控制台（静态页面）`);
     });
 
     this.server.on('error', (e) => {
@@ -93,6 +119,17 @@ export class ManagementApi {
     const method = req.method ?? 'GET';
     const url = req.url ?? '/';
     const urlPath = url.split('?')[0];
+
+    // GET / — 管理控制台
+    if (method === 'GET' && (urlPath === '/' || urlPath === '/index.html')) {
+      return this.serveStaticFile(res, 'index.html');
+    }
+
+    // GET /static/*
+    if (method === 'GET' && urlPath.startsWith('/static/')) {
+      const rel = 'static/' + urlPath.slice('/static/'.length);
+      return this.serveStaticFile(res, rel);
+    }
 
     // GET /health
     if (method === 'GET' && urlPath === '/health') {
@@ -120,6 +157,16 @@ export class ManagementApi {
       return this.handleSyncOne(res, decodeURIComponent(syncMatch[1]));
     }
 
+    // GET /config
+    if (method === 'GET' && urlPath === '/config') {
+      return this.handleGetConfig(res);
+    }
+
+    // PUT /config
+    if (method === 'PUT' && urlPath === '/config') {
+      return this.handleUpdateConfig(req, res);
+    }
+
     // GET /mappings
     if (method === 'GET' && urlPath === '/mappings') {
       return this.handleListMappings(res);
@@ -130,10 +177,10 @@ export class ManagementApi {
       return this.handleCreateMapping(req, res);
     }
 
-    // PUT /mappings/:mappingId  （更新）
+    // PUT /mappings/:mappingId  （upsert：存在则更新，不存在则创建）
     const putMatch = urlPath.match(/^\/mappings\/(.+)$/);
     if (method === 'PUT' && putMatch) {
-      return this.handleUpdateMapping(req, res, decodeURIComponent(putMatch[1]));
+      return this.handleUpsertMapping(req, res, decodeURIComponent(putMatch[1]));
     }
 
     // DELETE /mappings/:mappingId  （删除）
@@ -255,6 +302,149 @@ export class ManagementApi {
     this.sendJson(res, 200, { ok: true, message: `已触发同步: ${mappingId}` });
   }
 
+  // ==================== 全局配置 ====================
+
+  private handleGetConfig(res: http.ServerResponse): void {
+    const config = this.opts.getScheduler().getConfig();
+    this.sendJson(res, 200, {
+      ok: true,
+      hasGlobalAppKey: !!(config.appKey && config.appKey.trim()),
+      config: this.globalConfigSummary(config),
+    });
+  }
+
+  private async handleUpdateConfig(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): Promise<void> {
+    let body: unknown;
+    try {
+      body = await this.readBody(req);
+    } catch (e) {
+      return this.sendJson(res, 400, {
+        ok: false,
+        error: `请求体解析失败: ${e instanceof Error ? e.message : String(e)}`,
+      });
+    }
+
+    if (typeof body !== 'object' || body === null) {
+      return this.sendJson(res, 400, { ok: false, error: '请求体必须是 JSON 对象' });
+    }
+
+    const bodyObj = body as Record<string, unknown>;
+    const unknownKeys = Object.keys(bodyObj).filter(
+      (k) => !EDITABLE_CONFIG_FIELDS.includes(k as EditableConfigField),
+    );
+    if (unknownKeys.length > 0) {
+      return this.sendJson(res, 400, {
+        ok: false,
+        error: `不支持的配置字段: ${unknownKeys.join(', ')}`,
+      });
+    }
+
+    if (Object.keys(bodyObj).length === 0) {
+      return this.sendJson(res, 400, { ok: false, error: '请至少提供一个要修改的字段' });
+    }
+
+    const prevConfig = this.opts.getScheduler().getConfig();
+    const requiresRestartFields: string[] = [];
+
+    const writeResult = this.modifyConfigRoot((raw) => {
+      for (const key of EDITABLE_CONFIG_FIELDS) {
+        if (!(key in bodyObj)) continue;
+        const val = bodyObj[key];
+        if (key === 'appKey') {
+          if (val === null || val === '') {
+            delete raw.appKey;
+          } else if (typeof val === 'string') {
+            raw.appKey = val.trim();
+          } else {
+            throw new Error('appKey 必须是字符串或 null');
+          }
+          continue;
+        }
+        if (key === 'serverUrl') {
+          if (typeof val !== 'string' || !val.trim()) {
+            throw new Error('serverUrl 必须是非空字符串');
+          }
+          raw.serverUrl = val.trim();
+          continue;
+        }
+        if (key === 'syncDirection') {
+          if (!['bidirectional', 'push', 'pull'].includes(val as string)) {
+            throw new Error('syncDirection 必须是 bidirectional | push | pull');
+          }
+          raw.syncDirection = val;
+          continue;
+        }
+        if (key === 'managementHost') {
+          if (typeof val !== 'string' || !val.trim()) {
+            throw new Error('managementHost 必须是非空字符串');
+          }
+          if (val !== prevConfig.managementHost) requiresRestartFields.push('managementHost');
+          raw.managementHost = val.trim();
+          continue;
+        }
+        if (key === 'managementPort') {
+          if (typeof val !== 'number' || !Number.isInteger(val) || val < 0) {
+            throw new Error('managementPort 必须是非负整数');
+          }
+          if (val !== prevConfig.managementPort) requiresRestartFields.push('managementPort');
+          raw.managementPort = val;
+          continue;
+        }
+        if (
+          key === 'autoSyncIntervalSec' ||
+          key === 'maxConcurrentMappings' ||
+          key === 'maxRequestsPerMinute' ||
+          key === 'rateLimitBurst' ||
+          key === 'rateLimitCooldownSec' ||
+          key === 'downloadConcurrency' ||
+          key === 'uploadConcurrency' ||
+          key === 'startupJitterMaxSec'
+        ) {
+          if (typeof val !== 'number' || val < 0) {
+            throw new Error(`${key} 必须是非负数`);
+          }
+          raw[key] = val;
+          continue;
+        }
+        if (key === 'stateDbPath') {
+          if (typeof val !== 'string' || !val.trim()) {
+            throw new Error('stateDbPath 必须是非空字符串');
+          }
+          raw.stateDbPath = val.trim();
+        }
+      }
+      return raw;
+    });
+
+    if (!writeResult.ok) {
+      return this.sendJson(res, 400, { ok: false, error: writeResult.error });
+    }
+
+    const reloadResult = this.opts.onReload();
+    if (!reloadResult.ok) {
+      return this.sendJson(res, 500, {
+        ok: false,
+        error: `配置已写入但重载失败: ${reloadResult.error}`,
+      });
+    }
+
+    console.log('[ManagementApi] 全局配置已更新');
+    this.sendJson(res, 200, {
+      ok: true,
+      message: '全局配置已更新并生效',
+      hasGlobalAppKey: !!(reloadResult.config.appKey && reloadResult.config.appKey.trim()),
+      config: this.globalConfigSummary(reloadResult.config),
+      ...(requiresRestartFields.length > 0 && {
+        warnings: [
+          `字段 [${requiresRestartFields.join(', ')}] 已写入 config.json，但需重启进程后才会生效`,
+        ],
+      }),
+    });
+  }
+
   // ==================== Mapping CRUD ====================
 
   private handleListMappings(res: http.ServerResponse): void {
@@ -333,7 +523,8 @@ export class ManagementApi {
     });
   }
 
-  private async handleUpdateMapping(
+  /** PUT /mappings/:mappingId — 存在则部分更新，不存在则按请求体创建（upsert） */
+  private async handleUpsertMapping(
     req: http.IncomingMessage,
     res: http.ServerResponse,
     mappingId: string,
@@ -349,7 +540,6 @@ export class ManagementApi {
       return this.sendJson(res, 400, { ok: false, error: '请求体必须是 JSON 对象' });
     }
 
-    // 请求体中若携带了 mappingId，必须与 URL 一致
     const bodyObj = body as Record<string, unknown>;
     if ('mappingId' in bodyObj && bodyObj.mappingId !== mappingId) {
       return this.sendJson(res, 400, {
@@ -358,26 +548,38 @@ export class ManagementApi {
       });
     }
 
-    // 身份字段：这些字段定义了"同步什么"，改变后旧的 SQLite 状态全部作废
     const IDENTITY_FIELDS: (keyof SyncMapping)[] = [
       'localRoot', 'remoteRootFolderPath', 'remoteRootFileId', 'projectId', 'appKey',
     ];
 
     let mapping!: SyncMapping;
     let existingMapping: SyncMapping | undefined;
+    let created = false;
 
     const writeResult = this.modifyConfigMappings((mappings) => {
       const idx = mappings.findIndex((m) => m.mappingId === mappingId);
+      const cfg = this.opts.getScheduler().getConfig();
+
       if (idx === -1) {
-        throw new Error(`未找到 mapping "${mappingId}"，如需新增请使用 POST /mappings`);
+        created = true;
+        const merged: Record<string, unknown> = { ...bodyObj, mappingId };
+        mapping = validateMapping(merged, 0, '<API 请求>');
+
+        const cred = getMappingCredentialsViolation(cfg, mapping);
+        if (cred) {
+          const err = new Error(cred.error) as Error & { errorCode: string };
+          err.errorCode = cred.errorCode;
+          throw err;
+        }
+
+        return [...mappings, mapping];
       }
 
-      // 部分合并：以现有记录为基础，只覆盖请求体中显式提供的字段
       existingMapping = mappings[idx];
       const merged: Record<string, unknown> = { ...existingMapping, ...bodyObj, mappingId };
       mapping = validateMapping(merged, 0, '<API 请求>');
 
-      const cred = getMappingCredentialsViolation(this.opts.getScheduler().getConfig(), mapping);
+      const cred = getMappingCredentialsViolation(cfg, mapping);
       if (cred) {
         const err = new Error(cred.error) as Error & { errorCode: string };
         err.errorCode = cred.errorCode;
@@ -390,30 +592,41 @@ export class ManagementApi {
     });
 
     if (!writeResult.ok) {
-      const status = writeResult.error.includes('未找到') ? 404 : 400;
-      return this.sendJson(res, status, {
+      return this.sendJson(res, 400, {
         ok: false,
         error: writeResult.error,
         ...(writeResult.errorCode ? { errorCode: writeResult.errorCode } : {}),
       });
     }
 
-    // 检测实际发生了哪些变化
+    if (created) {
+      const reloadResult = this.opts.onReload();
+      if (!reloadResult.ok) {
+        return this.sendJson(res, 500, { ok: false, error: `mapping 已写入但重载失败: ${reloadResult.error}` });
+      }
+
+      console.log(`[ManagementApi] upsert 新建 mapping: ${mappingId}`);
+      return this.sendJson(res, 201, {
+        ok: true,
+        created: true,
+        message: `mapping "${mappingId}" 已创建并生效`,
+        mapping: this.mappingSummary(mapping),
+      });
+    }
+
     const changedFields = (Object.keys(bodyObj) as (keyof SyncMapping)[]).filter(
       (k) => JSON.stringify(existingMapping![k]) !== JSON.stringify(mapping[k]),
     );
 
-    // 无实际变化：直接返回，不触发 reload
     if (changedFields.length === 0) {
-      // 回滚刚才写入的文件（内容未变，但避免无谓的 mtime 更新）
       return this.sendJson(res, 200, {
         ok: true,
+        created: false,
         message: `mapping "${mappingId}" 无字段发生实际变化，跳过重载`,
         changed: [],
       });
     }
 
-    // 身份字段有变化：在旧 scheduler（DB 连接仍开着）上重置同步状态
     const changedIdentityFields = changedFields.filter((f) => IDENTITY_FIELDS.includes(f));
     if (changedIdentityFields.length > 0) {
       this.opts.getScheduler().resetMappingState(mappingId);
@@ -427,9 +640,10 @@ export class ManagementApi {
       return this.sendJson(res, 500, { ok: false, error: `mapping 已写入但重载失败: ${reloadResult.error}` });
     }
 
-    console.log(`[ManagementApi] 更新 mapping: ${mappingId}，变更字段: [${changedFields.join(', ')}]`);
+    console.log(`[ManagementApi] upsert 更新 mapping: ${mappingId}，变更字段: [${changedFields.join(', ')}]`);
     this.sendJson(res, 200, {
       ok: true,
+      created: false,
       message: `mapping "${mappingId}" 已更新并生效`,
       changed: changedFields,
       ...(changedIdentityFields.length > 0 && {
@@ -465,6 +679,28 @@ export class ManagementApi {
   // ==================== config.json 读写工具 ====================
 
   /**
+   * 原子修改 config.json 根对象字段。
+   */
+  private modifyConfigRoot(
+    modifier: (raw: Record<string, unknown>) => Record<string, unknown>,
+  ): { ok: true } | { ok: false; error: string } {
+    let raw: Record<string, unknown>;
+    try {
+      raw = JSON.parse(fs.readFileSync(this.opts.configPath, 'utf-8')) as Record<string, unknown>;
+    } catch (e) {
+      return { ok: false, error: `读取 config.json 失败: ${e instanceof Error ? e.message : String(e)}` };
+    }
+
+    try {
+      raw = modifier(raw);
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+
+    return this.writeConfigRaw(raw);
+  }
+
+  /**
    * 原子修改 config.json 中的 mappings 数组。
    * 先写临时文件再重命名，防止写入中断导致配置损坏。
    */
@@ -498,7 +734,10 @@ export class ManagementApi {
     }
 
     raw.mappings = newMappings;
+    return this.writeConfigRaw(raw);
+  }
 
+  private writeConfigRaw(raw: Record<string, unknown>): { ok: true } | { ok: false; error: string } {
     const tmpPath = this.opts.configPath + '.tmp';
     try {
       fs.writeFileSync(tmpPath, JSON.stringify(raw, null, 2) + '\n', 'utf-8');
@@ -507,7 +746,6 @@ export class ManagementApi {
       try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
       return { ok: false, error: `写入 config.json 失败: ${e instanceof Error ? e.message : String(e)}` };
     }
-
     return { ok: true };
   }
 
@@ -544,6 +782,62 @@ export class ManagementApi {
   }
 
   // ==================== 工具方法 ====================
+
+  /** 非敏感全局配置摘要（不含 appKey 明文） */
+  private globalConfigSummary(config: SyncConfig): Record<string, unknown> {
+    return {
+      serverUrl: config.serverUrl,
+      syncDirection: config.syncDirection,
+      autoSyncIntervalSec: config.autoSyncIntervalSec,
+      stateDbPath: config.stateDbPath,
+      maxConcurrentMappings: config.maxConcurrentMappings,
+      maxRequestsPerMinute: config.maxRequestsPerMinute,
+      rateLimitBurst: config.rateLimitBurst,
+      rateLimitCooldownSec: config.rateLimitCooldownSec,
+      downloadConcurrency: config.downloadConcurrency,
+      uploadConcurrency: config.uploadConcurrency,
+      startupJitterMaxSec: config.startupJitterMaxSec,
+      managementPort: config.managementPort,
+      managementHost: config.managementHost,
+    };
+  }
+
+  private serveStaticFile(res: http.ServerResponse, relativePath: string): void {
+    const safe = path.normalize(relativePath).replace(/^(\.\.(\/|\\|$))+/, '');
+    if (safe.startsWith('..') || path.isAbsolute(safe)) {
+      return this.sendJson(res, 400, { ok: false, error: '非法路径' });
+    }
+
+    const filePath = path.resolve(PUBLIC_DIR, safe);
+    const publicRoot = path.resolve(PUBLIC_DIR);
+    if (!filePath.startsWith(publicRoot + path.sep) && filePath !== publicRoot) {
+      return this.sendJson(res, 400, { ok: false, error: '非法路径' });
+    }
+
+    if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+      return this.sendJson(res, 404, { ok: false, error: '文件不存在' });
+    }
+
+    const ext = path.extname(filePath).toLowerCase();
+    const mimeTypes: Record<string, string> = {
+      '.html': 'text/html; charset=utf-8',
+      '.css': 'text/css; charset=utf-8',
+      '.js': 'application/javascript; charset=utf-8',
+      '.svg': 'image/svg+xml',
+      '.ico': 'image/x-icon',
+      '.png': 'image/png',
+      '.woff2': 'font/woff2',
+    };
+
+    const contentType = mimeTypes[ext] ?? 'application/octet-stream';
+    const data = fs.readFileSync(filePath);
+    res.writeHead(200, {
+      'Content-Type': contentType,
+      'Content-Length': data.length,
+      'Cache-Control': ext === '.html' ? 'no-cache' : 'public, max-age=3600',
+    });
+    res.end(data);
+  }
 
   private sendJson(res: http.ServerResponse, status: number, body: unknown): void {
     const json = JSON.stringify(body, null, 2);

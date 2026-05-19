@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OpenClaw 同步管理</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="header">
+      <div class="header-main">
+        <h1>OpenClaw 同步管理</h1>
+        <p class="subtitle">玄关知识库文件同步服务控制台</p>
+      </div>
+      <div class="header-status" id="healthBadge">
+        <span class="dot"></span>
+        <span class="label">加载中…</span>
+      </div>
+    </header>
+
+    <div class="toolbar">
+      <div class="toolbar-left">
+        <button type="button" class="btn btn-secondary" id="btnReload">重载配置</button>
+        <button type="button" class="btn btn-primary" id="btnSyncAll">全部同步</button>
+      </div>
+      <div class="toolbar-right">
+        <span class="meta" id="metaInfo">—</span>
+        <button type="button" class="btn btn-ghost" id="btnRefresh">刷新</button>
+      </div>
+    </div>
+
+    <div class="toast-container" id="toastContainer"></div>
+
+    <nav class="tabs">
+      <button type="button" class="tab active" data-tab="mappings">同步映射</button>
+      <button type="button" class="tab" data-tab="global">全局配置</button>
+      <button type="button" class="tab" data-tab="status">运行状态</button>
+    </nav>
+
+    <!-- 同步映射 -->
+    <section class="panel active" id="panel-mappings">
+      <div class="panel-head">
+        <h2>同步映射</h2>
+        <button type="button" class="btn btn-primary" id="btnAddMapping">新增映射</button>
+      </div>
+      <div class="table-wrap">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>状态</th>
+              <th>本地目录</th>
+              <th>远端路径</th>
+              <th>方向</th>
+              <th>同步</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="mappingsBody">
+            <tr><td colspan="7" class="empty">加载中…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 全局配置 -->
+    <section class="panel" id="panel-global">
+      <div class="panel-head">
+        <h2>全局配置</h2>
+        <button type="button" class="btn btn-primary" id="btnSaveGlobal">保存配置</button>
+      </div>
+      <form class="form-grid" id="globalForm">
+        <label>
+          <span>知识库 API 地址 <em>*</em></span>
+          <input type="url" name="serverUrl" required placeholder="https://example.com/open-api/" />
+        </label>
+        <label>
+          <span>全局 AppKey</span>
+          <input type="password" name="appKey" placeholder="留空表示不修改；输入新值覆盖" autocomplete="off" />
+          <small id="globalAppKeyHint">—</small>
+        </label>
+        <label>
+          <span>默认同步方向</span>
+          <select name="syncDirection">
+            <option value="bidirectional">双向 (bidirectional)</option>
+            <option value="push">仅推送 (push)</option>
+            <option value="pull">仅拉取 (pull)</option>
+          </select>
+        </label>
+        <label>
+          <span>自动同步间隔（秒）</span>
+          <input type="number" name="autoSyncIntervalSec" min="0" step="1" />
+          <small>0 表示关闭自动同步</small>
+        </label>
+        <label>
+          <span>最大并发映射数</span>
+          <input type="number" name="maxConcurrentMappings" min="1" step="1" />
+        </label>
+        <label>
+          <span>API 限速（次/分钟）</span>
+          <input type="number" name="maxRequestsPerMinute" min="1" step="1" />
+        </label>
+        <label>
+          <span>状态库路径</span>
+          <input type="text" name="stateDbPath" />
+        </label>
+        <label>
+          <span>下载并发数</span>
+          <input type="number" name="downloadConcurrency" min="1" step="1" />
+        </label>
+        <label>
+          <span>上传并发数</span>
+          <input type="number" name="uploadConcurrency" min="1" step="1" />
+        </label>
+        <label>
+          <span>管理 API 端口</span>
+          <input type="number" name="managementPort" min="0" step="1" />
+          <small>修改后需重启进程</small>
+        </label>
+        <label>
+          <span>管理 API 监听地址</span>
+          <input type="text" name="managementHost" placeholder="127.0.0.1 或 0.0.0.0" />
+          <small>修改后需重启进程</small>
+        </label>
+      </form>
+    </section>
+
+    <!-- 运行状态 -->
+    <section class="panel" id="panel-status">
+      <div class="panel-head">
+        <h2>运行状态</h2>
+      </div>
+      <div class="status-grid" id="statusGrid"></div>
+    </section>
+  </div>
+
+  <!-- 映射编辑弹窗 -->
+  <dialog class="modal" id="mappingModal">
+    <form method="dialog" id="mappingForm">
+      <div class="modal-header">
+        <h3 id="mappingModalTitle">编辑映射</h3>
+        <button type="button" class="btn-icon" id="btnCloseModal" aria-label="关闭">×</button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" name="mode" value="edit" />
+        <label>
+          <span>Mapping ID</span>
+          <input type="text" name="mappingId" id="fieldMappingId" />
+          <small>新建时可留空，服务端自动生成</small>
+        </label>
+        <label class="checkbox-row">
+          <input type="checkbox" name="enabled" checked />
+          <span>启用此映射</span>
+        </label>
+        <label>
+          <span>本地根目录 <em>*</em></span>
+          <input type="text" name="localRoot" required placeholder="C:/OpenClaw/out 或 /home/user/out" />
+        </label>
+        <label>
+          <span>AppKey（可选）</span>
+          <input type="password" name="appKey" placeholder="留空则使用全局 AppKey" autocomplete="off" />
+        </label>
+        <label>
+          <span>空间 ID (projectId)</span>
+          <input type="text" name="projectId" placeholder="可选，默认个人空间" />
+        </label>
+        <label>
+          <span>远端根路径</span>
+          <input type="text" name="remoteRootFolderPath" placeholder="OpenClaw/Output/Alice" />
+        </label>
+        <label>
+          <span>远端根 FileId</span>
+          <input type="text" name="remoteRootFileId" placeholder="通常留空，优先使用路径" />
+        </label>
+        <label>
+          <span>同步方向</span>
+          <select name="syncDirection">
+            <option value="">继承全局</option>
+            <option value="bidirectional">双向</option>
+            <option value="push">仅推送</option>
+            <option value="pull">仅拉取</option>
+          </select>
+        </label>
+        <label>
+          <span>文件匹配 (filePatterns)</span>
+          <input type="text" name="filePatterns" placeholder='["**/*.md"]' />
+          <small>JSON 数组，留空使用默认</small>
+        </label>
+        <label>
+          <span>排除规则 (excludePatterns)</span>
+          <input type="text" name="excludePatterns" placeholder='["**/_conflict_*"]' />
+        </label>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" id="btnCancelModal">取消</button>
+        <button type="submit" class="btn btn-primary">保存</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

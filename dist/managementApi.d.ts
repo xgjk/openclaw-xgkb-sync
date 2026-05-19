@@ -35,19 +35,30 @@ export declare class ManagementApi {
     private handleReload;
     private handleSyncAll;
     private handleSyncOne;
+    private handleGetConfig;
+    private handleUpdateConfig;
     private handleListMappings;
     private handleCreateMapping;
-    private handleUpdateMapping;
+    /** PUT /mappings/:mappingId — 存在则部分更新，不存在则按请求体创建（upsert） */
+    private handleUpsertMapping;
     private handleDeleteMapping;
+    /**
+     * 原子修改 config.json 根对象字段。
+     */
+    private modifyConfigRoot;
     /**
      * 原子修改 config.json 中的 mappings 数组。
      * 先写临时文件再重命名，防止写入中断导致配置损坏。
      */
     private modifyConfigMappings;
+    private writeConfigRaw;
     /** 解析 HTTP 请求体为 JSON 对象 */
     private readBody;
     /** 隐藏 appKey 敏感字段的 mapping 摘要 */
     private mappingSummary;
+    /** 非敏感全局配置摘要（不含 appKey 明文） */
+    private globalConfigSummary;
+    private serveStaticFile;
     private sendJson;
 }
 //# sourceMappingURL=managementApi.d.ts.map

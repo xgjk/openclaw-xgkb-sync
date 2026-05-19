@@ -15,6 +15,9 @@
   "uploadConcurrency": 3,
   "startupJitterMaxSec": 20,
 
+  "managementPort": 9090,
+  "managementHost": "127.0.0.1",
+
   "mappings": [
     {
       "_comment": "极简配置：仅填 projectId，同步该空间根目录下所有 .md 文件",

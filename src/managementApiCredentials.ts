@@ -30,7 +30,7 @@ export function getMappingCredentialsViolation(
       '无法保存 mapping：根级全局 appKey 未设置或为空（未注册全局密钥），且本条 mapping 也未提供非空的 appKey。' +
       '请二选一：① 在 config.json 根级配置非空字符串 appKey；' +
       '② 在本次 HTTP 请求体 JSON 中为该条 mapping 设置非空字符串字段 appKey。' +
-      '（适用：POST /mappings 新建、PUT /mappings/:id 更新后合并结果。）',
+      '（适用：POST /mappings 新建、PUT /mappings/:id upsert 后合并结果。）',
     errorCode: ERROR_CODE_MAPPING_APPKEY_REQUIRED,
   };
 }

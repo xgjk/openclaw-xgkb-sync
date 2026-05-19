@@ -246,15 +246,18 @@
 
 ## 5. `PUT /mappings/:mappingId`
 
-**功能**：**部分更新**指定 `mappingId` 的配置：与磁盘上现有记录合并 → 校验 → 若有实际变更则写 `config.json` 并热重载。未传的字段保留原值。
+**功能**：**Upsert**（存在则更新，不存在则创建）。URL 中的 `mappingId` 为唯一键。
+
+- **已存在**：与磁盘上现有记录**部分合并**（未传字段保留原值）→ 校验 → 若有实际变更则写 `config.json` 并热重载。
+- **不存在**：将 URL 中的 `mappingId` 与请求体合并为**新建**条目（语义等同带固定 id 的 `POST /mappings`）→ 校验 → 写盘并热重载。
 
 | 项目 | 说明 |
 |------|------|
 | 路径 | `/mappings/{mappingId}`，`mappingId` 为 URL 路径段（应 `encodeURIComponent` 若含特殊字符） |
 | 方法 | `PUT` |
-| 请求体 | JSON 对象，**至少包含一个**要修改的字段（否则合并后无变化） |
-| 成功码 | `200`（含「无实际变化跳过重载」）、`404`（找不到该 id） |
-| 失败码 | `400` |
+| 请求体 | JSON 对象。更新时至少包含一个要修改的字段；**新建**时须含 `validateMapping` 要求的必填字段（至少 `localRoot` 等非空字符串，见 `POST /mappings` 字段表） |
+| 成功码 | `201`（新建）、`200`（更新或有/无实际变化） |
+| 失败码 | `400`、`500`（已写盘但重载失败） |
 
 ### 请求体特殊规则
 
@@ -269,21 +272,32 @@
 
 合并并 `validateMapping` 之后，对**合并后的整条 mapping** 执行与 `POST /mappings` 相同的 **appKey 全局规则**。不满足则 **`400`**，且带 `errorCode: MAPPING_APPKEY_REQUIRED_WHEN_NO_GLOBAL_APPKEY`。
 
-### 成功响应（`200`，有变更）
+### 成功响应（`201`，新建）
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `ok` | `boolean` | `true` |
+| `created` | `boolean` | `true` |
+| `message` | `string` | 说明 |
+| `mapping` | `object` | `mappingSummary` |
+
+### 成功响应（`200`，更新且有变更）
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `ok` | `boolean` | `true` |
+| `created` | `boolean` | `false` |
 | `message` | `string` | 说明 |
 | `changed` | `array` | 实际发生变化的字段名列表 |
 | `warnings` | `array` \| 省略 | 若身份字段变更，提示下次全量对账 |
 | `mapping` | `object` | `mappingSummary` |
 
-### 成功响应（`200`，无变更）
+### 成功响应（`200`，更新但无变更）
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `ok` | `boolean` | `true` |
+| `created` | `boolean` | `false` |
 | `message` | `string` | 说明未重载 |
 | `changed` | `array` | 空数组 |
 
@@ -381,10 +395,96 @@
 
 ---
 
+## 10. `GET /config`
+
+**功能**：读取当前全局配置摘要（**不含** `appKey` 明文）。
+
+| 项目 | 说明 |
+|------|------|
+| 路径 | `/config` |
+| 方法 | `GET` |
+| 请求体 | 无 |
+| 成功码 | `200` |
+
+### 响应根字段（`200`）
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `ok` | `boolean` | 恒为 `true` |
+| `hasGlobalAppKey` | `boolean` | 根级全局 `appKey` 是否已配置 |
+| `config` | `object` | 非敏感全局配置（见下表） |
+
+### `config` 子对象字段
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `serverUrl` | `string` | 知识库 API 根地址 |
+| `syncDirection` | `string` | 默认同步方向 |
+| `autoSyncIntervalSec` | `number` | 自动同步间隔秒 |
+| `stateDbPath` | `string` | SQLite 状态库路径 |
+| `maxConcurrentMappings` | `number` | 最大并发 mapping 数 |
+| `maxRequestsPerMinute` | `number` | API 限速 |
+| `rateLimitBurst` | `number` | 令牌桶突发容量 |
+| `rateLimitCooldownSec` | `number` | 429 冷却秒数 |
+| `downloadConcurrency` | `number` | 下载并发 |
+| `uploadConcurrency` | `number` | 上传并发 |
+| `startupJitterMaxSec` | `number` | 启动抖动上限 |
+| `managementPort` | `number` | 管理 API 端口 |
+| `managementHost` | `string` | 管理 API 监听地址 |
+
+---
+
+## 11. `PUT /config`
+
+**功能**：部分更新全局配置，写入 `config.json` 并热重载。
+
+| 项目 | 说明 |
+|------|------|
+| 路径 | `/config` |
+| 方法 | `PUT` |
+| `Content-Type` | 应为 `application/json` |
+| 成功码 | `200` |
+| 失败码 | `400`、`500`（已写入但重载失败） |
+
+### 请求体（JSON 对象，至少一个字段）
+
+可修改字段：`serverUrl`、`appKey`（传空字符串或 `null` 清除）、`syncDirection`、`autoSyncIntervalSec`、`stateDbPath`、`maxConcurrentMappings`、`maxRequestsPerMinute`、`rateLimitBurst`、`rateLimitCooldownSec`、`downloadConcurrency`、`uploadConcurrency`、`startupJitterMaxSec`、`managementPort`、`managementHost`。
+
+> **注意**：`managementPort` 与 `managementHost` 写入磁盘后**需重启进程**才会改变 HTTP 监听；响应中可能带 `warnings` 提示。
+
+### 成功响应（`200`）
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `ok` | `boolean` | `true` |
+| `message` | `string` | 说明 |
+| `hasGlobalAppKey` | `boolean` | 更新后是否仍有全局 appKey |
+| `config` | `object` | 同 `GET /config` |
+| `warnings` | `array` \| 省略 | 需重启才生效的字段提示 |
+
+---
+
+## 12. 管理控制台（静态页面）
+
+| 项目 | 说明 |
+|------|------|
+| 路径 | `/` 或 `/index.html` |
+| 方法 | `GET` |
+| 静态资源 | `/static/*`（CSS / JS） |
+
+浏览器访问 `http://{managementHost}:{managementPort}/` 即可打开内置管理控制台，支持：
+
+- 查看服务健康与运行状态
+- 全局配置的查看与保存
+- 同步映射的增删改查、单条/全部触发同步
+- 手动重载配置
+
+---
+
 ## AI 操作清单（避免误判）
 
 1. **新增 mapping 前**：`GET /mappings` → 读 `hasGlobalAppKey`。若为 `false`，**必须在** `POST /mappings` 的 JSON 里写 **`appKey`: "<非空>"`**。
 2. **修改 mapping 前**：若打算删掉本条独立 `appKey`（改全局依赖），先确认根级已有全局 `appKey`，否则合并后会触发 **`MAPPING_APPKEY_REQUIRED_WHEN_NO_GLOBAL_APPKEY`**。
 3. **不要**依赖响应里的 `hasOwnAppKey` 推断全局是否有密钥；**仅以** `hasGlobalAppKey` **与**根配置文件为准。
-4. **`mappingId`**：仅在新建时可省略；更新、删除、单路同步的 URL 中 **`mappingId` 始终必填且须与磁盘一致**。
+4. **`mappingId`**：`POST /mappings` 新建时可省略（服务端自动生成）；**`PUT /mappings/:id` 的 upsert、删除、单路同步** 须在 URL 中给出确定的 `mappingId`（不存在时 PUT 会创建该 id）。
 5. **远端根**：新建或修改时，若不知道知识库内的 `remoteRootFileId`，**请传 `remoteRootFolderPath`**（`/`-分隔逻辑路径）；勿猜测 fileId。组合行为见 [README.md](../README.md) 小节「remoteRootFileId 与 remoteRootFolderPath 组合」。
