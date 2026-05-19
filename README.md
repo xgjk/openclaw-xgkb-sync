@@ -41,8 +41,9 @@ OpenClaw 节点与玄关知识库（XGKB）文件双向同步 Agent。
 |------|------|------|
 | 1 | 确认 Node.js >= 18：`node -v` | 输出版本号且无报错 |
 | 2 | 进入项目目录，安装依赖：`npm install` | `node_modules/` 已生成 |
-| 3 | 创建配置文件（见下方「各平台命令」） | 存在 `config.json` |
-| 4 | 编辑 `config.json`：填 `serverUrl`、密钥、至少 1 条 mapping（`localRoot` 必填） | JSON 可被编辑器正常解析 |
+| 3 | 创建配置文件（见下方「各平台命令」）；**若省略此步**，首次启动会自动生成默认 `config.json` | 存在 `config.json`（可仅含默认字段与空 `mappings`） |
+| | 若 `config.json` 为 `{}`、内容不完整或 JSON 损坏，启动时也会**自动合并/重置为默认配置**（不阻止启动） | |
+| 4 | 编辑 `config.json`：填密钥、至少 1 条 mapping（`localRoot` 必填）；`serverUrl` 可省略（默认生产地址） | JSON 可被编辑器正常解析 |
 | 5 | 构建：`npm run build` | 生成 `dist/index.js` |
 | 6 | 启动：`npm start`（或开发模式 `npm run dev`） | 控制台出现 `[OpenClaw Sync] 服务已启动` 与 `[ManagementApi] 已启动` |
 | 7 | 探活 | `GET /health` 返回 200 且 `"ok": true`（见下方 curl 示例） |
@@ -153,10 +154,10 @@ npm run dev:config                   # 显式使用 ./config.json
 
 | 字段 | 必填 | 默认值 | 说明 |
 |------|------|--------|------|
-| `serverUrl` | 是 | — | 知识库 Open API 地址，如 `https://your-server/open-api/` |
+| `serverUrl` | 否 | `https://sg-al-cwork-web.mediportal.com.cn/open-api/` | 知识库 Open API 地址；省略时使用生产环境默认地址 |
 | `appKey` | 否 | — | **玄关开放平台**签发的 Open API 密钥（个人/应用 `appKey`）；可省略或留空。单条 mapping 未单独配置 `appKey` 时使用此值；**通过管理 API 新建/更新 mapping 时，若此处为空则必须在请求体中为该条提供非空 `appKey`**（见 [docs/MANAGEMENT_API.md](./docs/MANAGEMENT_API.md)）。**全局与各 mapping 均无有效密钥时，同步会失败** |
 | `syncDirection` | 否 | `bidirectional` | 全局同步方向：`bidirectional` / `push`（仅上传）/ `pull`（仅下载） |
-| `autoSyncIntervalSec` | 否 | `60` | 自动同步间隔（秒），`0` = 关闭定时同步 |
+| `autoSyncIntervalSec` | 否 | `180` | 自动同步间隔（秒），`0` = 关闭定时同步 |
 | `stateDbPath` | 否 | `./openclaw-sync-state.db` | SQLite 状态库路径 |
 | `maxConcurrentMappings` | 否 | `2` | 最大并发 mapping 数。多 mapping 场景建议调高，参考：[多实例与大规模部署](#多实例与大规模部署) |
 | `maxRequestsPerMinute` | 否 | `60` | 每 appKey 每分钟最大请求数（令牌桶稳态速率）。每个 `appKey` 独立计算，互不干扰 |
@@ -166,7 +167,7 @@ npm run dev:config                   # 显式使用 ./config.json
 | `uploadConcurrency` | 否 | `3` | 单次同步中并发上传文件数 |
 | `startupJitterMaxSec` | 否 | `20` | 启动后首次同步的随机抖动上限（秒）。多实例同时重启时分散请求，设为 `0` 禁用 |
 | `managementPort` | 否 | `9090` | HTTP 管理 API 监听端口，设为 `0` 禁用管理 API |
-| `managementHost` | 否 | `127.0.0.1` | HTTP 管理 API 监听地址。仅本机访问时保持默认；需跨机器访问时改为 `0.0.0.0`（注意配置防火墙） |
+| `managementHost` | 否 | `0.0.0.0` | HTTP 管理 API 监听地址；默认允许局域网访问，本机浏览器请用 `127.0.0.1`（注意防火墙） |
 
 ### 每条 Mapping 字段
 
@@ -196,7 +197,7 @@ npm run dev:config                   # 显式使用 ./config.json
 
 ```json
 {
-  "serverUrl": "https://your-server/open-api/",
+  "serverUrl": "https://sg-al-cwork-web.mediportal.com.cn/open-api/",
   "appKey": "global-app-key",
   "syncDirection": "bidirectional",
   "autoSyncIntervalSec": 120,
@@ -257,7 +258,7 @@ http://127.0.0.1:9090/
 - **运行状态**：各 mapping 同步进度、上次成功/错误时间
 - 工具栏：**全部同步**、**重载配置**、**刷新**
 
-> 管理 API 当前无 HTTP 鉴权，请勿在公网暴露；跨机器访问时将 `managementHost` 设为 `0.0.0.0` 并做好防火墙隔离。
+> 管理 API 当前无 HTTP 鉴权；默认监听 `0.0.0.0`，请勿在公网暴露，并做好防火墙隔离。
 
 ### 常用命令
 
@@ -445,13 +446,13 @@ launchctl load ~/Library/LaunchAgents/com.openclaw.xgkb-sync.plist
 
 #### 4. 管理 API 与防火墙
 
-默认 `managementHost` 为 `127.0.0.1` 时，本机调试：
+默认 `managementHost` 为 `0.0.0.0`（监听所有网卡）。本机调试：
 
 ```bash
 curl http://127.0.0.1:9090/health
 ```
 
-若将 `managementHost` 改为 `0.0.0.0` 供局域网访问，请在 **系统设置 → 网络 → 防火墙** 中按需放行对应端口，或仅保留本机访问以降低暴露面。
+若需限制仅本机访问，将 `managementHost` 改为 `127.0.0.1` 并重启进程。使用 `0.0.0.0` 时，请在 **系统设置 → 网络 → 防火墙** 中按需放行对应端口。
 
 > `config.json` 含密钥，勿提交仓库；生产路径与文件权限按安全规范收紧。
 
@@ -484,12 +485,12 @@ npm start
 
 ```json
 {
-  "serverUrl": "https://your-server/open-api/",
+  "serverUrl": "https://sg-al-cwork-web.mediportal.com.cn/open-api/",
   "appKey": "your-app-key",
   "syncDirection": "bidirectional",
   "autoSyncIntervalSec": 120,
   "managementPort": 9090,
-  "managementHost": "127.0.0.1",
+  "managementHost": "0.0.0.0",
   "mappings": [
     {
       "mappingId": "my-workspace",
@@ -528,8 +529,8 @@ start http://127.0.0.1:9090/
 
 | 现象 | 可能原因 | 处理 |
 |------|----------|------|
-| 启动报「配置文件不存在」 | 未创建 `config.json` | 从 `config.example.json` 复制 |
-| 启动报配置校验失败 | `serverUrl` / `localRoot` 等必填项缺失或格式错误 | 对照「配置参考」与 `config.example.json` |
+| 启动报「配置文件不存在」 | 旧版本行为；当前版本会自动生成默认 `config.json` | 重启服务，或手动 `cp config.example.json config.json` |
+| 启动报配置校验失败 | mapping 条目字段错误（如缺 `localRoot`） | 对照「配置参考」；空 `{}` 会自动回填默认全局配置 |
 | `POST /mappings` 返回 400 + `MAPPING_APPKEY_REQUIRED_WHEN_NO_GLOBAL_APPKEY` | 全局与各 mapping 均无有效 AppKey | 在全局或该条 mapping 填写非空 `appKey` |
 | 同步失败 / `lastError` 含 401 / 鉴权 | AppKey 错误或过期 | 在玄关开放平台核对密钥 |
 | 同步失败 / 限流 429 或 610012 | API 调用过频 | 降低 `maxRequestsPerMinute` 或增大 `autoSyncIntervalSec` |

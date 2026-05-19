@@ -1,9 +1,9 @@
 {
-  "serverUrl": "https://your-kb-server/open-api/",
+  "serverUrl": "https://sg-al-cwork-web.mediportal.com.cn/open-api/",
   "_comment_appKey": "全局 appKey 可省略或留空；需与各 mapping 的 appKey 至少其一有值才能调用知识库 API",
   "appKey": "your-app-key-here",
   "syncDirection": "bidirectional",
-  "autoSyncIntervalSec": 60,
+  "autoSyncIntervalSec": 180,
   "stateDbPath": "./openclaw-sync-state.db",
   "maxConcurrentMappings": 2,
 
@@ -16,7 +16,7 @@
   "startupJitterMaxSec": 20,
 
   "managementPort": 9090,
-  "managementHost": "127.0.0.1",
+  "managementHost": "0.0.0.0",
 
   "mappings": [
     {

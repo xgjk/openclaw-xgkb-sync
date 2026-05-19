@@ -3,12 +3,16 @@ import * as path from 'path';
 import { randomBytes } from 'crypto';
 import { SyncConfig, SyncMapping } from './types';
 import {
+  DEFAULT_AUTO_SYNC_INTERVAL_SEC,
   DEFAULT_DB_PATH,
   DEFAULT_EXCLUDE_PATTERNS,
   DEFAULT_FILE_PATTERNS,
+  DEFAULT_MANAGEMENT_HOST,
+  DEFAULT_MANAGEMENT_PORT,
   DEFAULT_MAX_CONCURRENT_MAPPINGS,
   DEFAULT_MAX_REQUESTS_PER_MINUTE,
   DEFAULT_RATE_LIMIT_BURST,
+  DEFAULT_SERVER_URL,
   DOWNLOAD_CONCURRENCY,
   RATE_LIMIT_COOLDOWN_MS,
   STARTUP_JITTER_MAX_MS,
@@ -17,24 +21,165 @@ import {
 
 const DEFAULT_CONFIG_PATH = './config.json';
 
+export type LoadConfigResult = {
+  config: SyncConfig;
+  /** 本次是否新建或回填/合并了 config.json */
+  bootstrapped: boolean;
+};
+
+/**
+ * 默认 config.json 内容（可序列化对象，不含 appKey）。
+ * 服务可在无 mapping、无密钥时启动，通过 Web 控制台或管理 API 后续补全。
+ */
+export function getDefaultConfigRaw(): Record<string, unknown> {
+  return {
+    serverUrl: DEFAULT_SERVER_URL,
+    syncDirection: 'bidirectional',
+    autoSyncIntervalSec: DEFAULT_AUTO_SYNC_INTERVAL_SEC,
+    stateDbPath: DEFAULT_DB_PATH,
+    maxConcurrentMappings: DEFAULT_MAX_CONCURRENT_MAPPINGS,
+    maxRequestsPerMinute: DEFAULT_MAX_REQUESTS_PER_MINUTE,
+    rateLimitBurst: DEFAULT_RATE_LIMIT_BURST,
+    rateLimitCooldownSec: RATE_LIMIT_COOLDOWN_MS / 1000,
+    downloadConcurrency: DOWNLOAD_CONCURRENCY,
+    uploadConcurrency: UPLOAD_CONCURRENCY,
+    startupJitterMaxSec: STARTUP_JITTER_MAX_MS / 1000,
+    managementPort: DEFAULT_MANAGEMENT_PORT,
+    managementHost: DEFAULT_MANAGEMENT_HOST,
+    mappings: [],
+  };
+}
+
+/** 将内存中的 SyncConfig 转为可写入 config.json 的对象（省略 undefined 字段） */
+export function configToRaw(config: SyncConfig): Record<string, unknown> {
+  const raw: Record<string, unknown> = {
+    serverUrl: config.serverUrl,
+    syncDirection: config.syncDirection,
+    autoSyncIntervalSec: config.autoSyncIntervalSec,
+    stateDbPath: config.stateDbPath,
+    maxConcurrentMappings: config.maxConcurrentMappings,
+    maxRequestsPerMinute: config.maxRequestsPerMinute,
+    rateLimitBurst: config.rateLimitBurst,
+    rateLimitCooldownSec: config.rateLimitCooldownSec,
+    downloadConcurrency: config.downloadConcurrency,
+    uploadConcurrency: config.uploadConcurrency,
+    startupJitterMaxSec: config.startupJitterMaxSec,
+    managementPort: config.managementPort,
+    managementHost: config.managementHost,
+    mappings: config.mappings,
+  };
+  if (config.appKey) raw.appKey = config.appKey;
+  return raw;
+}
+
+/** 原子写入 config.json */
+export function writeConfigFile(configPath: string, raw: Record<string, unknown>): void {
+  const absPath = path.resolve(configPath);
+  const dir = path.dirname(absPath);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  const tmpPath = absPath + '.tmp';
+  fs.writeFileSync(tmpPath, JSON.stringify(raw, null, 2) + '\n', 'utf-8');
+  fs.renameSync(tmpPath, absPath);
+}
+
+function isEmptyConfigRaw(raw: unknown): boolean {
+  if (raw === null || raw === undefined) return true;
+  if (typeof raw !== 'object' || Array.isArray(raw)) return true;
+  return Object.keys(raw as Record<string, unknown>).length === 0;
+}
+
+function isIncompleteConfigRaw(obj: Record<string, unknown>): boolean {
+  const defaults = getDefaultConfigRaw();
+  for (const key of Object.keys(defaults)) {
+    if (key === 'mappings') {
+      if (!Array.isArray(obj.mappings)) return true;
+      continue;
+    }
+    if (!(key in obj)) return true;
+  }
+  return false;
+}
+
+/** 用默认值补全部分配置；保留用户已填的 appKey、mappings 等字段 */
+function mergeWithDefaultConfigRaw(partial: Record<string, unknown>): Record<string, unknown> {
+  const defaults = getDefaultConfigRaw();
+  const merged: Record<string, unknown> = { ...defaults, ...partial };
+
+  merged.mappings = Array.isArray(partial.mappings) ? partial.mappings : [];
+
+  const appKey = partial.appKey;
+  if (typeof appKey === 'string' && appKey.trim()) {
+    merged.appKey = appKey.trim();
+  } else {
+    delete merged.appKey;
+  }
+
+  return merged;
+}
+
+function readConfigRaw(absPath: string): unknown {
+  const text = fs.readFileSync(absPath, 'utf-8').trim();
+  if (text === '') return {};
+  return JSON.parse(text) as unknown;
+}
+
 /**
  * 从 JSON 文件加载并验证配置。
- * @param configPath 配置文件路径（默认 ./config.json）
+ * 文件不存在、为空、`{}`、不完整或 JSON 解析失败时，自动合并/写入默认 config.json 并继续启动。
  */
 export function loadConfig(configPath: string = DEFAULT_CONFIG_PATH): SyncConfig {
+  return loadConfigWithMeta(configPath).config;
+}
+
+export function loadConfigWithMeta(configPath: string = DEFAULT_CONFIG_PATH): LoadConfigResult {
   const absPath = path.resolve(configPath);
-  if (!fs.existsSync(absPath)) {
-    throw new Error(`配置文件不存在: ${absPath}`);
-  }
-
+  let bootstrapped = false;
+  let bootstrapReason = '';
   let raw: unknown;
-  try {
-    raw = JSON.parse(fs.readFileSync(absPath, 'utf-8'));
-  } catch (e) {
-    throw new Error(`配置文件解析失败: ${e instanceof Error ? e.message : String(e)}`);
+
+  if (!fs.existsSync(absPath)) {
+    raw = getDefaultConfigRaw();
+    bootstrapped = true;
+    bootstrapReason = '配置文件不存在，已生成默认配置';
+  } else {
+    try {
+      raw = readConfigRaw(absPath);
+    } catch (e) {
+      raw = getDefaultConfigRaw();
+      bootstrapped = true;
+      bootstrapReason = `配置文件解析失败，已重置为默认配置（${e instanceof Error ? e.message : String(e)}）`;
+    }
+
+    if (!bootstrapped) {
+      if (isEmptyConfigRaw(raw)) {
+        raw = getDefaultConfigRaw();
+        bootstrapped = true;
+        bootstrapReason = '配置文件为空，已写入默认配置';
+      } else if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+        raw = getDefaultConfigRaw();
+        bootstrapped = true;
+        bootstrapReason = '配置文件格式无效，已重置为默认配置';
+      } else {
+        const obj = raw as Record<string, unknown>;
+        if (isIncompleteConfigRaw(obj)) {
+          raw = mergeWithDefaultConfigRaw(obj);
+          bootstrapped = true;
+          bootstrapReason = '配置文件不完整，已合并默认配置';
+        }
+      }
+    }
   }
 
-  return validateConfig(raw, absPath);
+  const config = validateConfig(raw, absPath);
+
+  if (bootstrapped) {
+    writeConfigFile(absPath, configToRaw(config));
+    console.log(`[Config] ${bootstrapReason}: ${absPath}`);
+  }
+
+  return { config, bootstrapped };
 }
 
 function validateConfig(raw: unknown, filePath: string): SyncConfig {
@@ -44,23 +189,23 @@ function validateConfig(raw: unknown, filePath: string): SyncConfig {
 
   const obj = raw as Record<string, unknown>;
 
-  // 必填字段
-  assertString(obj, 'serverUrl', filePath);
+  const serverUrl =
+    typeof obj.serverUrl === 'string' && obj.serverUrl.trim()
+      ? obj.serverUrl.trim()
+      : DEFAULT_SERVER_URL;
 
   const rawAppKey = obj.appKey;
   const globalAppKey =
     typeof rawAppKey === 'string' && rawAppKey.trim() !== '' ? rawAppKey.trim() : undefined;
 
-  if (!Array.isArray(obj.mappings)) {
-    throw new Error(`配置 "mappings" 必须是数组: ${filePath}`);
-  }
+  const mappingsInput = Array.isArray(obj.mappings) ? obj.mappings : [];
 
   const syncDirection = (obj.syncDirection as string) ?? 'bidirectional';
   if (!['bidirectional', 'push', 'pull'].includes(syncDirection)) {
     throw new Error(`配置 "syncDirection" 必须是 "bidirectional" | "push" | "pull": ${filePath}`);
   }
 
-  const mappings: SyncMapping[] = (obj.mappings as unknown[]).map((m, idx) =>
+  const mappings: SyncMapping[] = mappingsInput.map((m, idx) =>
     validateMapping(m, idx, filePath),
   );
 
@@ -77,11 +222,17 @@ function validateConfig(raw: unknown, filePath: string): SyncConfig {
   }
 
   return {
-    serverUrl: obj.serverUrl as string,
+    serverUrl,
     ...(globalAppKey !== undefined ? { appKey: globalAppKey } : {}),
     syncDirection: syncDirection as SyncConfig['syncDirection'],
-    autoSyncIntervalSec: typeof obj.autoSyncIntervalSec === 'number' ? obj.autoSyncIntervalSec : 60,
-    stateDbPath: typeof obj.stateDbPath === 'string' ? obj.stateDbPath : DEFAULT_DB_PATH,
+    autoSyncIntervalSec:
+      typeof obj.autoSyncIntervalSec === 'number'
+        ? obj.autoSyncIntervalSec
+        : DEFAULT_AUTO_SYNC_INTERVAL_SEC,
+    stateDbPath:
+      typeof obj.stateDbPath === 'string' && obj.stateDbPath.trim()
+        ? obj.stateDbPath.trim()
+        : DEFAULT_DB_PATH,
     maxConcurrentMappings:
       typeof obj.maxConcurrentMappings === 'number'
         ? obj.maxConcurrentMappings
@@ -104,8 +255,12 @@ function validateConfig(raw: unknown, filePath: string): SyncConfig {
       typeof obj.startupJitterMaxSec === 'number'
         ? obj.startupJitterMaxSec
         : STARTUP_JITTER_MAX_MS / 1000,
-    managementPort: typeof obj.managementPort === 'number' ? obj.managementPort : 9090,
-    managementHost: typeof obj.managementHost === 'string' ? obj.managementHost : '127.0.0.1',
+    managementPort:
+      typeof obj.managementPort === 'number' ? obj.managementPort : DEFAULT_MANAGEMENT_PORT,
+    managementHost:
+      typeof obj.managementHost === 'string' && obj.managementHost.trim()
+        ? obj.managementHost.trim()
+        : DEFAULT_MANAGEMENT_HOST,
     mappings,
   };
 }

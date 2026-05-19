@@ -73,7 +73,7 @@
       <form class="form-grid" id="globalForm">
         <label>
           <span>知识库 API 地址 <em>*</em></span>
-          <input type="url" name="serverUrl" required placeholder="https://example.com/open-api/" />
+          <input type="url" name="serverUrl" required placeholder="https://sg-al-cwork-web.mediportal.com.cn/open-api/" value="https://sg-al-cwork-web.mediportal.com.cn/open-api/" />
         </label>
         <label>
           <span>全局 AppKey</span>
@@ -90,7 +90,7 @@
         </label>
         <label>
           <span>自动同步间隔（秒）</span>
-          <input type="number" name="autoSyncIntervalSec" min="0" step="1" />
+          <input type="number" name="autoSyncIntervalSec" min="0" step="1" value="180" />
           <small>0 表示关闭自动同步</small>
         </label>
         <label>
@@ -120,7 +120,7 @@
         </label>
         <label>
           <span>管理 API 监听地址</span>
-          <input type="text" name="managementHost" placeholder="127.0.0.1 或 0.0.0.0" />
+          <input type="text" name="managementHost" placeholder="0.0.0.0" value="0.0.0.0" />
           <small>修改后需重启进程</small>
         </label>
       </form>

@@ -61,6 +61,14 @@ export declare const DEFAULT_FILE_PATTERNS: string[];
 export declare const DEFAULT_EXCLUDE_PATTERNS: string[];
 /** 默认状态库文件路径 */
 export declare const DEFAULT_DB_PATH = "./openclaw-sync-state.db";
+/** 默认知识库 Open API 根地址（生产环境） */
+export declare const DEFAULT_SERVER_URL = "https://sg-al-cwork-web.mediportal.com.cn/open-api/";
+/** 默认自动同步间隔（秒） */
+export declare const DEFAULT_AUTO_SYNC_INTERVAL_SEC = 180;
+/** 默认 HTTP 管理 API 端口 */
+export declare const DEFAULT_MANAGEMENT_PORT = 9090;
+/** 默认 HTTP 管理 API 监听地址 */
+export declare const DEFAULT_MANAGEMENT_HOST = "0.0.0.0";
 /** 默认最大并发 mapping 数 */
 export declare const DEFAULT_MAX_CONCURRENT_MAPPINGS = 2;
 /** 版本备注 */

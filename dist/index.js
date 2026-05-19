@@ -35,6 +35,7 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 const path = __importStar(require("path"));
 const consoleTee_1 = require("./consoleTee");
+const constants_1 = require("./constants");
 const config_1 = require("./config");
 const scheduler_1 = require("./scheduler");
 const managementApi_1 = require("./managementApi");
@@ -62,12 +63,21 @@ async function main() {
     console.log(`[OpenClaw Sync] 启动中...`);
     console.log(`[OpenClaw Sync] 配置文件: ${absConfigPath}`);
     let config;
+    let configBootstrapped = false;
     try {
-        config = (0, config_1.loadConfig)(absConfigPath);
+        const loaded = (0, config_1.loadConfigWithMeta)(absConfigPath);
+        config = loaded.config;
+        configBootstrapped = loaded.bootstrapped;
     }
     catch (e) {
         console.error('[OpenClaw Sync] 配置加载失败:', e instanceof Error ? e.message : String(e));
         process.exit(1);
+    }
+    if (configBootstrapped) {
+        const port = config.managementPort ?? 9090;
+        const host = config.managementHost ?? constants_1.DEFAULT_MANAGEMENT_HOST;
+        const uiHost = host === '0.0.0.0' ? '127.0.0.1' : host;
+        console.log(`[OpenClaw Sync] 请在 Web 控制台补充 AppKey 与同步映射: http://${uiHost}:${port}/`);
     }
     console.log(`[OpenClaw Sync] serverUrl: ${config.serverUrl}`);
     console.log(`[OpenClaw Sync] 同步方向: ${config.syncDirection}`);
@@ -78,7 +88,7 @@ async function main() {
     function doReload() {
         let newConfig;
         try {
-            newConfig = (0, config_1.loadConfig)(absConfigPath);
+            newConfig = (0, config_1.loadConfigWithMeta)(absConfigPath).config;
         }
         catch (e) {
             return { ok: false, error: e instanceof Error ? e.message : String(e) };
@@ -91,7 +101,7 @@ async function main() {
     // 管理 API（HTTP 服务，port=0 时自动禁用）
     const managementApi = new managementApi_1.ManagementApi({
         port: config.managementPort ?? 9090,
-        host: config.managementHost ?? '127.0.0.1',
+        host: config.managementHost ?? constants_1.DEFAULT_MANAGEMENT_HOST,
         configPath: absConfigPath,
         getScheduler: () => schedulerRef.current,
         onReload: doReload,

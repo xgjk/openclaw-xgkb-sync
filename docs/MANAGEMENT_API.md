@@ -2,7 +2,7 @@
 
 本文描述进程内嵌的 **管理 HTTP 服务** 的全部路由。实现代码位于 `src/managementApi.ts`；**appKey 与密钥相关的业务规则**与校验辅助函数位于 `src/managementApiCredentials.ts`。
 
-- **Base URL**：`http://{managementHost}:{managementPort}`，默认 `http://127.0.0.1:9090`（以 `config.json` 为准）。
+- **Base URL**：`http://{managementHost}:{managementPort}`，默认监听 `0.0.0.0:9090`（本机访问可用 `http://127.0.0.1:9090`，以 `config.json` 为准）。
 - **字符编码**：请求/响应体均为 **UTF-8 JSON**。
 - **鉴权**：当前版本 **无** HTTP 头鉴权；请仅在可信网络暴露 `managementHost`/`managementPort`。
 - **通用错误体**（`4xx` / `5xx` 且 body 为 JSON 时）：

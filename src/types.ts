@@ -39,6 +39,7 @@ export interface SyncMapping {
 }
 
 export interface SyncConfig {
+  /** 知识库 Open API 根地址；省略时使用生产环境默认地址（见 constants.DEFAULT_SERVER_URL） */
   serverUrl: string;
   /**
    * 全局 API 密钥。可省略或留空；与单条 mapping 的 `appKey` 至少其一有值时才能正常调用知识库 API。
@@ -84,8 +85,8 @@ export interface SyncConfig {
    */
   managementPort?: number;
   /**
-   * HTTP 管理 API 监听地址，默认 "127.0.0.1"（仅本机访问）。
-   * 需要跨机器访问时改为 "0.0.0.0"，注意做好网络隔离。
+   * HTTP 管理 API 监听地址，默认 "0.0.0.0"（允许局域网访问；本机浏览器请用 127.0.0.1）。
+   * 注意做好网络隔离，勿在公网暴露。
    */
   managementHost?: string;
   mappings: SyncMapping[];

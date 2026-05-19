@@ -1,6 +1,7 @@
 import * as path from 'path';
 import { installConsoleTee } from './consoleTee';
-import { loadConfig } from './config';
+import { DEFAULT_MANAGEMENT_HOST } from './constants';
+import { loadConfigWithMeta } from './config';
 import { SyncScheduler } from './scheduler';
 import { ManagementApi, ReloadResult } from './managementApi';
 
@@ -34,11 +35,23 @@ async function main() {
   console.log(`[OpenClaw Sync] 配置文件: ${absConfigPath}`);
 
   let config;
+  let configBootstrapped = false;
   try {
-    config = loadConfig(absConfigPath);
+    const loaded = loadConfigWithMeta(absConfigPath);
+    config = loaded.config;
+    configBootstrapped = loaded.bootstrapped;
   } catch (e) {
     console.error('[OpenClaw Sync] 配置加载失败:', e instanceof Error ? e.message : String(e));
     process.exit(1);
+  }
+
+  if (configBootstrapped) {
+    const port = config.managementPort ?? 9090;
+    const host = config.managementHost ?? DEFAULT_MANAGEMENT_HOST;
+    const uiHost = host === '0.0.0.0' ? '127.0.0.1' : host;
+    console.log(
+      `[OpenClaw Sync] 请在 Web 控制台补充 AppKey 与同步映射: http://${uiHost}:${port}/`,
+    );
   }
 
   console.log(`[OpenClaw Sync] serverUrl: ${config.serverUrl}`);
@@ -54,7 +67,7 @@ async function main() {
   function doReload(): ReloadResult {
     let newConfig;
     try {
-      newConfig = loadConfig(absConfigPath);
+      newConfig = loadConfigWithMeta(absConfigPath).config;
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : String(e) };
     }
@@ -67,7 +80,7 @@ async function main() {
   // 管理 API（HTTP 服务，port=0 时自动禁用）
   const managementApi = new ManagementApi({
     port: config.managementPort ?? 9090,
-    host: config.managementHost ?? '127.0.0.1',
+    host: config.managementHost ?? DEFAULT_MANAGEMENT_HOST,
     configPath: absConfigPath,
     getScheduler: () => schedulerRef.current,
     onReload: doReload,
