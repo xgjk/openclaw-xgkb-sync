@@ -158,8 +158,10 @@ npm run dev:config                   # 显式使用 ./config.json
 | `appKey` | 否 | — | **玄关开放平台**签发的 Open API 密钥（个人/应用 `appKey`）；可省略或留空。单条 mapping 未单独配置 `appKey` 时使用此值；**通过管理 API 新建/更新 mapping 时，若此处为空则必须在请求体中为该条提供非空 `appKey`**（见 [docs/MANAGEMENT_API.md](./docs/MANAGEMENT_API.md)）。**全局与各 mapping 均无有效密钥时，同步会失败** |
 | `syncDirection` | 否 | `bidirectional` | 全局同步方向：`bidirectional` / `push`（仅上传）/ `pull`（仅下载） |
 | `autoSyncIntervalSec` | 否 | `180` | 自动同步间隔（秒），`0` = 关闭定时同步 |
+| `fullReconcileIntervalSec` | 否 | `3600` | 强制全量对账间隔（秒），用于修复 `listChanges` 或状态库漏记录；`0` = 关闭。升级后首次同步若尚无全量记录，会触发一次全量对账 |
 | `stateDbPath` | 否 | `./openclaw-sync-state.db` | SQLite 状态库路径 |
-| `maxConcurrentMappings` | 否 | `2` | 最大并发 mapping 数。多 mapping 场景建议调高，参考：[多实例与大规模部署](#多实例与大规模部署) |
+| `maxConcurrentMappingsMode` | 否 | `auto` | mapping 并发策略：`auto` 按映射数量与 AppKey 分布自动适配；`manual` 使用下方 `maxConcurrentMappings` |
+| `maxConcurrentMappings` | 否 | `2` | 手动模式下的最大并发 mapping 数。`auto` 模式下通常为 1～5，详见调度器 `resolveMaxConcurrentMappings` |
 | `maxRequestsPerMinute` | 否 | `60` | 每 appKey 每分钟最大请求数（令牌桶稳态速率）。每个 `appKey` 独立计算，互不干扰 |
 | `rateLimitBurst` | 否 | `8` | 令牌桶突发容量，允许短时间内连续发出最多 N 个请求后再按稳态补充 |
 | `rateLimitCooldownSec` | 否 | `60` | 收到限流响应（HTTP 429 或 resultCode 610012）后的冷却时间（秒） |
@@ -253,9 +255,9 @@ http://127.0.0.1:9090/
 
 控制台提供：
 
-- **同步映射**：列表展示、新增、编辑、删除、单条触发同步
-- **全局配置**：serverUrl、同步方向、自动间隔、限速等（AppKey 不回显，需输入新值才会覆盖）
-- **运行状态**：各 mapping 同步进度、上次成功/错误时间
+- **同步映射**：卡片化展示、复制本地路径、新增/编辑/删除、单条触发同步、最近同步统计摘要
+- **全局配置**：普通/高级分组；serverUrl、同步方向、自动间隔、映射并发策略、全量对账间隔、限速等（全局 AppKey 脱敏展示，输入新值才会覆盖）
+- **运行状态**：服务概览仪表盘、各 mapping 同步结果/水位/错误详情
 - 工具栏：**全部同步**、**重载配置**、**刷新**
 
 > 管理 API 当前无 HTTP 鉴权；默认监听 `0.0.0.0`，请勿在公网暴露，并做好防火墙隔离。
@@ -534,6 +536,7 @@ start http://127.0.0.1:9090/
 | `POST /mappings` 返回 400 + `MAPPING_APPKEY_REQUIRED_WHEN_NO_GLOBAL_APPKEY` | 全局与各 mapping 均无有效 AppKey | 在全局或该条 mapping 填写非空 `appKey` |
 | 同步失败 / `lastError` 含 401 / 鉴权 | AppKey 错误或过期 | 在玄关开放平台核对密钥 |
 | 同步失败 / 限流 429 或 610012 | API 调用过频 | 降低 `maxRequestsPerMinute` 或增大 `autoSyncIntervalSec` |
+| 升级后首次同步明显变慢 | 新版本会记录全量对账时间；尚无记录时会触发一次全量扫描 | 属正常行为；大 mapping 可临时设 `fullReconcileIntervalSec: 0` 或在低峰升级 |
 | 本地文件未上传 | `enabled: false`、方向为 `pull`、或路径不匹配 `filePatterns` | 检查 mapping 配置与 `filePatterns` |
 | 管理控制台打不开 | 端口被占用、`managementPort: 0`、或防火墙拦截 | 查启动日志端口；本机用 `127.0.0.1` 访问 |
 | 修改 `managementPort` / `managementHost` 不生效 | 这两项需**重启进程**才改变监听 | 停止后重新 `npm start` |

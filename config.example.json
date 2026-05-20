@@ -4,7 +4,9 @@
   "appKey": "your-app-key-here",
   "syncDirection": "bidirectional",
   "autoSyncIntervalSec": 180,
+  "fullReconcileIntervalSec": 3600,
   "stateDbPath": "./openclaw-sync-state.db",
+  "maxConcurrentMappingsMode": "auto",
   "maxConcurrentMappings": 2,
 
   "_comment_ratelimit": "以下限速参数可选，括号内为默认值。多实例共用同一 appKey 时，建议将 maxRequestsPerMinute 设为 总限额/实例数",
