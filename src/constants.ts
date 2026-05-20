@@ -49,6 +49,9 @@ export const RATE_LIMIT_COOLDOWN_MS = 60_000;
  */
 export const RATE_LIMIT_RESULT_CODES = new Set<number>([610012]);
 
+/** 业务层临时服务端错误码：HTTP 为 200 但 resultCode 表示服务端短暂失败，应退避重试 */
+export const TRANSIENT_RESULT_CODES = new Set<number>([500]);
+
 /** 启动时随机抖动最大值（毫秒），分散多实例同时启动导致的请求突刺 */
 export const STARTUP_JITTER_MAX_MS = 20_000;
 

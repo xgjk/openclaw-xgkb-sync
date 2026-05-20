@@ -37,6 +37,7 @@ export function getDefaultConfigRaw(): Record<string, unknown> {
     syncDirection: 'bidirectional',
     autoSyncIntervalSec: DEFAULT_AUTO_SYNC_INTERVAL_SEC,
     stateDbPath: DEFAULT_DB_PATH,
+    maxConcurrentMappingsMode: 'auto',
     maxConcurrentMappings: DEFAULT_MAX_CONCURRENT_MAPPINGS,
     maxRequestsPerMinute: DEFAULT_MAX_REQUESTS_PER_MINUTE,
     rateLimitBurst: DEFAULT_RATE_LIMIT_BURST,
@@ -57,6 +58,7 @@ export function configToRaw(config: SyncConfig): Record<string, unknown> {
     syncDirection: config.syncDirection,
     autoSyncIntervalSec: config.autoSyncIntervalSec,
     stateDbPath: config.stateDbPath,
+    maxConcurrentMappingsMode: config.maxConcurrentMappingsMode,
     maxConcurrentMappings: config.maxConcurrentMappings,
     maxRequestsPerMinute: config.maxRequestsPerMinute,
     rateLimitBurst: config.rateLimitBurst,
@@ -233,6 +235,8 @@ function validateConfig(raw: unknown, filePath: string): SyncConfig {
       typeof obj.stateDbPath === 'string' && obj.stateDbPath.trim()
         ? obj.stateDbPath.trim()
         : DEFAULT_DB_PATH,
+    maxConcurrentMappingsMode:
+      obj.maxConcurrentMappingsMode === 'manual' ? 'manual' : 'auto',
     maxConcurrentMappings:
       typeof obj.maxConcurrentMappings === 'number'
         ? obj.maxConcurrentMappings

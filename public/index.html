@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>OpenClaw 同步管理</title>
-  <link rel="stylesheet" href="/static/styles.css" />
+  <link rel="stylesheet" href="/static/styles.css?v=settings-groups-1" />
 </head>
 <body>
   <div class="app">
@@ -44,23 +44,8 @@
         <h2>同步映射</h2>
         <button type="button" class="btn btn-primary" id="btnAddMapping">新增映射</button>
       </div>
-      <div class="table-wrap">
-        <table class="data-table">
-          <thead>
-            <tr>
-              <th>ID</th>
-              <th>状态</th>
-              <th>本地目录</th>
-              <th>远端路径</th>
-              <th>方向</th>
-              <th>同步</th>
-              <th>操作</th>
-            </tr>
-          </thead>
-          <tbody id="mappingsBody">
-            <tr><td colspan="7" class="empty">加载中…</td></tr>
-          </tbody>
-        </table>
+      <div class="mapping-grid" id="mappingsBody">
+        <p class="empty">加载中…</p>
       </div>
     </section>
 
@@ -70,59 +55,86 @@
         <h2>全局配置</h2>
         <button type="button" class="btn btn-primary" id="btnSaveGlobal">保存配置</button>
       </div>
-      <form class="form-grid" id="globalForm">
-        <label>
-          <span>知识库 API 地址 <em>*</em></span>
-          <input type="url" name="serverUrl" required placeholder="https://sg-al-cwork-web.mediportal.com.cn/open-api/" value="https://sg-al-cwork-web.mediportal.com.cn/open-api/" />
-        </label>
-        <label>
-          <span>全局 AppKey</span>
-          <input type="password" name="appKey" placeholder="留空表示不修改；输入新值覆盖" autocomplete="off" />
-          <small id="globalAppKeyHint">—</small>
-        </label>
-        <label>
-          <span>默认同步方向</span>
-          <select name="syncDirection">
-            <option value="bidirectional">双向 (bidirectional)</option>
-            <option value="push">仅推送 (push)</option>
-            <option value="pull">仅拉取 (pull)</option>
-          </select>
-        </label>
-        <label>
-          <span>自动同步间隔（秒）</span>
-          <input type="number" name="autoSyncIntervalSec" min="0" step="1" value="180" />
-          <small>0 表示关闭自动同步</small>
-        </label>
-        <label>
-          <span>最大并发映射数</span>
-          <input type="number" name="maxConcurrentMappings" min="1" step="1" />
-        </label>
-        <label>
-          <span>API 限速（次/分钟）</span>
-          <input type="number" name="maxRequestsPerMinute" min="1" step="1" />
-        </label>
-        <label>
-          <span>状态库路径</span>
-          <input type="text" name="stateDbPath" />
-        </label>
-        <label>
-          <span>下载并发数</span>
-          <input type="number" name="downloadConcurrency" min="1" step="1" />
-        </label>
-        <label>
-          <span>上传并发数</span>
-          <input type="number" name="uploadConcurrency" min="1" step="1" />
-        </label>
-        <label>
-          <span>管理 API 端口</span>
-          <input type="number" name="managementPort" min="0" step="1" />
-          <small>修改后需重启进程</small>
-        </label>
-        <label>
-          <span>管理 API 监听地址</span>
-          <input type="text" name="managementHost" placeholder="0.0.0.0" value="0.0.0.0" />
-          <small>修改后需重启进程</small>
-        </label>
+      <div class="settings-tabs" role="tablist" aria-label="全局配置分类">
+        <button type="button" class="settings-tab active" data-settings-tab="basic">普通设置</button>
+        <button type="button" class="settings-tab" data-settings-tab="advanced">高级设置</button>
+      </div>
+      <form id="globalForm">
+        <div class="settings-panel active" id="settings-basic">
+          <div class="form-grid">
+            <label>
+              <span>知识库 API 地址 <em>*</em></span>
+              <input type="url" name="serverUrl" required placeholder="https://sg-al-cwork-web.mediportal.com.cn/open-api/" value="https://sg-al-cwork-web.mediportal.com.cn/open-api/" />
+              <small>建议：使用默认生产地址，除非知识库部署在私有环境。</small>
+            </label>
+            <label class="secret-field">
+              <span>全局 AppKey</span>
+              <input type="text" name="appKey" placeholder="输入全局 AppKey 后点击保存配置" autocomplete="off" spellcheck="false" />
+              <small id="globalAppKeyHint" class="secret-status">正在检查保存状态...</small>
+            </label>
+            <label>
+              <span>默认同步方向</span>
+              <select name="syncDirection">
+                <option value="bidirectional">双向 (bidirectional)</option>
+                <option value="push">仅推送 (push)</option>
+                <option value="pull">仅拉取 (pull)</option>
+              </select>
+              <small>建议：全局用双向；本地生成目录可在单条映射中改为仅推送。</small>
+            </label>
+            <label>
+              <span>自动同步间隔（秒）</span>
+              <input type="number" name="autoSyncIntervalSec" min="0" step="1" value="180" />
+              <small>建议：180。0 表示关闭自动同步；需要接近实时可设为 60。</small>
+            </label>
+          </div>
+        </div>
+        <div class="settings-panel" id="settings-advanced">
+          <div class="form-grid">
+            <label>
+              <span>映射并发策略</span>
+              <select name="maxConcurrentMappingsMode">
+                <option value="auto">自动（推荐）</option>
+                <option value="manual">手动</option>
+              </select>
+              <small id="mappingConcurrencyHint">建议：自动。系统会按映射数量和 AppKey 分布控制同时同步的目录数。</small>
+            </label>
+            <label id="manualConcurrencyField">
+              <span>最大并发映射数</span>
+              <input type="number" name="maxConcurrentMappings" min="1" step="1" />
+              <small>手动模式使用。个人使用通常设为 2；大量独立 AppKey 可适当提高。</small>
+            </label>
+            <label>
+              <span>API 限速（次/分钟）</span>
+              <input type="number" name="maxRequestsPerMinute" min="1" step="1" />
+              <small>建议：60。若日志出现 429 或 610012，再降到 30-40。</small>
+            </label>
+            <label>
+              <span>状态库路径</span>
+              <input type="text" name="stateDbPath" />
+              <small>建议：./openclaw-sync-state.db。保持默认便于备份和迁移。</small>
+            </label>
+            <label>
+              <span>下载并发数</span>
+              <input type="number" name="downloadConcurrency" min="1" step="1" />
+              <small>建议：5。下载通常可以略高于上传。</small>
+            </label>
+            <label>
+              <span>上传并发数</span>
+              <input type="number" name="uploadConcurrency" min="1" step="1" />
+              <small>建议：3。批量改文件时更稳，减少 API 突发压力。</small>
+            </label>
+            <label>
+              <span>管理 API 端口</span>
+              <input type="number" name="managementPort" min="0" step="1" />
+              <small>建议：9090。修改后需重启进程；设为 0 可禁用管理 API。</small>
+            </label>
+            <label>
+              <span>管理 API 监听地址</span>
+              <input type="text" name="managementHost" placeholder="0.0.0.0" value="0.0.0.0" />
+              <small>建议：127.0.0.1。修改后需重启进程；除非需要局域网访问，否则不要设为 0.0.0.0。</small>
+            </label>
+          </div>
+        </div>
       </form>
     </section>
 
@@ -199,6 +211,6 @@
     </form>
   </dialog>
 
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=settings-groups-1"></script>
 </body>
 </html>

@@ -1,4 +1,5 @@
 import { SyncConfig } from './types';
+export declare function resolveMaxConcurrentMappings(config: SyncConfig): number;
 /**
  * 多 Mapping 同步调度器
  * - 同一 mappingId 严格串行（防重入）

@@ -160,6 +160,17 @@ class KbApiClient {
                         lastErrorWasRateLimit = true;
                         continue;
                     }
+                    // 业务层临时服务端错误（如 uploadContent 偶发 "文件信息查询失败"）：
+                    // HTTP 是 200，但 resultCode 表示服务端短暂失败，按 5xx 语义退避重试。
+                    if (constants_1.TRANSIENT_RESULT_CODES.has(result.resultCode)) {
+                        console.warn(`[KbApi] 业务层临时错误 code=${result.resultCode} method=${method} path=${apiPath}` +
+                            ` attempt=${attempt + 1}/${constants_1.MAX_RETRIES}\n` +
+                            `  url: ${urlForLog}\n` +
+                            `  params: ${paramsSummary}\n` +
+                            `  msg: ${result.resultMsg}`);
+                        lastError = shortErr;
+                        continue;
+                    }
                     // 其他业务错误：参数错误、权限不足等永久性错误，不重试
                     console.error(`[KbApi] 业务错误 method=${method} path=${apiPath} attempt=${attempt + 1}/${constants_1.MAX_RETRIES}\n` +
                         `  url: ${urlForLog}\n` +

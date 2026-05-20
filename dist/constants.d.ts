@@ -39,6 +39,8 @@ export declare const RATE_LIMIT_COOLDOWN_MS = 60000;
  * 610012 = "请求太过频繁，请稍候再试！"（按 appKey 全局限流）
  */
 export declare const RATE_LIMIT_RESULT_CODES: Set<number>;
+/** 业务层临时服务端错误码：HTTP 为 200 但 resultCode 表示服务端短暂失败，应退避重试 */
+export declare const TRANSIENT_RESULT_CODES: Set<number>;
 /** 启动时随机抖动最大值（毫秒），分散多实例同时启动导致的请求突刺 */
 export declare const STARTUP_JITTER_MAX_MS = 20000;
 /** listChanges 安全回拨窗口（毫秒），避免时钟偏差漏事件 */

@@ -1,6 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.SyncScheduler = void 0;
+exports.resolveMaxConcurrentMappings = resolveMaxConcurrentMappings;
 const kbApi_1 = require("./kbApi");
 const localFs_1 = require("./localFs");
 const rateLimiter_1 = require("./rateLimiter");
@@ -8,6 +9,21 @@ const remoteFs_1 = require("./remoteFs");
 const syncEngine_1 = require("./syncEngine");
 const syncStateDb_1 = require("./syncStateDb");
 const constants_1 = require("./constants");
+function resolveMaxConcurrentMappings(config) {
+    const enabledMappings = config.mappings.filter((m) => m.enabled);
+    if (enabledMappings.length === 0)
+        return 0;
+    if (config.maxConcurrentMappingsMode === 'manual') {
+        return Math.max(1, config.maxConcurrentMappings ?? constants_1.DEFAULT_MAX_CONCURRENT_MAPPINGS);
+    }
+    const appKeySet = new Set(enabledMappings.map((m) => (m.appKey ?? config.appKey ?? '').trim()).filter(Boolean));
+    const allUseIndependentKeys = appKeySet.size >= enabledMappings.length;
+    if (enabledMappings.length <= 2)
+        return enabledMappings.length;
+    if (allUseIndependentKeys)
+        return Math.min(5, enabledMappings.length);
+    return Math.min(3, enabledMappings.length);
+}
 /**
  * 多 Mapping 同步调度器
  * - 同一 mappingId 严格串行（防重入）
@@ -100,7 +116,7 @@ class SyncScheduler {
     triggerAll(reason) {
         const enabledMappings = this.config.mappings.filter((m) => m.enabled);
         console.log(`[Scheduler] 触发全部同步（${reason}），共 ${enabledMappings.length} 条`);
-        const maxConcurrent = this.config.maxConcurrentMappings ?? constants_1.DEFAULT_MAX_CONCURRENT_MAPPINGS;
+        const maxConcurrent = resolveMaxConcurrentMappings(this.config);
         // 按并发度批次触发
         let queued = 0;
         for (const mapping of enabledMappings) {
@@ -220,6 +236,7 @@ class SyncScheduler {
                 lastServerTime: stats.newSince,
                 lastSuccessAt: Date.now(),
                 lastError: null,
+                lastStats: stats,
             });
             console.log(`[Scheduler][${mapping.mappingId}] 水位已推进: ${stats.newSince} (${new Date(stats.newSince).toLocaleString('zh-CN')})`);
         }
@@ -228,6 +245,7 @@ class SyncScheduler {
             this.db.upsertMappingState({
                 mappingId: mapping.mappingId,
                 lastError: `${stats.failed} 个文件失败: ${errSummary}`,
+                lastStats: stats,
             });
             console.warn(`[Scheduler][${mapping.mappingId}] 存在 ${stats.failed} 个失败文件，水位未推进，下轮将重试`);
         }

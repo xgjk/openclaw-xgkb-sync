@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.VERSION_REMARK = exports.DEFAULT_MAX_CONCURRENT_MAPPINGS = exports.DEFAULT_MANAGEMENT_HOST = exports.DEFAULT_MANAGEMENT_PORT = exports.DEFAULT_AUTO_SYNC_INTERVAL_SEC = exports.DEFAULT_SERVER_URL = exports.DEFAULT_DB_PATH = exports.DEFAULT_EXCLUDE_PATTERNS = exports.DEFAULT_FILE_PATTERNS = exports.MTIME_TOLERANCE_MS = exports.API_ERROR_MESSAGE_BODY_MAX = exports.API_ERROR_LOG_MAX_CHARS = exports.REQUEST_TIMEOUT_MS = exports.RETRY_BASE_DELAY_MS = exports.MAX_RETRIES = exports.CHANGES_SAFETY_WINDOW_MS = exports.STARTUP_JITTER_MAX_MS = exports.RATE_LIMIT_RESULT_CODES = exports.RATE_LIMIT_COOLDOWN_MS = exports.DEFAULT_RATE_LIMIT_BURST = exports.DEFAULT_MAX_REQUESTS_PER_MINUTE = exports.EXECUTE_BATCH_PAUSE_MS = exports.UPLOAD_CONCURRENCY = exports.DOWNLOAD_CONCURRENCY = exports.BATCH_GET_META_MAX = exports.BATCH_GET_CONTENT_MAX = exports.API_PATHS = void 0;
+exports.VERSION_REMARK = exports.DEFAULT_MAX_CONCURRENT_MAPPINGS = exports.DEFAULT_MANAGEMENT_HOST = exports.DEFAULT_MANAGEMENT_PORT = exports.DEFAULT_AUTO_SYNC_INTERVAL_SEC = exports.DEFAULT_SERVER_URL = exports.DEFAULT_DB_PATH = exports.DEFAULT_EXCLUDE_PATTERNS = exports.DEFAULT_FILE_PATTERNS = exports.MTIME_TOLERANCE_MS = exports.API_ERROR_MESSAGE_BODY_MAX = exports.API_ERROR_LOG_MAX_CHARS = exports.REQUEST_TIMEOUT_MS = exports.RETRY_BASE_DELAY_MS = exports.MAX_RETRIES = exports.CHANGES_SAFETY_WINDOW_MS = exports.STARTUP_JITTER_MAX_MS = exports.TRANSIENT_RESULT_CODES = exports.RATE_LIMIT_RESULT_CODES = exports.RATE_LIMIT_COOLDOWN_MS = exports.DEFAULT_RATE_LIMIT_BURST = exports.DEFAULT_MAX_REQUESTS_PER_MINUTE = exports.EXECUTE_BATCH_PAUSE_MS = exports.UPLOAD_CONCURRENCY = exports.DOWNLOAD_CONCURRENCY = exports.BATCH_GET_META_MAX = exports.BATCH_GET_CONTENT_MAX = exports.API_PATHS = void 0;
 exports.cleanContent = cleanContent;
 exports.extractUniqueSuffix = extractUniqueSuffix;
 exports.API_PATHS = {
@@ -44,6 +44,8 @@ exports.RATE_LIMIT_COOLDOWN_MS = 60_000;
  * 610012 = "请求太过频繁，请稍候再试！"（按 appKey 全局限流）
  */
 exports.RATE_LIMIT_RESULT_CODES = new Set([610012]);
+/** 业务层临时服务端错误码：HTTP 为 200 但 resultCode 表示服务端短暂失败，应退避重试 */
+exports.TRANSIENT_RESULT_CODES = new Set([500]);
 /** 启动时随机抖动最大值（毫秒），分散多实例同时启动导致的请求突刺 */
 exports.STARTUP_JITTER_MAX_MS = 20_000;
 /** listChanges 安全回拨窗口（毫秒），避免时钟偏差漏事件 */

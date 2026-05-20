@@ -5,6 +5,7 @@
   const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 
   let hasGlobalAppKey = false;
+  let globalAppKeyMasked = '';
   let mappingsCache = [];
   let statusCache = null;
 
@@ -61,6 +62,69 @@
     return `${s}s`;
   }
 
+  function formatDateTime(ts) {
+    return ts ? new Date(ts).toLocaleString() : '—';
+  }
+
+  function syncResultBadge(st) {
+    if (st?.isSyncing) return '<span class="badge badge-sync">同步中</span>';
+    if (st?.pendingSync) return '<span class="badge badge-sync">排队</span>';
+    const lastState = st?.lastState || {};
+    if (lastState.lastError) {
+      return `<span class="badge badge-error" title="${escapeHtml(lastState.lastError)}">失败</span>`;
+    }
+    if (lastState.lastSuccessAt) return '<span class="badge badge-on">成功</span>';
+    return '<span class="muted">未同步</span>';
+  }
+
+  function syncStatsSummary(st) {
+    const stats = st?.lastState?.lastStats;
+    if (!stats) return '暂无同步统计';
+    const parts = [
+      `推送 ${stats.uploaded || 0} 条`,
+      `拉取 ${stats.downloaded || 0} 条`,
+    ];
+    if (stats.deleted) parts.push(`删除 ${stats.deleted} 条`);
+    if (stats.failed) parts.push(`失败 ${stats.failed} 条`);
+    return parts.join('，');
+  }
+
+  async function copyText(text, label) {
+    try {
+      if (navigator.clipboard?.writeText) {
+        try {
+          await navigator.clipboard.writeText(text);
+        } catch {
+          fallbackCopyText(text);
+        }
+      } else {
+        fallbackCopyText(text);
+      }
+      toast(`已复制${label}`, 'success');
+    } catch (e) {
+      toast(`复制失败：${e.message || e}`, 'error');
+    }
+  }
+
+  function fallbackCopyText(text) {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.top = '0';
+    ta.style.left = '0';
+    ta.style.width = '1px';
+    ta.style.height = '1px';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    ta.setSelectionRange(0, ta.value.length);
+    const ok = document.execCommand('copy');
+    ta.remove();
+    if (!ok) throw new Error('浏览器拒绝复制，请手动选中路径复制');
+  }
+
   function syncDirectionLabel(dir) {
     const map = { bidirectional: '双向', push: '推送', pull: '拉取' };
     return map[dir] || dir || '—';
@@ -73,6 +137,22 @@
     return parsed;
   }
 
+  function updateMappingConcurrencyUi() {
+    const form = $('#globalForm');
+    const mode = form.elements.namedItem('maxConcurrentMappingsMode')?.value || 'auto';
+    const field = $('#manualConcurrencyField');
+    const input = form.elements.namedItem('maxConcurrentMappings');
+    const hint = $('#mappingConcurrencyHint');
+    const effective = statusCache?.config?.effectiveMaxConcurrentMappings;
+    field?.classList.toggle('advanced-only-hidden', mode !== 'manual');
+    if (input) input.disabled = mode !== 'manual';
+    if (hint) {
+      hint.textContent = mode === 'auto'
+        ? `建议：自动。系统会按映射数量和 AppKey 分布控制同时同步的目录数；当前实际并发 ${effective || '—'}。`
+        : '手动模式会固定使用下方数字。只有在你清楚 API 限流和映射规模时才建议修改。';
+    }
+  }
+
   // ==================== Tabs ====================
 
   $$('.tab').forEach((tab) => {
@@ -83,6 +163,18 @@
       $(`#panel-${tab.dataset.tab}`).classList.add('active');
     });
   });
+
+  $$('.settings-tab').forEach((tab) => {
+    tab.addEventListener('click', () => {
+      $$('.settings-tab').forEach((t) => t.classList.remove('active'));
+      $$('.settings-panel').forEach((p) => p.classList.remove('active'));
+      tab.classList.add('active');
+      $(`#settings-${tab.dataset.settingsTab}`).classList.add('active');
+    });
+  });
+
+  $('#globalForm').elements.namedItem('maxConcurrentMappingsMode')
+    ?.addEventListener('change', updateMappingConcurrencyUi);
 
   // ==================== Health & meta ====================
 
@@ -99,45 +191,82 @@
   // ==================== Mappings ====================
 
   function renderMappings() {
-    const tbody = $('#mappingsBody');
+    const container = $('#mappingsBody');
     if (mappingsCache.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="7" class="empty">暂无同步映射，点击「新增映射」创建</td></tr>';
+      container.innerHTML = '<p class="empty">暂无同步映射，点击「新增映射」创建</p>';
       return;
     }
 
-    tbody.innerHTML = mappingsCache
+    container.innerHTML = mappingsCache
       .map((m) => {
         const st = statusCache?.mappings?.[m.mappingId];
         const syncing = st?.isSyncing;
         const pending = st?.pendingSync;
+        const lastState = st?.lastState || {};
+        const lastError = lastState.lastError;
         let syncBadge = '';
         if (syncing) syncBadge = '<span class="badge badge-sync">同步中</span>';
         else if (pending) syncBadge = '<span class="badge badge-sync">排队</span>';
 
-        return `<tr data-id="${escapeHtml(m.mappingId)}">
-          <td class="cell-id">${escapeHtml(m.mappingId)}</td>
-          <td><span class="badge ${m.enabled ? 'badge-on' : 'badge-off'}">${m.enabled ? '启用' : '禁用'}</span></td>
-          <td class="cell-path" title="${escapeHtml(m.localRoot)}">${escapeHtml(m.localRoot)}</td>
-          <td class="cell-path" title="${escapeHtml(m.remoteRootFolderPath || '')}">${escapeHtml(m.remoteRootFolderPath || '—')}</td>
-          <td>${syncDirectionLabel(m.syncDirection || statusCache?.config?.syncDirection)}</td>
-          <td>${syncBadge || '—'}</td>
-          <td class="actions">
-            <button type="button" class="btn btn-sm btn-secondary btn-sync-one" ${!m.enabled ? 'disabled' : ''}>同步</button>
-            <button type="button" class="btn btn-sm btn-secondary btn-edit">编辑</button>
-            <button type="button" class="btn btn-sm btn-danger btn-delete">删除</button>
-          </td>
-        </tr>`;
+        return `<article class="mapping-card" data-id="${escapeHtml(m.mappingId)}">
+          <div class="mapping-card-head">
+            <div class="mapping-title">
+              <span class="cell-id">${escapeHtml(m.mappingId)}</span>
+              <div class="mapping-badges">
+                <span class="badge ${m.enabled ? 'badge-on' : 'badge-off'}">${m.enabled ? '启用' : '禁用'}</span>
+                ${syncBadge || syncResultBadge(st)}
+              </div>
+            </div>
+            <div class="actions">
+              <button type="button" class="btn btn-sm btn-secondary btn-sync-one" ${!m.enabled ? 'disabled' : ''}>同步</button>
+              <button type="button" class="btn btn-sm btn-secondary btn-edit">编辑</button>
+              <button type="button" class="btn btn-sm btn-danger btn-delete">删除</button>
+            </div>
+          </div>
+          <dl class="mapping-meta">
+            <div>
+              <dt>本地目录</dt>
+              <dd class="path-with-copy">
+                <span class="cell-path" title="${escapeHtml(m.localRoot)}">${escapeHtml(m.localRoot)}</span>
+                <button type="button" class="btn btn-sm btn-secondary btn-copy-local" data-copy="${escapeHtml(m.localRoot)}">复制</button>
+              </dd>
+            </div>
+            <div>
+              <dt>远端路径</dt>
+              <dd class="cell-path" title="${escapeHtml(m.remoteRootFolderPath || '')}">${escapeHtml(m.remoteRootFolderPath || '—')}</dd>
+            </div>
+            <div>
+              <dt>同步方向</dt>
+              <dd>${syncDirectionLabel(m.syncDirection || statusCache?.config?.syncDirection)}</dd>
+            </div>
+            <div>
+              <dt>最后同步</dt>
+              <dd>${formatDateTime(lastState.lastSuccessAt)}</dd>
+            </div>
+            <div>
+              <dt>最后结果</dt>
+              <dd>
+                ${syncResultBadge(st)}
+                <div class="sync-summary">${escapeHtml(syncStatsSummary(st))}</div>
+                ${lastError ? `<div class="cell-error" title="${escapeHtml(lastError)}">${escapeHtml(lastError)}</div>` : ''}
+              </dd>
+            </div>
+          </dl>
+        </article>`;
       })
       .join('');
 
-    tbody.querySelectorAll('.btn-sync-one').forEach((btn) => {
-      btn.addEventListener('click', () => syncOne(btn.closest('tr').dataset.id));
+    container.querySelectorAll('.btn-sync-one').forEach((btn) => {
+      btn.addEventListener('click', () => syncOne(btn.closest('.mapping-card').dataset.id));
     });
-    tbody.querySelectorAll('.btn-edit').forEach((btn) => {
-      btn.addEventListener('click', () => openMappingModal(btn.closest('tr').dataset.id));
+    container.querySelectorAll('.btn-edit').forEach((btn) => {
+      btn.addEventListener('click', () => openMappingModal(btn.closest('.mapping-card').dataset.id));
     });
-    tbody.querySelectorAll('.btn-delete').forEach((btn) => {
-      btn.addEventListener('click', () => deleteMapping(btn.closest('tr').dataset.id));
+    container.querySelectorAll('.btn-delete').forEach((btn) => {
+      btn.addEventListener('click', () => deleteMapping(btn.closest('.mapping-card').dataset.id));
+    });
+    container.querySelectorAll('.btn-copy-local').forEach((btn) => {
+      btn.addEventListener('click', () => copyText(btn.dataset.copy || '', '本地目录'));
     });
   }
 
@@ -152,11 +281,27 @@
   async function syncOne(id) {
     try {
       const data = await api('POST', `/sync/${encodeURIComponent(id)}`);
-      toast(data.message, 'success');
       await refreshStatus();
+      toast(`${data.message}，正在同步...`, 'info');
+      await watchMappingSync(id);
     } catch (e) {
       toast(e.message, 'error');
     }
+  }
+
+  async function watchMappingSync(id) {
+    for (let i = 0; i < 30; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      await refreshStatus();
+      const st = statusCache?.mappings?.[id];
+      if (!st?.isSyncing && !st?.pendingSync) {
+        const err = st?.lastState?.lastError;
+        if (err) toast(`同步失败：${err}`, 'error');
+        else toast(`同步完成：${id}`, 'success');
+        return;
+      }
+    }
+    toast('同步仍在进行，可在列表查看最新状态', 'info');
   }
 
   async function deleteMapping(id) {
@@ -276,9 +421,21 @@
 
   function updateGlobalAppKeyHint() {
     const hint = $('#globalAppKeyHint');
+    const input = $('input[name="appKey"]', $('#globalForm'));
+    hint.classList.toggle('is-set', hasGlobalAppKey);
+    hint.classList.toggle('is-empty', !hasGlobalAppKey);
     hint.textContent = hasGlobalAppKey
-      ? '已配置全局 AppKey（输入新值可覆盖，留空不修改）'
-      : '未配置全局 AppKey，新建映射时需单独填写 AppKey';
+      ? '已保存全局 AppKey。这里只显示前 4 位和后 4 位；保持不变保存不会改动，输入新值才会覆盖。'
+      : '尚未保存全局 AppKey。新建映射时需单独填写 AppKey，或在这里输入后保存。';
+    if (input) {
+      input.placeholder = hasGlobalAppKey
+        ? '已保存，显示脱敏值；输入新值可覆盖'
+        : '输入全局 AppKey 后点击保存配置';
+      input.setAttribute(
+        'aria-describedby',
+        'globalAppKeyHint',
+      );
+    }
   }
 
   async function loadGlobalConfig() {
@@ -290,15 +447,19 @@
       const input = form.elements.namedItem(key);
       if (input && 'value' in input) input.value = val ?? '';
     }
-    $('input[name="appKey"]', form).value = '';
+    const appKeyInput = $('input[name="appKey"]', form);
+    globalAppKeyMasked = cfg.appKeyMasked || '';
+    appKeyInput.value = globalAppKeyMasked;
+    appKeyInput.dataset.maskedValue = globalAppKeyMasked;
     updateGlobalAppKeyHint();
+    updateMappingConcurrencyUi();
   }
 
   $('#btnSaveGlobal').addEventListener('click', async () => {
     const form = $('#globalForm');
     const body = {};
     const fields = [
-      'serverUrl', 'syncDirection', 'autoSyncIntervalSec', 'maxConcurrentMappings',
+      'serverUrl', 'syncDirection', 'autoSyncIntervalSec', 'maxConcurrentMappingsMode', 'maxConcurrentMappings',
       'maxRequestsPerMinute', 'stateDbPath', 'downloadConcurrency', 'uploadConcurrency',
       'managementPort', 'managementHost',
     ];
@@ -311,12 +472,16 @@
         body[name] = el.value.trim();
       }
     }
-    const appKey = form.elements.namedItem('appKey').value.trim();
-    if (appKey) body.appKey = appKey;
+    const appKeyInput = form.elements.namedItem('appKey');
+    const appKey = appKeyInput.value.trim();
+    const maskedValue = appKeyInput.dataset.maskedValue || '';
+    const appKeyChanged = appKey && appKey !== maskedValue;
+    if (appKeyChanged) body.appKey = appKey;
 
     try {
       const data = await api('PUT', '/config', body);
-      toast(data.message + (data.warnings?.length ? ' · ' + data.warnings[0] : ''), 'success');
+      const appKeySavedText = appKeyChanged ? '全局 AppKey 已保存，页面将显示脱敏值。' : data.message;
+      toast(appKeySavedText + (data.warnings?.length ? ' · ' + data.warnings[0] : ''), 'success');
       if (data.warnings?.length) toast(data.warnings.join(' '), 'info');
       hasGlobalAppKey = data.hasGlobalAppKey ?? hasGlobalAppKey;
       await loadGlobalConfig();
@@ -327,6 +492,14 @@
 
   // ==================== Status ====================
 
+  function mappingRunLabel(st) {
+    if (st.isSyncing) return '<span class="badge badge-sync">同步中</span>';
+    if (st.pendingSync) return '<span class="badge badge-sync">排队</span>';
+    if (st.lastState?.lastError) return '<span class="badge badge-error">异常</span>';
+    if (st.enabled) return '<span class="badge badge-on">空闲</span>';
+    return '<span class="badge badge-off">禁用</span>';
+  }
+
   function renderStatus() {
     const grid = $('#statusGrid');
     if (!statusCache?.mappings || Object.keys(statusCache.mappings).length === 0) {
@@ -334,30 +507,57 @@
       return;
     }
 
-    grid.innerHTML = Object.entries(statusCache.mappings)
+    const cfg = statusCache.config || {};
+    const mappingEntries = Object.entries(statusCache.mappings);
+    const syncingCount = mappingEntries.filter(([, st]) => st.isSyncing).length;
+    const pendingCount = mappingEntries.filter(([, st]) => st.pendingSync).length;
+    const errorCount = mappingEntries.filter(([, st]) => st.lastState?.lastError).length;
+    const refreshedAt = new Date().toLocaleString();
+
+    const overview = `<div class="status-overview">
+      <div class="status-metric"><span>服务运行</span><strong>${formatUptime(statusCache.uptime || 0)}</strong></div>
+      <div class="status-metric"><span>映射</span><strong>${cfg.enabledMappingCount || 0}/${cfg.mappingCount || 0}</strong></div>
+      <div class="status-metric"><span>同步中</span><strong>${syncingCount}</strong></div>
+      <div class="status-metric"><span>排队</span><strong>${pendingCount}</strong></div>
+      <div class="status-metric ${errorCount ? 'metric-danger' : ''}"><span>异常</span><strong>${errorCount}</strong></div>
+      <div class="status-metric"><span>自动间隔</span><strong>${cfg.autoSyncIntervalSec ?? '—'}s</strong></div>
+      <div class="status-metric"><span>映射并发</span><strong>${cfg.maxConcurrentMappingsMode || 'auto'} / ${cfg.effectiveMaxConcurrentMappings ?? '—'}</strong></div>
+      <div class="status-metric"><span>API 限速</span><strong>${cfg.maxRequestsPerMinute ?? '—'}/min</strong></div>
+      <div class="status-metric"><span>刷新时间</span><strong>${escapeHtml(refreshedAt)}</strong></div>
+    </div>`;
+
+    const cards = mappingEntries
       .map(([id, st]) => {
         const ls = st.lastState || {};
         const lastErr = ls.lastError;
-        return `<div class="status-card">
-          <h4>${escapeHtml(id)}</h4>
-          <dl>
-            <dt>启用</dt><dd>${st.enabled ? '是' : '否'}</dd>
-            <dt>同步中</dt><dd>${st.isSyncing ? '是' : '否'}</dd>
-            <dt>排队</dt><dd>${st.pendingSync ? '是' : '否'}</dd>
+        return `<div class="status-card ${lastErr ? 'status-card-error' : ''}">
+          <div class="status-card-head">
+            <h4>${escapeHtml(id)}</h4>
+            ${mappingRunLabel(st)}
+          </div>
+          <dl class="status-detail">
+            <dt>同步结果</dt><dd>${escapeHtml(syncStatsSummary(st))}</dd>
+            <dt>最后同步</dt><dd>${formatDateTime(ls.lastSuccessAt)}</dd>
+            <dt>同步方向</dt><dd>${syncDirectionLabel(st.syncDirection)}</dd>
             <dt>本地目录</dt><dd>${escapeHtml(st.localRoot || '—')}</dd>
-            <dt>上次成功</dt><dd>${ls.lastSuccessAt ? new Date(ls.lastSuccessAt).toLocaleString() : '—'}</dd>
-            <dt>上次错误</dt><dd>${lastErr ? escapeHtml(lastErr) : '—'}</dd>
+            <dt>远端路径</dt><dd>${escapeHtml(st.remoteRootFolderPath || '知识库根目录')}</dd>
+            <dt>空间 ID</dt><dd>${escapeHtml(ls.resolvedProjectId || '—')}</dd>
+            <dt>根目录 FileId</dt><dd>${escapeHtml(ls.resolvedRootFileId || '—')}</dd>
+            <dt>同步水位</dt><dd>${formatDateTime(ls.lastServerTime || ls.lastSyncSince)}</dd>
           </dl>
           ${lastErr && !st.isSyncing ? `<div class="error">${escapeHtml(lastErr)}</div>` : ''}
         </div>`;
       })
       .join('');
+
+    grid.innerHTML = `${overview}<div class="status-card-grid">${cards}</div>`;
   }
 
   async function refreshStatus() {
     statusCache = await api('GET', '/status');
     renderMappings();
     renderStatus();
+    updateMappingConcurrencyUi();
   }
 
   async function refreshAll() {

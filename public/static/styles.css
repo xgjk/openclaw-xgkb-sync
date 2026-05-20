@@ -142,6 +142,45 @@ body {
   font-weight: 600;
 }
 
+.settings-tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 16px;
+}
+
+.settings-tab {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text-muted);
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 0.8125rem;
+}
+
+.settings-tab:hover {
+  color: var(--text);
+  border-color: var(--primary);
+}
+
+.settings-tab.active {
+  background: rgba(59, 130, 246, 0.16);
+  border-color: var(--primary);
+  color: var(--text);
+}
+
+.settings-panel {
+  display: none;
+}
+
+.settings-panel.active {
+  display: block;
+}
+
+.advanced-only-hidden {
+  display: none !important;
+}
+
 .btn {
   border: none;
   border-radius: 8px;
@@ -202,40 +241,67 @@ body {
 
 .btn-icon:hover { color: var(--text); }
 
-.table-wrap {
-  overflow-x: auto;
-  border-radius: 8px;
-  border: 1px solid var(--border);
+.mapping-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: 14px;
 }
 
-.data-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 0.8125rem;
-}
-
-.data-table th,
-.data-table td {
-  padding: 10px 12px;
-  text-align: left;
-  border-bottom: 1px solid var(--border);
-}
-
-.data-table th {
-  background: var(--surface-2);
+.mapping-grid .empty {
   color: var(--text-muted);
-  font-weight: 500;
-  white-space: nowrap;
-}
-
-.data-table tr:last-child td { border-bottom: none; }
-
-.data-table tr:hover td { background: rgba(255, 255, 255, 0.02); }
-
-.data-table .empty {
+  padding: 28px;
   text-align: center;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+}
+
+.mapping-card {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px;
+  min-width: 0;
+}
+
+.mapping-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.mapping-title {
+  min-width: 0;
+}
+
+.mapping-badges {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+.mapping-meta {
+  display: grid;
+  gap: 10px;
+}
+
+.mapping-meta div {
+  display: grid;
+  grid-template-columns: 82px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+}
+
+.mapping-meta dt {
   color: var(--text-muted);
-  padding: 32px;
+  font-size: 0.75rem;
+}
+
+.mapping-meta dd {
+  min-width: 0;
+  font-size: 0.8125rem;
 }
 
 .cell-id {
@@ -245,10 +311,23 @@ body {
 }
 
 .cell-path {
-  max-width: 220px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.path-with-copy {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.path-with-copy .cell-path {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.path-with-copy .btn {
+  flex: 0 0 auto;
 }
 
 .badge {
@@ -274,10 +353,35 @@ body {
   color: var(--primary);
 }
 
+.badge-error {
+  background: rgba(239, 68, 68, 0.15);
+  color: var(--danger);
+}
+
+.muted {
+  color: var(--text-muted);
+}
+
+.cell-error {
+  color: var(--danger);
+  font-size: 0.6875rem;
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.sync-summary {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  margin-top: 5px;
+  overflow-wrap: anywhere;
+}
+
 .actions {
   display: flex;
   gap: 6px;
   flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .form-grid {
@@ -324,6 +428,27 @@ body {
   font-size: 0.75rem;
 }
 
+.secret-status {
+  display: block;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  line-height: 1.45;
+}
+
+.secret-status.is-set {
+  color: var(--success);
+  border-color: rgba(34, 197, 94, 0.35);
+  background: rgba(34, 197, 94, 0.1);
+}
+
+.secret-status.is-empty {
+  color: var(--warning);
+  border-color: rgba(245, 158, 11, 0.35);
+  background: rgba(245, 158, 11, 0.1);
+}
+
 .checkbox-row {
   flex-direction: row !important;
   align-items: center;
@@ -331,8 +456,46 @@ body {
 }
 
 .status-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.status-overview {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 12px;
+}
+
+.status-metric {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.status-metric span {
+  display: block;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  margin-bottom: 4px;
+}
+
+.status-metric strong {
+  display: block;
+  font-size: 1rem;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.metric-danger {
+  border-color: rgba(239, 68, 68, 0.45);
+  background: rgba(239, 68, 68, 0.08);
+}
+
+.status-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
   gap: 12px;
 }
 
@@ -343,17 +506,29 @@ body {
   padding: 14px;
 }
 
-.status-card h4 {
-  font-size: 0.875rem;
-  margin-bottom: 8px;
-  font-family: ui-monospace, monospace;
-  color: var(--primary);
+.status-card-error {
+  border-color: rgba(239, 68, 68, 0.45);
 }
 
-.status-card dl {
+.status-card-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: flex-start;
+  margin-bottom: 10px;
+}
+
+.status-card h4 {
+  font-size: 0.875rem;
+  font-family: ui-monospace, monospace;
+  color: var(--primary);
+  overflow-wrap: anywhere;
+}
+
+.status-detail {
   display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 4px 12px;
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: 7px 12px;
   font-size: 0.75rem;
 }
 
@@ -447,4 +622,14 @@ body {
   .header { flex-direction: column; }
   .toolbar { flex-direction: column; align-items: stretch; }
   .toolbar-left, .toolbar-right { justify-content: space-between; }
+  .settings-tabs { flex-wrap: wrap; }
+  .settings-tab { flex: 1 1 140px; }
+
+  .mapping-grid { grid-template-columns: 1fr; }
+  .mapping-card-head { flex-direction: column; }
+  .mapping-card .actions { width: 100%; justify-content: stretch; }
+  .mapping-card .actions .btn { flex: 1 1 0; }
+  .mapping-meta div { grid-template-columns: 76px minmax(0, 1fr); }
+  .path-with-copy { flex-direction: column; }
+  .path-with-copy .btn { width: 100%; }
 }

@@ -21,6 +21,7 @@ class SyncStateDb {
         last_server_time        INTEGER,
         last_success_at         INTEGER,
         last_error              TEXT,
+        last_stats_json         TEXT,
         resolved_root_file_id   TEXT,
         resolved_project_id     TEXT
       );
@@ -57,6 +58,7 @@ class SyncStateDb {
         const migrations = [
             'ALTER TABLE sync_mapping_state ADD COLUMN resolved_root_file_id TEXT',
             'ALTER TABLE sync_mapping_state ADD COLUMN resolved_project_id TEXT',
+            'ALTER TABLE sync_mapping_state ADD COLUMN last_stats_json TEXT',
         ];
         for (const sql of migrations) {
             try {
@@ -75,13 +77,14 @@ class SyncStateDb {
     upsertMappingState(state) {
         this.db.run(`INSERT INTO sync_mapping_state
          (mapping_id, last_sync_since, last_server_time, last_success_at, last_error,
-          resolved_root_file_id, resolved_project_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
+          last_stats_json, resolved_root_file_id, resolved_project_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(mapping_id) DO UPDATE SET
          last_sync_since       = COALESCE(excluded.last_sync_since,       last_sync_since),
          last_server_time      = COALESCE(excluded.last_server_time,      last_server_time),
          last_success_at       = COALESCE(excluded.last_success_at,       last_success_at),
          last_error            = excluded.last_error,
+         last_stats_json       = COALESCE(excluded.last_stats_json,       last_stats_json),
          resolved_root_file_id = COALESCE(excluded.resolved_root_file_id, resolved_root_file_id),
          resolved_project_id   = COALESCE(excluded.resolved_project_id,   resolved_project_id)`, [
             state.mappingId,
@@ -89,6 +92,7 @@ class SyncStateDb {
             state.lastServerTime ?? null,
             state.lastSuccessAt ?? null,
             state.lastError ?? null,
+            state.lastStats ? JSON.stringify(state.lastStats) : null,
             state.resolvedRootFileId ?? null,
             state.resolvedProjectId ?? null,
         ]);
@@ -120,6 +124,7 @@ class SyncStateDb {
              last_server_time      = NULL,
              last_success_at       = NULL,
              last_error            = NULL,
+             last_stats_json       = NULL,
              resolved_root_file_id = NULL,
              resolved_project_id   = NULL
          WHERE mapping_id = ?`, [mappingId]);
@@ -217,9 +222,20 @@ function rowToMappingState(row) {
         lastServerTime: row.last_server_time,
         lastSuccessAt: row.last_success_at,
         lastError: row.last_error,
+        lastStats: parseStats(row.last_stats_json),
         resolvedRootFileId: row.resolved_root_file_id,
         resolvedProjectId: row.resolved_project_id,
     };
+}
+function parseStats(raw) {
+    if (!raw)
+        return null;
+    try {
+        return JSON.parse(raw);
+    }
+    catch {
+        return null;
+    }
 }
 function rowToFileState(row) {
     return {

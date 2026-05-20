@@ -47,7 +47,9 @@ export interface SyncConfig {
     autoSyncIntervalSec: number;
     /** SQLite 状态库路径，默认 ./openclaw-sync-state.db */
     stateDbPath?: string;
-    /** 最大并发 mapping 数量，默认 2 */
+    /** mapping 并发策略：auto 自动适配，manual 使用 maxConcurrentMappings */
+    maxConcurrentMappingsMode?: 'auto' | 'manual';
+    /** 手动模式下的最大并发 mapping 数量，默认 2 */
     maxConcurrentMappings?: number;
     /**
      * API 限速：每分钟最大请求数（令牌桶稳态速率），默认 60。
@@ -210,6 +212,7 @@ export interface MappingState {
     lastServerTime?: number | null;
     lastSuccessAt?: number | null;
     lastError?: string | null;
+    lastStats?: SyncStats | null;
     /** 从 remoteRootFolderPath 解析后缓存的 rootFileId，避免每次启动重新解析 */
     resolvedRootFileId?: string | null;
     /** 自动解析或手动配置的 projectId 缓存 */

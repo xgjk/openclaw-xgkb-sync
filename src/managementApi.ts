@@ -2,6 +2,7 @@ import * as http from 'http';
 import * as fs from 'fs';
 import * as path from 'path';
 import { SyncScheduler } from './scheduler';
+import { resolveMaxConcurrentMappings } from './scheduler';
 import { SyncConfig, SyncMapping } from './types';
 import { generateUniqueMappingId, validateMapping } from './config';
 import { getMappingCredentialsViolation } from './managementApiCredentials';
@@ -23,6 +24,14 @@ const VERSION = readVersion();
 /** 静态管理页面目录（与 dist/ 或 src/ 同级的 public/） */
 const PUBLIC_DIR = path.resolve(__dirname, '../public');
 
+/** 仅用于界面展示的脱敏 AppKey，避免返回明文。 */
+function maskSecret(value?: string): string | undefined {
+  const secret = value?.trim();
+  if (!secret) return undefined;
+  if (secret.length <= 8) return `${secret[0] ?? ''}${'•'.repeat(Math.max(secret.length - 2, 1))}${secret.slice(-1)}`;
+  return `${secret.slice(0, 4)}${'•'.repeat(Math.min(secret.length - 8, 24))}${secret.slice(-4)}`;
+}
+
 /** 可通过 PUT /config 修改的全局字段（managementPort/Host 需重启进程才生效） */
 const EDITABLE_CONFIG_FIELDS = [
   'serverUrl',
@@ -30,6 +39,7 @@ const EDITABLE_CONFIG_FIELDS = [
   'syncDirection',
   'autoSyncIntervalSec',
   'stateDbPath',
+  'maxConcurrentMappingsMode',
   'maxConcurrentMappings',
   'maxRequestsPerMinute',
   'rateLimitBurst',
@@ -242,6 +252,8 @@ export class ManagementApi {
         syncDirection: config.syncDirection,
         autoSyncIntervalSec: config.autoSyncIntervalSec,
         maxConcurrentMappings: config.maxConcurrentMappings,
+        maxConcurrentMappingsMode: config.maxConcurrentMappingsMode,
+        effectiveMaxConcurrentMappings: resolveMaxConcurrentMappings(config),
         maxRequestsPerMinute: config.maxRequestsPerMinute,
         mappingCount: config.mappings.length,
         enabledMappingCount: config.mappings.filter((m) => m.enabled).length,
@@ -395,7 +407,6 @@ export class ManagementApi {
         }
         if (
           key === 'autoSyncIntervalSec' ||
-          key === 'maxConcurrentMappings' ||
           key === 'maxRequestsPerMinute' ||
           key === 'rateLimitBurst' ||
           key === 'rateLimitCooldownSec' ||
@@ -407,6 +418,20 @@ export class ManagementApi {
             throw new Error(`${key} 必须是非负数`);
           }
           raw[key] = val;
+          continue;
+        }
+        if (key === 'maxConcurrentMappingsMode') {
+          if (val !== 'auto' && val !== 'manual') {
+            throw new Error('maxConcurrentMappingsMode 必须是 auto | manual');
+          }
+          raw.maxConcurrentMappingsMode = val;
+          continue;
+        }
+        if (key === 'maxConcurrentMappings') {
+          if (typeof val !== 'number' || !Number.isInteger(val) || val < 1) {
+            throw new Error('maxConcurrentMappings 必须是正整数');
+          }
+          raw.maxConcurrentMappings = val;
           continue;
         }
         if (key === 'stateDbPath') {
@@ -787,10 +812,13 @@ export class ManagementApi {
   private globalConfigSummary(config: SyncConfig): Record<string, unknown> {
     return {
       serverUrl: config.serverUrl,
+      appKeyMasked: maskSecret(config.appKey),
       syncDirection: config.syncDirection,
       autoSyncIntervalSec: config.autoSyncIntervalSec,
       stateDbPath: config.stateDbPath,
+      maxConcurrentMappingsMode: config.maxConcurrentMappingsMode,
       maxConcurrentMappings: config.maxConcurrentMappings,
+      effectiveMaxConcurrentMappings: resolveMaxConcurrentMappings(config),
       maxRequestsPerMinute: config.maxRequestsPerMinute,
       rateLimitBurst: config.rateLimitBurst,
       rateLimitCooldownSec: config.rateLimitCooldownSec,
@@ -834,7 +862,7 @@ export class ManagementApi {
     res.writeHead(200, {
       'Content-Type': contentType,
       'Content-Length': data.length,
-      'Cache-Control': ext === '.html' ? 'no-cache' : 'public, max-age=3600',
+      'Cache-Control': 'no-cache',
     });
     res.end(data);
   }
