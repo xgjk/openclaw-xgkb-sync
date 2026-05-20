@@ -7,6 +7,7 @@ import {
   DEFAULT_DB_PATH,
   DEFAULT_EXCLUDE_PATTERNS,
   DEFAULT_FILE_PATTERNS,
+  DEFAULT_FULL_RECONCILE_INTERVAL_SEC,
   DEFAULT_MANAGEMENT_HOST,
   DEFAULT_MANAGEMENT_PORT,
   DEFAULT_MAX_CONCURRENT_MAPPINGS,
@@ -36,6 +37,7 @@ export function getDefaultConfigRaw(): Record<string, unknown> {
     serverUrl: DEFAULT_SERVER_URL,
     syncDirection: 'bidirectional',
     autoSyncIntervalSec: DEFAULT_AUTO_SYNC_INTERVAL_SEC,
+    fullReconcileIntervalSec: DEFAULT_FULL_RECONCILE_INTERVAL_SEC,
     stateDbPath: DEFAULT_DB_PATH,
     maxConcurrentMappingsMode: 'auto',
     maxConcurrentMappings: DEFAULT_MAX_CONCURRENT_MAPPINGS,
@@ -57,6 +59,7 @@ export function configToRaw(config: SyncConfig): Record<string, unknown> {
     serverUrl: config.serverUrl,
     syncDirection: config.syncDirection,
     autoSyncIntervalSec: config.autoSyncIntervalSec,
+    fullReconcileIntervalSec: config.fullReconcileIntervalSec,
     stateDbPath: config.stateDbPath,
     maxConcurrentMappingsMode: config.maxConcurrentMappingsMode,
     maxConcurrentMappings: config.maxConcurrentMappings,
@@ -231,6 +234,10 @@ function validateConfig(raw: unknown, filePath: string): SyncConfig {
       typeof obj.autoSyncIntervalSec === 'number'
         ? obj.autoSyncIntervalSec
         : DEFAULT_AUTO_SYNC_INTERVAL_SEC,
+    fullReconcileIntervalSec:
+      typeof obj.fullReconcileIntervalSec === 'number'
+        ? obj.fullReconcileIntervalSec
+        : DEFAULT_FULL_RECONCILE_INTERVAL_SEC,
     stateDbPath:
       typeof obj.stateDbPath === 'string' && obj.stateDbPath.trim()
         ? obj.stateDbPath.trim()

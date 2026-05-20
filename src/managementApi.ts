@@ -38,6 +38,7 @@ const EDITABLE_CONFIG_FIELDS = [
   'appKey',
   'syncDirection',
   'autoSyncIntervalSec',
+  'fullReconcileIntervalSec',
   'stateDbPath',
   'maxConcurrentMappingsMode',
   'maxConcurrentMappings',
@@ -251,6 +252,7 @@ export class ManagementApi {
         serverUrl: config.serverUrl,
         syncDirection: config.syncDirection,
         autoSyncIntervalSec: config.autoSyncIntervalSec,
+        fullReconcileIntervalSec: config.fullReconcileIntervalSec,
         maxConcurrentMappings: config.maxConcurrentMappings,
         maxConcurrentMappingsMode: config.maxConcurrentMappingsMode,
         effectiveMaxConcurrentMappings: resolveMaxConcurrentMappings(config),
@@ -407,6 +409,7 @@ export class ManagementApi {
         }
         if (
           key === 'autoSyncIntervalSec' ||
+          key === 'fullReconcileIntervalSec' ||
           key === 'maxRequestsPerMinute' ||
           key === 'rateLimitBurst' ||
           key === 'rateLimitCooldownSec' ||
@@ -815,6 +818,7 @@ export class ManagementApi {
       appKeyMasked: maskSecret(config.appKey),
       syncDirection: config.syncDirection,
       autoSyncIntervalSec: config.autoSyncIntervalSec,
+      fullReconcileIntervalSec: config.fullReconcileIntervalSec,
       stateDbPath: config.stateDbPath,
       maxConcurrentMappingsMode: config.maxConcurrentMappingsMode,
       maxConcurrentMappings: config.maxConcurrentMappings,

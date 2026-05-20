@@ -28,6 +28,11 @@ export interface RemoteFsInitResult {
     rootFileId: string;
     rootFolderPath: string;
 }
+export interface PruneEmptyDirectoriesResult {
+    deleted: number;
+    failed: number;
+    errors: string[];
+}
 /**
  * Remote knowledge-base filesystem adapter for OpenClaw.
  * Handles root resolution, listing, downloads, uploads, and deletes.
@@ -90,6 +95,14 @@ export declare class RemoteFsAdapter {
     updateFile(remoteFileId: string, fileName: string, content: string): Promise<ApiResult<string>>;
     /** Delete remote file. */
     deleteFile(remoteFileId: string): Promise<ApiResult<void>>;
+    /**
+     * 后序清理远端空目录。
+     * - 不删除 mapping 根目录自身；
+     * - 若本地仍存在同名目录，即使为空也保留；
+     * - 只删除知识库中真正没有任何子项的目录，避免误删含非同步文件的目录。
+     */
+    pruneEmptyDirectories(localDirectoryPaths: Set<string>): Promise<ApiResult<PruneEmptyDirectoriesResult>>;
+    private pruneFolderNode;
     /**
      * Incremental change listing through listChanges.
      * @param since Last successful sync watermark.

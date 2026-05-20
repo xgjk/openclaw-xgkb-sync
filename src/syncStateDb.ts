@@ -21,6 +21,7 @@ export class SyncStateDb {
         last_sync_since         INTEGER,
         last_server_time        INTEGER,
         last_success_at         INTEGER,
+        last_full_scan_at       INTEGER,
         last_error              TEXT,
         last_stats_json         TEXT,
         resolved_root_file_id   TEXT,
@@ -61,6 +62,7 @@ export class SyncStateDb {
       'ALTER TABLE sync_mapping_state ADD COLUMN resolved_root_file_id TEXT',
       'ALTER TABLE sync_mapping_state ADD COLUMN resolved_project_id TEXT',
       'ALTER TABLE sync_mapping_state ADD COLUMN last_stats_json TEXT',
+      'ALTER TABLE sync_mapping_state ADD COLUMN last_full_scan_at INTEGER',
     ];
     for (const sql of migrations) {
       try {
@@ -87,12 +89,13 @@ export class SyncStateDb {
     this.db.run(
       `INSERT INTO sync_mapping_state
          (mapping_id, last_sync_since, last_server_time, last_success_at, last_error,
-          last_stats_json, resolved_root_file_id, resolved_project_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          last_full_scan_at, last_stats_json, resolved_root_file_id, resolved_project_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(mapping_id) DO UPDATE SET
          last_sync_since       = COALESCE(excluded.last_sync_since,       last_sync_since),
          last_server_time      = COALESCE(excluded.last_server_time,      last_server_time),
          last_success_at       = COALESCE(excluded.last_success_at,       last_success_at),
+         last_full_scan_at     = COALESCE(excluded.last_full_scan_at,     last_full_scan_at),
          last_error            = excluded.last_error,
          last_stats_json       = COALESCE(excluded.last_stats_json,       last_stats_json),
          resolved_root_file_id = COALESCE(excluded.resolved_root_file_id, resolved_root_file_id),
@@ -103,6 +106,7 @@ export class SyncStateDb {
         state.lastServerTime ?? null,
         state.lastSuccessAt ?? null,
         state.lastError ?? null,
+        state.lastFullScanAt ?? null,
         state.lastStats ? JSON.stringify(state.lastStats) : null,
         state.resolvedRootFileId ?? null,
         state.resolvedProjectId ?? null,
@@ -141,6 +145,7 @@ export class SyncStateDb {
          SET last_sync_since       = NULL,
              last_server_time      = NULL,
              last_success_at       = NULL,
+             last_full_scan_at     = NULL,
              last_error            = NULL,
              last_stats_json       = NULL,
              resolved_root_file_id = NULL,
@@ -274,6 +279,7 @@ interface RawMappingState {
   last_sync_since: number | null;
   last_server_time: number | null;
   last_success_at: number | null;
+  last_full_scan_at: number | null;
   last_error: string | null;
   last_stats_json: string | null;
   resolved_root_file_id: string | null;
@@ -299,6 +305,7 @@ function rowToMappingState(row: RawMappingState): MappingState {
     lastSyncSince: row.last_sync_since,
     lastServerTime: row.last_server_time,
     lastSuccessAt: row.last_success_at,
+    lastFullScanAt: row.last_full_scan_at,
     lastError: row.last_error,
     lastStats: parseStats(row.last_stats_json),
     resolvedRootFileId: row.resolved_root_file_id,

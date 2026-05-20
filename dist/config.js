@@ -54,6 +54,7 @@ function getDefaultConfigRaw() {
         serverUrl: constants_1.DEFAULT_SERVER_URL,
         syncDirection: 'bidirectional',
         autoSyncIntervalSec: constants_1.DEFAULT_AUTO_SYNC_INTERVAL_SEC,
+        fullReconcileIntervalSec: constants_1.DEFAULT_FULL_RECONCILE_INTERVAL_SEC,
         stateDbPath: constants_1.DEFAULT_DB_PATH,
         maxConcurrentMappingsMode: 'auto',
         maxConcurrentMappings: constants_1.DEFAULT_MAX_CONCURRENT_MAPPINGS,
@@ -74,6 +75,7 @@ function configToRaw(config) {
         serverUrl: config.serverUrl,
         syncDirection: config.syncDirection,
         autoSyncIntervalSec: config.autoSyncIntervalSec,
+        fullReconcileIntervalSec: config.fullReconcileIntervalSec,
         stateDbPath: config.stateDbPath,
         maxConcurrentMappingsMode: config.maxConcurrentMappingsMode,
         maxConcurrentMappings: config.maxConcurrentMappings,
@@ -228,6 +230,9 @@ function validateConfig(raw, filePath) {
         autoSyncIntervalSec: typeof obj.autoSyncIntervalSec === 'number'
             ? obj.autoSyncIntervalSec
             : constants_1.DEFAULT_AUTO_SYNC_INTERVAL_SEC,
+        fullReconcileIntervalSec: typeof obj.fullReconcileIntervalSec === 'number'
+            ? obj.fullReconcileIntervalSec
+            : constants_1.DEFAULT_FULL_RECONCILE_INTERVAL_SEC,
         stateDbPath: typeof obj.stateDbPath === 'string' && obj.stateDbPath.trim()
             ? obj.stateDbPath.trim()
             : constants_1.DEFAULT_DB_PATH,

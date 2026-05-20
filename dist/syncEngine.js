@@ -81,14 +81,22 @@ class SyncEngine {
         return micromatch_1.default.isMatch(path, this.filePatterns);
     }
     emptyStats() {
-        return { uploaded: 0, downloaded: 0, deleted: 0, skipped: 0, failed: 0, errors: [] };
+        return {
+            uploaded: 0,
+            downloaded: 0,
+            deleted: 0,
+            prunedRemoteDirs: 0,
+            skipped: 0,
+            failed: 0,
+            errors: [],
+        };
     }
     /**
      * 执行一轮同步（增量优先，降级全量）。
      * @param onProgress 进度回调
      * @param lastSyncSince 上次成功同步的水位时间戳（毫秒）；undefined = 首次全量
      */
-    async runSync(onProgress, lastSyncSince) {
+    async runSync(onProgress, lastSyncSince, opts) {
         this.stats = this.emptyStats();
         this.progress = onProgress ?? (() => undefined);
         const prog = (msg) => {
@@ -98,9 +106,10 @@ class SyncEngine {
         prog('扫描本地文件...');
         const localFiles = await this.localFs.listFiles();
         prog(`本地: ${localFiles.length} 个文件`);
-        const { map: remoteMap, newSince, remoteDeltaCount } = await this.buildRemoteMap(lastSyncSince, prog);
+        const { map: remoteMap, newSince, remoteDeltaCount, fullScan } = await this.buildRemoteMap(lastSyncSince, prog, opts);
         prog(`远端: ${remoteMap.size} 个文件（水位 ${newSince}）`);
         this.stats.newSince = newSince;
+        this.stats.fullScan = fullScan;
         const localMap = new Map(localFiles.map((f) => [f.path, f]));
         // 一次性批量加载所有文件状态，供决策循环 O(1) 查找，避免 N 次独立 SQLite 查询
         const recordMap = new Map(this.db.getAllFileStates(this.mapping.mappingId).map((r) => [r.localPath, r]));
@@ -113,6 +122,7 @@ class SyncEngine {
             if (!hasLocalNew && !hasLocalModified && !hasLocalDeleted) {
                 const totalPaths = new Set([...localMap.keys(), ...remoteMap.keys()]).size;
                 this.stats.skipped += totalPaths;
+                await this.pruneRemoteEmptyDirectories(prog);
                 prog(`增量无变化（远端0变更，本地无新增/修改/删除），跳过决策，共跳过 ${totalPaths} 个路径`);
                 return this.stats;
             }
@@ -156,14 +166,41 @@ class SyncEngine {
             prog(`开始上传 ${uploadPlans.length} 个文件（并发=${this.uploadConcurrency}）...`);
             await this.executePlansInQueue(uploadPlans, this.uploadConcurrency, '上传', prog);
         }
-        prog(`完成: ↑${this.stats.uploaded} ↓${this.stats.downloaded} ✗${this.stats.deleted} fail:${this.stats.failed} skip:${this.stats.skipped}`);
+        await this.pruneRemoteEmptyDirectories(prog);
+        prog(`完成: ↑${this.stats.uploaded} ↓${this.stats.downloaded} ✗${this.stats.deleted}` +
+            ` 空目录清理:${this.stats.prunedRemoteDirs ?? 0} fail:${this.stats.failed} skip:${this.stats.skipped}`);
         return this.stats;
+    }
+    async pruneRemoteEmptyDirectories(prog) {
+        const dir = this.mapping.syncDirection ?? 'bidirectional';
+        if (dir === 'pull')
+            return;
+        const localDirs = new Set(await this.localFs.listDirectories());
+        const result = await this.remoteFs.pruneEmptyDirectories(localDirs);
+        if (!result.ok) {
+            this.stats.failed++;
+            this.stats.errors.push(`清理远端空目录失败: ${result.error}`);
+            prog(`清理远端空目录失败: ${result.error}`);
+            return;
+        }
+        this.stats.prunedRemoteDirs = (this.stats.prunedRemoteDirs ?? 0) + result.value.deleted;
+        if (result.value.failed > 0) {
+            this.stats.failed += result.value.failed;
+            this.stats.errors.push(...result.value.errors);
+        }
+        if (result.value.deleted > 0 || result.value.failed > 0) {
+            prog(`远端空目录清理: 删除=${result.value.deleted} 失败=${result.value.failed}`);
+        }
     }
     // ==================== 远端视图构建 ====================
     /**
      * 构建远端文件 Map，优先走增量路径，遇到无法解析的新目录降级全量。
      */
-    async buildRemoteMap(lastSyncSince, prog) {
+    async buildRemoteMap(lastSyncSince, prog, opts) {
+        if (opts?.forceFullScan) {
+            prog(`强制全量对账: ${opts.forceFullScanReason ?? '周期性校验'}`);
+            return this.fullRemoteMap();
+        }
         if (lastSyncSince !== undefined) {
             const sinceStr = new Date(lastSyncSince).toLocaleString('zh-CN');
             prog(`增量模式: since=${lastSyncSince} (${sinceStr})`);
@@ -301,7 +338,7 @@ class SyncEngine {
             });
         }
         this.removePathsUnderFileNodes(map, prog);
-        return { map, newSince, remoteDeltaCount: upsertById.size + deleteIds.size };
+        return { map, newSince, fullScan: false, remoteDeltaCount: upsertById.size + deleteIds.size };
     }
     /** 全量扫描（listDescendantFiles 分页） */
     async fullRemoteMap() {
@@ -315,7 +352,7 @@ class SyncEngine {
             map.set(f.path, f);
         this.removePathsUnderFileNodes(map, (msg) => console.log(`[SyncEngine][${this.mapping.mappingId}] ${msg}`));
         console.log(`[SyncEngine][${this.mapping.mappingId}] 全量扫描完成: ${map.size} 个文件，新水位=${newSince}`);
-        return { map, newSince };
+        return { map, newSince, fullScan: true };
     }
     /**
      * 知识库允许「文件节点」下再挂文件；本地不能把同名路径既当文件又当目录。

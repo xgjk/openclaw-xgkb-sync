@@ -39,6 +39,16 @@ export class LocalFsAdapter {
     return entries;
   }
 
+  /**
+   * 递归列出 localRoot 下所有纳入同步遍历范围的目录。
+   * 返回路径均为相对于 localRoot 的路径（使用 "/" 分隔），不包含根目录自身。
+   */
+  async listDirectories(): Promise<string[]> {
+    const dirs: string[] = [];
+    await this.walkDirectories(this.localRoot, '', dirs);
+    return dirs;
+  }
+
   private async walk(
     absDir: string,
     relPrefix: string,
@@ -85,6 +95,40 @@ export class LocalFsAdapter {
           // stat 失败跳过
         }
       }
+    }
+
+    if (subDirTasks.length > 0) {
+      await Promise.all(subDirTasks);
+    }
+  }
+
+  private async walkDirectories(
+    absDir: string,
+    relPrefix: string,
+    dirs: string[],
+  ): Promise<void> {
+    let dirEntries: fsSync.Dirent[];
+    try {
+      dirEntries = await fs.readdir(absDir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    const subDirTasks: Promise<void>[] = [];
+    for (const dirent of dirEntries) {
+      if (dirent.name.startsWith('.')) continue;
+      if (!dirent.isDirectory()) continue;
+
+      const relPath = relPrefix ? `${relPrefix}/${dirent.name}` : dirent.name;
+      const relDirPath = relPath + '/';
+      if (micromatch.isMatch(relDirPath, this.excludePatterns)) continue;
+
+      const safePath = normalizeSeparator(relPath)
+        .split('/')
+        .map((seg) => sanitizePathSegment(seg))
+        .join('/');
+      dirs.push(safePath);
+      subDirTasks.push(this.walkDirectories(path.join(absDir, dirent.name), relPath, dirs));
     }
 
     if (subDirTasks.length > 0) {

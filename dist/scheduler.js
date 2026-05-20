@@ -168,11 +168,16 @@ class SyncScheduler {
         // 读取上次同步状态（含水位 + 已缓存的远端 ID，一次查询复用）
         const mappingState = this.db.getMappingState(mapping.mappingId);
         const lastSyncSince = mappingState?.lastSyncSince != null ? mappingState.lastSyncSince : undefined;
-        const isIncremental = lastSyncSince !== undefined;
+        const fullReconcileIntervalSec = this.config.fullReconcileIntervalSec ?? constants_1.DEFAULT_FULL_RECONCILE_INTERVAL_SEC;
+        const forceFullScan = this.shouldForceFullScan(mappingState, fullReconcileIntervalSec);
+        const isIncremental = lastSyncSince !== undefined && !forceFullScan.force;
         const sinceStr = lastSyncSince
             ? new Date(lastSyncSince).toLocaleString('zh-CN')
             : '无（首次全量）';
         console.log(`[Scheduler][${mapping.mappingId}] 模式=${isIncremental ? '增量' : '全量'} lastSyncSince=${sinceStr}`);
+        if (forceFullScan.force) {
+            console.log(`[Scheduler][${mapping.mappingId}] 强制全量对账原因: ${forceFullScan.reason}`);
+        }
         const effectiveAppKey = (mapping.appKey ?? this.config.appKey ?? '').trim();
         const limiter = this.getLimiter(effectiveAppKey);
         const api = new kbApi_1.KbApiClient(this.config.serverUrl, effectiveAppKey, limiter);
@@ -217,7 +222,10 @@ class SyncScheduler {
         });
         let stats;
         try {
-            stats = await engine.runSync((msg) => console.log(`  [${mapping.mappingId}] ${msg}`), lastSyncSince);
+            stats = await engine.runSync((msg) => console.log(`  [${mapping.mappingId}] ${msg}`), lastSyncSince, {
+                forceFullScan: forceFullScan.force,
+                forceFullScanReason: forceFullScan.reason,
+            });
         }
         catch (e) {
             const msg = e instanceof Error ? e.message : String(e);
@@ -235,6 +243,7 @@ class SyncScheduler {
                 lastSyncSince: stats.newSince,
                 lastServerTime: stats.newSince,
                 lastSuccessAt: Date.now(),
+                ...(stats.fullScan ? { lastFullScanAt: Date.now() } : {}),
                 lastError: null,
                 lastStats: stats,
             });
@@ -254,6 +263,23 @@ class SyncScheduler {
     /** 获取当前生效的配置（供 ManagementApi 读取） */
     getConfig() {
         return this.config;
+    }
+    shouldForceFullScan(mappingState, intervalSec) {
+        if (intervalSec <= 0)
+            return { force: false };
+        if (!mappingState?.lastSyncSince)
+            return { force: false };
+        if (!mappingState.lastFullScanAt) {
+            return { force: true, reason: '尚未记录成功的全量对账' };
+        }
+        const elapsedMs = Date.now() - mappingState.lastFullScanAt;
+        if (elapsedMs >= intervalSec * 1000) {
+            return {
+                force: true,
+                reason: `距上次全量对账已 ${Math.round(elapsedMs / 1000)}s，超过配置间隔 ${intervalSec}s`,
+            };
+        }
+        return { force: false };
     }
     /**
      * 完全重置指定 mapping 的同步状态（文件记录 + 水位 + 远端 ID 缓存）。

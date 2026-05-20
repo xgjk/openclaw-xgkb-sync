@@ -346,6 +346,72 @@ class RemoteFsAdapter {
         return { ok: true, value: undefined };
     }
     /**
+     * 后序清理远端空目录。
+     * - 不删除 mapping 根目录自身；
+     * - 若本地仍存在同名目录，即使为空也保留；
+     * - 只删除知识库中真正没有任何子项的目录，避免误删含非同步文件的目录。
+     */
+    async pruneEmptyDirectories(localDirectoryPaths) {
+        if (!this.resolvedRootFileId) {
+            return { ok: false, error: 'RemoteFsAdapter is not initialized; call init() first' };
+        }
+        const result = await this.pruneFolderNode(this.resolvedRootFileId, '', localDirectoryPaths, true);
+        return {
+            ok: true,
+            value: {
+                deleted: result.deleted,
+                failed: result.failed,
+                errors: result.errors,
+            },
+        };
+    }
+    async pruneFolderNode(folderId, relPath, localDirectoryPaths, isRoot) {
+        const childrenResult = await this.api.getChildFiles(folderId);
+        if (!childrenResult.ok) {
+            return {
+                existsAfter: true,
+                deleted: 0,
+                failed: 1,
+                errors: [`${relPath || '<root>'}: list children failed: ${childrenResult.error}`],
+            };
+        }
+        let deleted = 0;
+        let failed = 0;
+        const errors = [];
+        let hasChildAfterPrune = false;
+        for (const child of childrenResult.value ?? []) {
+            const childId = String(child.id);
+            if (child.type !== 1) {
+                hasChildAfterPrune = true;
+                continue;
+            }
+            const childRelPath = relPath
+                ? `${relPath}/${(0, pathSanitize_1.sanitizePathSegment)(child.name)}`
+                : (0, pathSanitize_1.sanitizePathSegment)(child.name);
+            const childResult = await this.pruneFolderNode(childId, childRelPath, localDirectoryPaths, false);
+            deleted += childResult.deleted;
+            failed += childResult.failed;
+            errors.push(...childResult.errors);
+            if (childResult.existsAfter) {
+                hasChildAfterPrune = true;
+            }
+        }
+        if (isRoot || hasChildAfterPrune || localDirectoryPaths.has(relPath)) {
+            return { existsAfter: true, deleted, failed, errors };
+        }
+        const deleteResult = await this.api.deleteFile(folderId);
+        if (!deleteResult.ok) {
+            return {
+                existsAfter: true,
+                deleted,
+                failed: failed + 1,
+                errors: [...errors, `${relPath}: delete empty folder failed: ${deleteResult.error}`],
+            };
+        }
+        console.log(`[RemoteFs] Pruned empty remote folder: ${relPath} (${folderId})`);
+        return { existsAfter: false, deleted: deleted + 1, failed, errors };
+    }
+    /**
      * Incremental change listing through listChanges.
      * @param since Last successful sync watermark.
      */

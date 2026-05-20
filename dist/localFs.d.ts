@@ -14,7 +14,13 @@ export declare class LocalFsAdapter {
      * 返回路径均为相对于 localRoot 的路径（使用 "/" 分隔）。
      */
     listFiles(): Promise<LocalFileEntry[]>;
+    /**
+     * 递归列出 localRoot 下所有纳入同步遍历范围的目录。
+     * 返回路径均为相对于 localRoot 的路径（使用 "/" 分隔），不包含根目录自身。
+     */
+    listDirectories(): Promise<string[]>;
     private walk;
+    private walkDirectories;
     /** 读取文件内容（UTF-8） */
     readFile(relativePath: string): Promise<string>;
     /**

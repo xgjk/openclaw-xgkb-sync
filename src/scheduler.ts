@@ -7,6 +7,7 @@ import { SyncStateDb } from './syncStateDb';
 import { SyncConfig, SyncMapping, SyncStats } from './types';
 import {
   DEFAULT_DB_PATH,
+  DEFAULT_FULL_RECONCILE_INTERVAL_SEC,
   DEFAULT_MAX_CONCURRENT_MAPPINGS,
   DEFAULT_MAX_REQUESTS_PER_MINUTE,
   DEFAULT_RATE_LIMIT_BURST,
@@ -213,11 +214,17 @@ export class SyncScheduler {
     const lastSyncSince =
       mappingState?.lastSyncSince != null ? mappingState.lastSyncSince : undefined;
 
-    const isIncremental = lastSyncSince !== undefined;
+    const fullReconcileIntervalSec =
+      this.config.fullReconcileIntervalSec ?? DEFAULT_FULL_RECONCILE_INTERVAL_SEC;
+    const forceFullScan = this.shouldForceFullScan(mappingState, fullReconcileIntervalSec);
+    const isIncremental = lastSyncSince !== undefined && !forceFullScan.force;
     const sinceStr = lastSyncSince
       ? new Date(lastSyncSince).toLocaleString('zh-CN')
       : '无（首次全量）';
     console.log(`[Scheduler][${mapping.mappingId}] 模式=${isIncremental ? '增量' : '全量'} lastSyncSince=${sinceStr}`);
+    if (forceFullScan.force) {
+      console.log(`[Scheduler][${mapping.mappingId}] 强制全量对账原因: ${forceFullScan.reason}`);
+    }
 
     const effectiveAppKey = (mapping.appKey ?? this.config.appKey ?? '').trim();
     const limiter = this.getLimiter(effectiveAppKey);
@@ -282,6 +289,10 @@ export class SyncScheduler {
       stats = await engine.runSync(
         (msg) => console.log(`  [${mapping.mappingId}] ${msg}`),
         lastSyncSince,
+        {
+          forceFullScan: forceFullScan.force,
+          forceFullScanReason: forceFullScan.reason,
+        },
       );
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -300,6 +311,7 @@ export class SyncScheduler {
         lastSyncSince: stats.newSince,
         lastServerTime: stats.newSince,
         lastSuccessAt: Date.now(),
+        ...(stats.fullScan ? { lastFullScanAt: Date.now() } : {}),
         lastError: null,
         lastStats: stats,
       });
@@ -326,6 +338,27 @@ export class SyncScheduler {
   /** 获取当前生效的配置（供 ManagementApi 读取） */
   getConfig(): SyncConfig {
     return this.config;
+  }
+
+  private shouldForceFullScan(
+    mappingState: ReturnType<SyncStateDb['getMappingState']>,
+    intervalSec: number,
+  ): { force: boolean; reason?: string } {
+    if (intervalSec <= 0) return { force: false };
+    if (!mappingState?.lastSyncSince) return { force: false };
+    if (!mappingState.lastFullScanAt) {
+      return { force: true, reason: '尚未记录成功的全量对账' };
+    }
+
+    const elapsedMs = Date.now() - mappingState.lastFullScanAt;
+    if (elapsedMs >= intervalSec * 1000) {
+      return {
+        force: true,
+        reason: `距上次全量对账已 ${Math.round(elapsedMs / 1000)}s，超过配置间隔 ${intervalSec}s`,
+      };
+    }
+
+    return { force: false };
   }
 
   /**

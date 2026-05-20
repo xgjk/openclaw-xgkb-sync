@@ -45,6 +45,12 @@ export interface SyncConfig {
     syncDirection: 'bidirectional' | 'push' | 'pull';
     /** 自动同步间隔（秒），0 表示关闭 */
     autoSyncIntervalSec: number;
+    /**
+     * 强制全量对账间隔（秒），默认 3600。
+     * 增量同步依赖 listChanges + SQLite 状态；周期性全量扫描可发现历史漏记录。
+     * 设为 0 表示关闭周期性全量对账。
+     */
+    fullReconcileIntervalSec?: number;
     /** SQLite 状态库路径，默认 ./openclaw-sync-state.db */
     stateDbPath?: string;
     /** mapping 并发策略：auto 自动适配，manual 使用 maxConcurrentMappings */
@@ -211,6 +217,7 @@ export interface MappingState {
     lastSyncSince?: number | null;
     lastServerTime?: number | null;
     lastSuccessAt?: number | null;
+    lastFullScanAt?: number | null;
     lastError?: string | null;
     lastStats?: SyncStats | null;
     /** 从 remoteRootFolderPath 解析后缓存的 rootFileId，避免每次启动重新解析 */
@@ -242,9 +249,11 @@ export interface SyncStats {
     uploaded: number;
     downloaded: number;
     deleted: number;
+    prunedRemoteDirs?: number;
     skipped: number;
     failed: number;
     errors: string[];
     newSince?: number;
+    fullScan?: boolean;
 }
 //# sourceMappingURL=types.d.ts.map

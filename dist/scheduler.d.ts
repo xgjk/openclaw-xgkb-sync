@@ -33,6 +33,7 @@ export declare class SyncScheduler {
     private doSync;
     /** 获取当前生效的配置（供 ManagementApi 读取） */
     getConfig(): SyncConfig;
+    private shouldForceFullScan;
     /**
      * 完全重置指定 mapping 的同步状态（文件记录 + 水位 + 远端 ID 缓存）。
      * 修改身份字段（localRoot / remoteRootFolderPath / projectId / appKey）后调用，

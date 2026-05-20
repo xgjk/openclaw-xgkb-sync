@@ -67,6 +67,8 @@ export declare const DEFAULT_DB_PATH = "./openclaw-sync-state.db";
 export declare const DEFAULT_SERVER_URL = "https://sg-al-cwork-web.mediportal.com.cn/open-api/";
 /** 默认自动同步间隔（秒） */
 export declare const DEFAULT_AUTO_SYNC_INTERVAL_SEC = 180;
+/** 默认强制全量对账间隔（秒），用于修复 listChanges 或本地状态库漏记录 */
+export declare const DEFAULT_FULL_RECONCILE_INTERVAL_SEC = 3600;
 /** 默认 HTTP 管理 API 端口 */
 export declare const DEFAULT_MANAGEMENT_PORT = 9090;
 /** 默认 HTTP 管理 API 监听地址 */

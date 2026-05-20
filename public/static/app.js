@@ -85,6 +85,8 @@
       `拉取 ${stats.downloaded || 0} 条`,
     ];
     if (stats.deleted) parts.push(`删除 ${stats.deleted} 条`);
+    if (stats.prunedRemoteDirs) parts.push(`清理空目录 ${stats.prunedRemoteDirs} 个`);
+    if (stats.fullScan) parts.push('全量对账');
     if (stats.failed) parts.push(`失败 ${stats.failed} 条`);
     return parts.join('，');
   }

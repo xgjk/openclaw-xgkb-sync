@@ -34,7 +34,11 @@ export declare class SyncEngine {
      * @param onProgress 进度回调
      * @param lastSyncSince 上次成功同步的水位时间戳（毫秒）；undefined = 首次全量
      */
-    runSync(onProgress?: ProgressCallback, lastSyncSince?: number): Promise<SyncStats>;
+    runSync(onProgress?: ProgressCallback, lastSyncSince?: number, opts?: {
+        forceFullScan?: boolean;
+        forceFullScanReason?: string;
+    }): Promise<SyncStats>;
+    private pruneRemoteEmptyDirectories;
     /**
      * 构建远端文件 Map，优先走增量路径，遇到无法解析的新目录降级全量。
      */
