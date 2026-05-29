@@ -25,6 +25,9 @@
   "pushDebounceMs": 1500,
   "watchUsePolling": false,
 
+  "_comment_syncDotFiles": "false=任意路径段以 . 开头的文件/目录不同步（默认）；true=与普通路径一样仅由 filePatterns/excludePatterns 过滤，见 docs/sync-dot-files-config.md",
+  "syncDotFiles": false,
+
   "mappings": [
     {
       "_comment": "极简配置：仅填 projectId，同步该空间根目录下所有 .md 文件",

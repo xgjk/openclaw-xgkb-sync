@@ -91,18 +91,32 @@ async function main() {
   // 用可变引用包装 scheduler，reload 时替换其中的实例
   const schedulerRef = { current: new SyncScheduler(config) };
 
-  // 热重载：停掉旧 scheduler，用新配置重建并启动
-  function doReload(): ReloadResult {
-    let newConfig;
+  // 热重载：等待旧 scheduler 排空并关闭 DB 后，再重建（防止错峰 timer 访问已关闭的 DB）
+  let reloadInFlight: Promise<ReloadResult> | null = null;
+
+  async function doReload(): Promise<ReloadResult> {
+    if (reloadInFlight) return reloadInFlight;
+
+    reloadInFlight = (async (): Promise<ReloadResult> => {
+      let newConfig;
+      try {
+        newConfig = loadConfigWithMeta(absConfigPath).config;
+      } catch (e) {
+        return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      }
+      console.log('[OpenClaw Sync] 配置重载：停止旧调度器...');
+      await schedulerRef.current.stop();
+      schedulerRef.current = new SyncScheduler(newConfig);
+      schedulerRef.current.start();
+      console.log('[OpenClaw Sync] 配置重载完成');
+      return { ok: true, config: newConfig };
+    })();
+
     try {
-      newConfig = loadConfigWithMeta(absConfigPath).config;
-    } catch (e) {
-      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      return await reloadInFlight;
+    } finally {
+      reloadInFlight = null;
     }
-    schedulerRef.current.stop();
-    schedulerRef.current = new SyncScheduler(newConfig);
-    schedulerRef.current.start();
-    return { ok: true, config: newConfig };
   }
 
   // 管理 API（HTTP 服务，port=0 时自动禁用）
@@ -116,15 +130,15 @@ async function main() {
   managementApi.start();
 
   // 优雅退出
-  function shutdown(signal: string) {
+  async function shutdown(signal: string) {
     console.log(`\n[OpenClaw Sync] 收到 ${signal}，正在停止...`);
     managementApi.stop();
-    schedulerRef.current.stop();
+    await schedulerRef.current.stop();
     process.exit(0);
   }
 
-  process.on('SIGINT', () => shutdown('SIGINT'));
-  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => void shutdown('SIGINT'));
+  process.on('SIGTERM', () => void shutdown('SIGTERM'));
 
   // 未捕获异常记录但不崩溃（调度器会在下轮重试）
   process.on('uncaughtException', (e) => {

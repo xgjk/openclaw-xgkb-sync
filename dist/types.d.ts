@@ -30,6 +30,12 @@ export interface SyncMapping {
     /** 排除模式，默认 ["**\/_conflict_*", "**\/.tmp\/**"] */
     excludePatterns?: string[];
     /**
+     * 是否同步任意路径段以 `.` 开头的文件/目录。
+     * false（默认）：点路径不参与 walk/watch/远端过滤；true：与普通路径一样，仅由 filePatterns / excludePatterns 过滤。
+     * 映射索引 `.openclaw-sync-map.json` 仍走 enableFileIndex 独立通道。
+     */
+    syncDotFiles?: boolean;
+    /**
      * 单条 mapping 的同步方向，覆盖全局配置。
      * 若不填，则使用全局 syncDirection。
      */
@@ -137,6 +143,11 @@ export interface SyncConfig {
     pushDebounceMs?: number;
     /** watch 不可靠环境改用轮询，默认 false */
     watchUsePolling?: boolean;
+    /**
+     * 全局默认：是否同步点文件/点目录；mapping 级 syncDotFiles 可覆盖。
+     * 默认 false。
+     */
+    syncDotFiles?: boolean;
     mappings: SyncMapping[];
 }
 export type ApiOk<T> = {

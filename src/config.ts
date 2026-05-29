@@ -15,6 +15,7 @@ import {
   DEFAULT_RATE_LIMIT_BURST,
   DEFAULT_PUSH_DEBOUNCE_MS,
   DEFAULT_SERVER_URL,
+  DEFAULT_SYNC_DOT_FILES,
   DEFAULT_WATCH_ENABLED,
   DEFAULT_WATCH_USE_POLLING,
   DOWNLOAD_CONCURRENCY,
@@ -55,6 +56,7 @@ export function getDefaultConfigRaw(): Record<string, unknown> {
     watchEnabled: DEFAULT_WATCH_ENABLED,
     pushDebounceMs: DEFAULT_PUSH_DEBOUNCE_MS,
     watchUsePolling: DEFAULT_WATCH_USE_POLLING,
+    syncDotFiles: DEFAULT_SYNC_DOT_FILES,
     mappings: [],
   };
 }
@@ -80,6 +82,7 @@ export function configToRaw(config: SyncConfig): Record<string, unknown> {
     watchEnabled: config.watchEnabled,
     pushDebounceMs: config.pushDebounceMs,
     watchUsePolling: config.watchUsePolling,
+    syncDotFiles: config.syncDotFiles,
     mappings: config.mappings,
   };
   if (config.appKey) raw.appKey = config.appKey;
@@ -291,6 +294,8 @@ function validateConfig(raw: unknown, filePath: string): SyncConfig {
       typeof obj.watchUsePolling === 'boolean'
         ? obj.watchUsePolling
         : DEFAULT_WATCH_USE_POLLING,
+    syncDotFiles:
+      typeof obj.syncDotFiles === 'boolean' ? obj.syncDotFiles : DEFAULT_SYNC_DOT_FILES,
     mappings,
   };
 }
@@ -363,6 +368,9 @@ export function validateMapping(raw: unknown, idx: number, filePath: string): Sy
   if (m.watchUsePolling !== undefined && typeof m.watchUsePolling !== 'boolean') {
     throw new Error(`${loc}.watchUsePolling 必须是 boolean: ${filePath}`);
   }
+  if (m.syncDotFiles !== undefined && typeof m.syncDotFiles !== 'boolean') {
+    throw new Error(`${loc}.syncDotFiles 必须是 boolean: ${filePath}`);
+  }
 
   return {
     mappingId: m.mappingId as string,
@@ -381,6 +389,7 @@ export function validateMapping(raw: unknown, idx: number, filePath: string): Sy
     watchEnabled: typeof m.watchEnabled === 'boolean' ? m.watchEnabled : undefined,
     pushDebounceMs: typeof m.pushDebounceMs === 'number' ? m.pushDebounceMs : undefined,
     watchUsePolling: typeof m.watchUsePolling === 'boolean' ? m.watchUsePolling : undefined,
+    syncDotFiles: typeof m.syncDotFiles === 'boolean' ? m.syncDotFiles : undefined,
   };
 }
 

@@ -15,7 +15,7 @@ export interface ManagementApiOptions {
     /** 获取当前 scheduler 实例（reload 后引用会变） */
     getScheduler: () => SyncScheduler;
     /** 热重载回调：重新读取配置文件并重建 scheduler，返回新配置或错误 */
-    onReload: () => ReloadResult;
+    onReload: () => ReloadResult | Promise<ReloadResult>;
 }
 /**
  * HTTP 管理 API 服务
@@ -29,6 +29,7 @@ export declare class ManagementApi {
     constructor(opts: ManagementApiOptions);
     start(): void;
     stop(): void;
+    private invokeReload;
     private handle;
     private handleHealth;
     private handleStatus;

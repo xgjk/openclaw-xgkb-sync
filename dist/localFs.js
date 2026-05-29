@@ -32,31 +32,28 @@ var __importStar = (this && this.__importStar) || (function () {
         return result;
     };
 })();
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.LocalFsAdapter = void 0;
 const fs = __importStar(require("fs/promises"));
 const path = __importStar(require("path"));
-const micromatch_1 = __importDefault(require("micromatch"));
-const constants_1 = require("./constants");
 const pathSanitize_1 = require("./pathSanitize");
+const pathSyncScope_1 = require("./pathSyncScope");
 /**
  * 本地文件系统适配器（Node.js 版）
  * 替代 Obsidian Vault API，面向标准 Node.js `fs/promises`。
  */
 class LocalFsAdapter {
     localRoot;
-    filePatterns;
-    excludePatterns;
-    constructor(localRoot, filePatterns = constants_1.DEFAULT_FILE_PATTERNS, excludePatterns = constants_1.DEFAULT_EXCLUDE_PATTERNS) {
+    scope;
+    constructor(localRoot, scope) {
         this.localRoot = path.resolve(localRoot);
-        this.filePatterns = filePatterns;
-        this.excludePatterns = excludePatterns;
+        this.scope = scope;
     }
     getRoot() {
         return this.localRoot;
+    }
+    getSyncScope() {
+        return this.scope;
     }
     /**
      * 递归列出 localRoot 下所有匹配 filePatterns 且不在 excludePatterns 中的文件。
@@ -86,15 +83,13 @@ class LocalFsAdapter {
         }
         const subDirTasks = [];
         for (const dirent of dirEntries) {
-            if (dirent.name.startsWith('.'))
+            if ((0, pathSyncScope_1.shouldSkipDotEntryName)(dirent.name, this.scope.syncDotFiles))
                 continue;
             const relPath = relPrefix ? `${relPrefix}/${dirent.name}` : dirent.name;
             const absPath = path.join(absDir, dirent.name);
             if (dirent.isDirectory()) {
-                const relDirPath = relPath + '/';
-                if (micromatch_1.default.isMatch(relDirPath, this.excludePatterns))
+                if (!(0, pathSyncScope_1.isInSyncScope)(relPath, this.scope, 'directory'))
                     continue;
-                // 并行递归所有子目录，大目录扫描速度显著提升
                 subDirTasks.push(this.walk(absPath, relPath, entries));
             }
             else if (dirent.isFile()) {
@@ -102,9 +97,7 @@ class LocalFsAdapter {
                     .split('/')
                     .map((seg) => (0, pathSanitize_1.sanitizePathSegment)(seg))
                     .join('/');
-                if (micromatch_1.default.isMatch(safePath, this.excludePatterns))
-                    continue;
-                if (!micromatch_1.default.isMatch(safePath, this.filePatterns))
+                if (!(0, pathSyncScope_1.isInSyncScope)(safePath, this.scope, 'file'))
                     continue;
                 try {
                     const stat = await fs.stat(absPath, { bigint: true });
@@ -136,13 +129,12 @@ class LocalFsAdapter {
         }
         const subDirTasks = [];
         for (const dirent of dirEntries) {
-            if (dirent.name.startsWith('.'))
+            if ((0, pathSyncScope_1.shouldSkipDotEntryName)(dirent.name, this.scope.syncDotFiles))
                 continue;
             if (!dirent.isDirectory())
                 continue;
             const relPath = relPrefix ? `${relPrefix}/${dirent.name}` : dirent.name;
-            const relDirPath = relPath + '/';
-            if (micromatch_1.default.isMatch(relDirPath, this.excludePatterns))
+            if (!(0, pathSyncScope_1.isInSyncScope)(relPath, this.scope, 'directory'))
                 continue;
             const safePath = (0, pathSanitize_1.normalizeSeparator)(relPath)
                 .split('/')
@@ -232,7 +224,6 @@ class LocalFsAdapter {
     resolve(relativePath) {
         const safe = (0, pathSanitize_1.canonicalizeRelativeSyncPath)((0, pathSanitize_1.normalizeSeparator)(relativePath));
         const resolved = path.resolve(this.localRoot, safe);
-        // 确保解析结果在 localRoot 内（localRoot 已在构造函数中 path.resolve 过）
         const rootWithSep = this.localRoot.endsWith(path.sep)
             ? this.localRoot
             : this.localRoot + path.sep;

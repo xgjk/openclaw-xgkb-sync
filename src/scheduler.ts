@@ -8,8 +8,6 @@ import { SyncStateDb } from './syncStateDb';
 import { SyncConfig, SyncMapping, SyncStats, SyncTriggerReason } from './types';
 import {
   DEFAULT_DB_PATH,
-  DEFAULT_EXCLUDE_PATTERNS,
-  DEFAULT_FILE_PATTERNS,
   DEFAULT_FULL_RECONCILE_INTERVAL_SEC,
   DEFAULT_MAX_CONCURRENT_MAPPINGS,
   DEFAULT_MAX_REQUESTS_PER_MINUTE,
@@ -17,6 +15,7 @@ import {
   DOWNLOAD_CONCURRENCY,
   RATE_LIMIT_COOLDOWN_MS,
   STARTUP_JITTER_MAX_MS,
+  STOP_DRAIN_TIMEOUT_MS,
   UPLOAD_CONCURRENCY,
 } from './constants';
 import {
@@ -25,6 +24,7 @@ import {
   resolveWatchEnabled,
   resolveWatchUsePolling,
 } from './watchHelpers';
+import { resolveSyncScopeOptions } from './pathSyncScope';
 
 interface MappingRunState {
   isSyncing: boolean;
@@ -69,7 +69,12 @@ export class SyncScheduler {
   private readonly runStates = new Map<string, MappingRunState>();
   private readonly watchers = new Map<string, FileWatcher>();
   private timers: NodeJS.Timeout[] = [];
+  /** triggerAll 错峰、启动抖动、pendingSync 等延迟任务 */
+  private readonly pendingTimers = new Set<NodeJS.Timeout>();
+  private activeSyncCount = 0;
+  private readonly syncDrainWaiters: Array<() => void> = [];
   private running = false;
+  private dbClosed = false;
 
   constructor(config: SyncConfig) {
     this.config = config;
@@ -125,7 +130,7 @@ export class SyncScheduler {
       console.log(
         `[Scheduler] 启动抖动 ${Math.round(jitterMs / 1000)}s，首次同步约在 ${new Date(Date.now() + jitterMs).toLocaleTimeString('zh-CN')} 开始`,
       );
-      setTimeout(() => this.triggerAll('启动后初始同步', 'startup'), jitterMs);
+      this.scheduleDelayed(() => this.triggerAll('启动后初始同步', 'startup'), jitterMs);
     } else {
       this.triggerAll('启动后初始同步', 'startup');
     }
@@ -140,26 +145,87 @@ export class SyncScheduler {
     }
   }
 
-  /** 停止调度器，清理定时器和数据库连接 */
-  stop(): void {
+  /**
+   * 停止调度器：取消未执行的延迟任务，等待进行中的 sync 结束，再关闭 DB。
+   * reload / 进程退出时必须 await，否则错峰 setTimeout 会在 DB 已关闭后触发。
+   */
+  async stop(): Promise<void> {
+    if (this.dbClosed) return;
+
     this.running = false;
     for (const t of this.timers) clearInterval(t);
     this.timers = [];
-    void this.stopWatchers();
+    this.clearPendingTimers();
+
+    if (this.activeSyncCount > 0) {
+      console.log(
+        `[Scheduler] 等待 ${this.activeSyncCount} 个进行中的同步结束（最多 ${STOP_DRAIN_TIMEOUT_MS / 1000}s）...`,
+      );
+      try {
+        await this.waitForActiveSyncs(STOP_DRAIN_TIMEOUT_MS);
+      } catch (e) {
+        console.warn(
+          '[Scheduler] 等待同步结束超时，仍将关闭数据库:',
+          e instanceof Error ? e.message : String(e),
+        );
+      }
+    }
+
+    await this.stopWatchers();
     this.limiters.clear();
-    this.db.close();
+    if (!this.dbClosed) {
+      this.db.close();
+      this.dbClosed = true;
+    }
     console.log('[Scheduler] 已停止');
+  }
+
+  private scheduleDelayed(fn: () => void, delayMs: number): void {
+    const timer = setTimeout(() => {
+      this.pendingTimers.delete(timer);
+      if (!this.running || this.dbClosed) return;
+      fn();
+    }, delayMs);
+    this.pendingTimers.add(timer);
+  }
+
+  private clearPendingTimers(): void {
+    for (const t of this.pendingTimers) clearTimeout(t);
+    this.pendingTimers.clear();
+  }
+
+  private waitForActiveSyncs(timeoutMs: number): Promise<void> {
+    if (this.activeSyncCount <= 0) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        const idx = this.syncDrainWaiters.indexOf(onDrain);
+        if (idx >= 0) this.syncDrainWaiters.splice(idx, 1);
+        reject(new Error(`仍有 ${this.activeSyncCount} 个同步未在 ${timeoutMs}ms 内结束`));
+      }, timeoutMs);
+      const onDrain = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      this.syncDrainWaiters.push(onDrain);
+    });
+  }
+
+  private notifySyncDrain(): void {
+    if (this.activeSyncCount > 0) return;
+    const waiters = this.syncDrainWaiters.splice(0);
+    for (const w of waiters) w();
   }
 
   private startWatchers(mappings: SyncMapping[]): void {
     for (const mapping of mappings) {
       if (!resolveWatchEnabled(mapping, this.config)) continue;
 
+      const scope = resolveSyncScopeOptions(mapping, this.config);
+
       const watcher = new FileWatcher({
         mappingId: mapping.mappingId,
         localRoot: mapping.localRoot,
-        filePatterns: mapping.filePatterns ?? DEFAULT_FILE_PATTERNS,
-        excludePatterns: mapping.excludePatterns ?? DEFAULT_EXCLUDE_PATTERNS,
+        scope,
         debounceMs: resolvePushDebounceMs(mapping, this.config),
         usePolling: resolveWatchUsePolling(mapping, this.config),
         onBatchReady: (pathCount) => {
@@ -186,6 +252,10 @@ export class SyncScheduler {
 
   /** 手动触发指定 mapping 同步 */
   triggerMapping(mappingId: string): void {
+    if (!this.running || this.dbClosed) {
+      console.warn(`[Scheduler] 调度器已停止，忽略同步触发: ${mappingId}`);
+      return;
+    }
     const mapping = this.config.mappings.find(
       (m) => m.mappingId === mappingId && m.enabled,
     );
@@ -198,6 +268,8 @@ export class SyncScheduler {
 
   /** 触发所有已启用 mapping */
   private triggerAll(reason: string, trigger: SyncTriggerReason): void {
+    if (!this.running || this.dbClosed) return;
+
     const enabledMappings = this.config.mappings.filter((m) => m.enabled);
     console.log(`[Scheduler] 触发全部同步（${reason}），共 ${enabledMappings.length} 条`);
 
@@ -211,7 +283,10 @@ export class SyncScheduler {
         this.scheduleMapping(mapping, trigger);
       } else {
         // 超出并发限制的，稍后触发
-        setTimeout(() => this.scheduleMapping(mapping, trigger), (queued - maxConcurrent) * 500);
+        this.scheduleDelayed(
+          () => this.scheduleMapping(mapping, trigger),
+          (queued - maxConcurrent) * 500,
+        );
       }
     }
   }
@@ -220,6 +295,8 @@ export class SyncScheduler {
     mapping: SyncMapping,
     reason: SyncTriggerReason = 'manual',
   ): void {
+    if (!this.running || this.dbClosed) return;
+
     let state = this.runStates.get(mapping.mappingId);
     if (!state) {
       state = { isSyncing: false, pendingSync: false };
@@ -251,9 +328,12 @@ export class SyncScheduler {
     state: MappingRunState,
     reason: SyncTriggerReason,
   ): Promise<void> {
+    if (!this.running || this.dbClosed) return;
+
     state.isSyncing = true;
     state.pendingSync = false;
     state.pendingReason = undefined;
+    this.activeSyncCount++;
 
     const watcher = this.watchers.get(mapping.mappingId);
     watcher?.pause();
@@ -264,21 +344,28 @@ export class SyncScheduler {
     } finally {
       watcher?.resumeAfterSync(pullTouchPaths);
       state.isSyncing = false;
+      this.activeSyncCount--;
+      this.notifySyncDrain();
 
       // 若同步期间有新触发，再执行一轮
-      if (state.pendingSync) {
+      if (this.running && !this.dbClosed && state.pendingSync) {
         const pendingReason = state.pendingReason ?? 'manual';
         state.pendingSync = false;
         state.pendingReason = undefined;
         console.log(
           `[Scheduler][${mapping.mappingId}] 执行待挂起的同步 (${formatSyncTriggerReason(pendingReason)})`,
         );
-        setTimeout(() => this.scheduleMapping(mapping, pendingReason), 0);
+        this.scheduleDelayed(() => this.scheduleMapping(mapping, pendingReason), 0);
+      } else if (state.pendingSync) {
+        state.pendingSync = false;
+        state.pendingReason = undefined;
       }
     }
   }
 
   private async doSync(mapping: SyncMapping, reason: SyncTriggerReason): Promise<string[]> {
+    if (!this.running || this.dbClosed) return [];
+
     console.log(
       `[Scheduler][${mapping.mappingId}] ===== 开始同步 (${formatSyncTriggerReason(reason)}) =====`,
     );
@@ -308,11 +395,8 @@ export class SyncScheduler {
     if (mapping.appKey?.trim()) {
       console.log(`[Scheduler][${mapping.mappingId}] 使用 mapping 独立 appKey（身份隔离），独立限速器`);
     }
-    const localFs = new LocalFsAdapter(
-      mapping.localRoot,
-      mapping.filePatterns,
-      mapping.excludePatterns,
-    );
+    const scope = resolveSyncScopeOptions(mapping, this.config);
+    const localFs = new LocalFsAdapter(mapping.localRoot, scope);
 
     const remoteFs = new RemoteFsAdapter(api, {
       projectId: mapping.projectId,
@@ -322,8 +406,9 @@ export class SyncScheduler {
       // 用户修改 remoteRootFolderPath/projectId 后 Web UI 会调 clearResolvedCache 使缓存失效。
       cachedRootFileId: mappingState?.resolvedRootFileId ?? undefined,
       cachedProjectId: mappingState?.resolvedProjectId ?? undefined,
-      filePatterns: mapping.filePatterns,
-      excludePatterns: mapping.excludePatterns,
+      filePatterns: scope.filePatterns,
+      excludePatterns: scope.excludePatterns,
+      syncDotFiles: scope.syncDotFiles,
     });
 
     // init() 解析并返回确定的 projectId / rootFileId，写回 SQLite 缓存
@@ -348,7 +433,7 @@ export class SyncScheduler {
       localFs,
       remoteFs,
       this.db,
-      { ...mapping, syncDirection: mapping.syncDirection ?? this.config.syncDirection },
+      { ...mapping, syncDirection: mapping.syncDirection ?? this.config.syncDirection, syncDotFiles: scope.syncDotFiles },
       {
         downloadConcurrency: this.config.downloadConcurrency ?? DOWNLOAD_CONCURRENCY,
         uploadConcurrency: this.config.uploadConcurrency ?? UPLOAD_CONCURRENCY,
@@ -441,6 +526,7 @@ export class SyncScheduler {
    * 确保下次同步以全量对账模式重建正确基准，而非用旧状态做错误决策。
    */
   resetMappingState(mappingId: string): void {
+    if (this.dbClosed) return;
     this.db.resetMappingState(mappingId);
     console.log(`[Scheduler] 已重置 mapping 同步状态: ${mappingId}`);
   }
@@ -475,7 +561,7 @@ export class SyncScheduler {
         lastTriggerReason: runState.lastTriggerReason,
         lastWatchTriggerAt: runState.lastWatchTriggerAt,
         watchActive: this.watchers.get(mappingId)?.isActive() ?? false,
-        lastState: this.db.getMappingState(mappingId),
+        lastState: this.dbClosed ? null : this.db.getMappingState(mappingId),
       };
     }
     return result;

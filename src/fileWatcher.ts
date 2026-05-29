@@ -1,7 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import chokidar, { FSWatcher } from 'chokidar';
-import micromatch from 'micromatch';
 import {
   FILE_INDEX_NAME,
   WATCH_AWAIT_WRITE_POLL_MS,
@@ -9,12 +8,12 @@ import {
   WATCH_PULL_IGNORE_TAIL_MS,
 } from './constants';
 import { canonicalizeRelativeSyncPath, normalizeSeparator } from './pathSanitize';
+import { isInSyncScope, shouldSkipDotEntryName, type SyncScopeOptions } from './pathSyncScope';
 
 export interface FileWatcherOptions {
   mappingId: string;
   localRoot: string;
-  filePatterns: string[];
-  excludePatterns: string[];
+  scope: SyncScopeOptions;
   debounceMs: number;
   usePolling: boolean;
   onBatchReady: (pathCount: number) => void;
@@ -41,7 +40,7 @@ export class FileWatcher {
   start(): void {
     if (this.started) return;
 
-    const { localRoot, filePatterns, excludePatterns, usePolling, mappingId } = this.opts;
+    const { localRoot, scope, usePolling, mappingId } = this.opts;
     const root = path.resolve(localRoot);
 
     if (!fs.existsSync(root)) {
@@ -52,8 +51,7 @@ export class FileWatcher {
     this.started = true;
 
     this.watcher = chokidar.watch(root, {
-      ignored: (absPath, stats) =>
-        this.shouldIgnoreWatchTarget(absPath, root, excludePatterns, stats),
+      ignored: (absPath, stats) => this.shouldIgnoreWatchTarget(absPath, root, scope, stats),
       ignoreInitial: true,
       persistent: true,
       awaitWriteFinish: {
@@ -181,19 +179,18 @@ export class FileWatcher {
 
   /** 与 SyncEngine.matchesSync 一致：仅纳入同步范围的文件路径 */
   private matchesSyncScope(rel: string): boolean {
-    const { filePatterns, excludePatterns } = this.opts;
-    if (micromatch.isMatch(rel, excludePatterns)) return false;
-    return micromatch.isMatch(rel, filePatterns);
+    const { scope } = this.opts;
+    return isInSyncScope(rel, scope, 'file');
   }
 
   /**
-   * chokidar ignored：仅排除 dot 文件、索引文件、exclude 目录。
-   * 勿在此处按 filePatterns 排除，也勿 ignore 同步根（rel===''），否则 Windows 上可能收不到任何子路径事件。
+   * chokidar ignored：索引文件、可选点路径规则、exclude 目录。
+   * 勿 ignore 同步根（rel===''），否则 Windows 上可能收不到任何子路径事件。
    */
   private shouldIgnoreWatchTarget(
     absPath: string,
     root: string,
-    excludePatterns: string[],
+    scope: SyncScopeOptions,
     stats?: fs.Stats,
   ): boolean {
     const rel = path.relative(root, absPath);
@@ -201,10 +198,10 @@ export class FileWatcher {
     if (rel === '') return false;
 
     const relNorm = normalizeSeparator(rel);
-    const base = path.basename(absPath);
-
-    if (base.startsWith('.')) return true;
     if (relNorm === FILE_INDEX_NAME) return true;
+
+    const base = path.basename(absPath);
+    if (shouldSkipDotEntryName(base, scope.syncDotFiles)) return true;
 
     let isDirectory = stats?.isDirectory();
     if (isDirectory === undefined) {
@@ -215,11 +212,7 @@ export class FileWatcher {
       }
     }
 
-    if (isDirectory) {
-      const relDir = relNorm.endsWith('/') ? relNorm : `${relNorm}/`;
-      return micromatch.isMatch(relDir, excludePatterns);
-    }
-
-    return micromatch.isMatch(relNorm, excludePatterns);
+    const kind = isDirectory ? 'directory' : 'file';
+    return !isInSyncScope(relNorm, scope, kind);
   }
 }

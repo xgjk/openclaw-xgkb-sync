@@ -1,15 +1,12 @@
 "use strict";
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.RemoteFsAdapter = void 0;
-const micromatch_1 = __importDefault(require("micromatch"));
 const fileUploader_1 = require("./fileUploader");
 const kbMoveFileContract_1 = require("./kbMoveFileContract");
 const kbRenameFileContract_1 = require("./kbRenameFileContract");
 const constants_1 = require("./constants");
 const pathSanitize_1 = require("./pathSanitize");
+const pathSyncScope_1 = require("./pathSyncScope");
 /**
  * Remote knowledge-base filesystem adapter for OpenClaw.
  * Handles root resolution, listing, downloads, uploads, and deletes.
@@ -18,8 +15,7 @@ class RemoteFsAdapter {
     api;
     uploader;
     opts;
-    filePatterns;
-    excludePatterns;
+    syncScope;
     // Resolved by init().
     resolvedProjectId = null;
     resolvedRootFileId = null;
@@ -28,8 +24,11 @@ class RemoteFsAdapter {
         this.api = api;
         this.uploader = new fileUploader_1.FileUploader(api);
         this.opts = opts;
-        this.filePatterns = opts.filePatterns ?? constants_1.DEFAULT_FILE_PATTERNS;
-        this.excludePatterns = opts.excludePatterns ?? constants_1.DEFAULT_EXCLUDE_PATTERNS;
+        this.syncScope = {
+            filePatterns: opts.filePatterns ?? constants_1.DEFAULT_FILE_PATTERNS,
+            excludePatterns: opts.excludePatterns ?? constants_1.DEFAULT_EXCLUDE_PATTERNS,
+            syncDotFiles: opts.syncDotFiles ?? constants_1.DEFAULT_SYNC_DOT_FILES,
+        };
     }
     getRootFileId() {
         if (!this.resolvedRootFileId)
@@ -240,7 +239,7 @@ class RemoteFsAdapter {
         const entries = [];
         let cursor;
         let page = 0;
-        const apiSuffix = (0, constants_1.buildListDescendantFilesSuffix)(this.filePatterns);
+        const apiSuffix = (0, constants_1.buildListDescendantFilesSuffix)(this.syncScope.filePatterns);
         console.log(`[RemoteFs] listDescendantFiles API suffix=${apiSuffix}`);
         do {
             page++;
@@ -259,10 +258,8 @@ class RemoteFsAdapter {
             for (const item of pageItems) {
                 const rawPath = item.relativePath ?? item.name;
                 const safePath = (0, pathSanitize_1.canonicalizeRelativeSyncPath)(rawPath);
-                // Even with API suffix filtering, still apply full include/exclude patterns locally.
-                if (micromatch_1.default.isMatch(safePath, this.excludePatterns))
-                    continue;
-                if (!micromatch_1.default.isMatch(safePath, this.filePatterns))
+                // Even with API suffix filtering, still apply full include/exclude/syncDot scope locally.
+                if (!(0, pathSyncScope_1.isRemotePathInSyncScope)(safePath, this.syncScope))
                     continue;
                 entries.push({
                     path: safePath,

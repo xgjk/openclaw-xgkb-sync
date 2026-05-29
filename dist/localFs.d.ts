@@ -1,14 +1,15 @@
 import { LocalDirEntry, LocalFileEntry } from './types';
+import { type SyncScopeOptions } from './pathSyncScope';
 /**
  * 本地文件系统适配器（Node.js 版）
  * 替代 Obsidian Vault API，面向标准 Node.js `fs/promises`。
  */
 export declare class LocalFsAdapter {
     private readonly localRoot;
-    private readonly filePatterns;
-    private readonly excludePatterns;
-    constructor(localRoot: string, filePatterns?: string[], excludePatterns?: string[]);
+    private readonly scope;
+    constructor(localRoot: string, scope: SyncScopeOptions);
     getRoot(): string;
+    getSyncScope(): SyncScopeOptions;
     /**
      * 递归列出 localRoot 下所有匹配 filePatterns 且不在 excludePatterns 中的文件。
      * 返回路径均为相对于 localRoot 的路径（使用 "/" 分隔）。

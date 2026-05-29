@@ -1,10 +1,13 @@
 import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
 import * as path from 'path';
-import micromatch from 'micromatch';
 import { LocalDirEntry, LocalFileEntry } from './types';
-import { DEFAULT_EXCLUDE_PATTERNS, DEFAULT_FILE_PATTERNS } from './constants';
 import { canonicalizeRelativeSyncPath, normalizeSeparator, sanitizePathSegment } from './pathSanitize';
+import {
+  isInSyncScope,
+  shouldSkipDotEntryName,
+  type SyncScopeOptions,
+} from './pathSyncScope';
 
 /**
  * 本地文件系统适配器（Node.js 版）
@@ -12,21 +15,19 @@ import { canonicalizeRelativeSyncPath, normalizeSeparator, sanitizePathSegment }
  */
 export class LocalFsAdapter {
   private readonly localRoot: string;
-  private readonly filePatterns: string[];
-  private readonly excludePatterns: string[];
+  private readonly scope: SyncScopeOptions;
 
-  constructor(
-    localRoot: string,
-    filePatterns = DEFAULT_FILE_PATTERNS,
-    excludePatterns = DEFAULT_EXCLUDE_PATTERNS,
-  ) {
+  constructor(localRoot: string, scope: SyncScopeOptions) {
     this.localRoot = path.resolve(localRoot);
-    this.filePatterns = filePatterns;
-    this.excludePatterns = excludePatterns;
+    this.scope = scope;
   }
 
   getRoot(): string {
     return this.localRoot;
+  }
+
+  getSyncScope(): SyncScopeOptions {
+    return this.scope;
   }
 
   /**
@@ -64,15 +65,13 @@ export class LocalFsAdapter {
     const subDirTasks: Promise<void>[] = [];
 
     for (const dirent of dirEntries) {
-      if (dirent.name.startsWith('.')) continue;
+      if (shouldSkipDotEntryName(dirent.name, this.scope.syncDotFiles)) continue;
 
       const relPath = relPrefix ? `${relPrefix}/${dirent.name}` : dirent.name;
       const absPath = path.join(absDir, dirent.name);
 
       if (dirent.isDirectory()) {
-        const relDirPath = relPath + '/';
-        if (micromatch.isMatch(relDirPath, this.excludePatterns)) continue;
-        // 并行递归所有子目录，大目录扫描速度显著提升
+        if (!isInSyncScope(relPath, this.scope, 'directory')) continue;
         subDirTasks.push(this.walk(absPath, relPath, entries));
       } else if (dirent.isFile()) {
         const safePath = normalizeSeparator(relPath)
@@ -80,8 +79,7 @@ export class LocalFsAdapter {
           .map((seg) => sanitizePathSegment(seg))
           .join('/');
 
-        if (micromatch.isMatch(safePath, this.excludePatterns)) continue;
-        if (!micromatch.isMatch(safePath, this.filePatterns)) continue;
+        if (!isInSyncScope(safePath, this.scope, 'file')) continue;
 
         try {
           const stat = await fs.stat(absPath, { bigint: true });
@@ -118,12 +116,11 @@ export class LocalFsAdapter {
 
     const subDirTasks: Promise<void>[] = [];
     for (const dirent of dirEntries) {
-      if (dirent.name.startsWith('.')) continue;
+      if (shouldSkipDotEntryName(dirent.name, this.scope.syncDotFiles)) continue;
       if (!dirent.isDirectory()) continue;
 
       const relPath = relPrefix ? `${relPrefix}/${dirent.name}` : dirent.name;
-      const relDirPath = relPath + '/';
-      if (micromatch.isMatch(relDirPath, this.excludePatterns)) continue;
+      if (!isInSyncScope(relPath, this.scope, 'directory')) continue;
 
       const safePath = normalizeSeparator(relPath)
         .split('/')
@@ -216,7 +213,6 @@ export class LocalFsAdapter {
   resolve(relativePath: string): string {
     const safe = canonicalizeRelativeSyncPath(normalizeSeparator(relativePath));
     const resolved = path.resolve(this.localRoot, safe);
-    // 确保解析结果在 localRoot 内（localRoot 已在构造函数中 path.resolve 过）
     const rootWithSep = this.localRoot.endsWith(path.sep)
       ? this.localRoot
       : this.localRoot + path.sep;

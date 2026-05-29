@@ -1,4 +1,3 @@
-import micromatch from 'micromatch';
 import { KbApiClient } from './kbApi';
 import { FileUploader } from './fileUploader';
 import { normalizeMoveFileResult, warnMoveFileResponseGaps } from './kbMoveFileContract';
@@ -18,10 +17,12 @@ import {
   BATCH_GET_META_MAX,
   DEFAULT_FILE_PATTERNS,
   DEFAULT_EXCLUDE_PATTERNS,
+  DEFAULT_SYNC_DOT_FILES,
   DOWNLOAD_CONCURRENCY,
   buildListDescendantFilesSuffix,
 } from './constants';
 import { canonicalizeRelativeSyncPath, sanitizePathSegment } from './pathSanitize';
+import { isRemotePathInSyncScope, type SyncScopeOptions } from './pathSyncScope';
 
 export interface RemoteFsOptions {
   /** Knowledge base project ID. If omitted, init() resolves the personal project ID. */
@@ -44,6 +45,8 @@ export interface RemoteFsOptions {
   filePatterns?: string[];
   /** File exclude patterns, used for client-side filtering. */
   excludePatterns?: string[];
+  /** Whether dot-segment paths participate in remote list filtering. */
+  syncDotFiles?: boolean;
 }
 
 /** Resolved IDs returned by init() for Scheduler to persist. */
@@ -71,8 +74,7 @@ export class RemoteFsAdapter {
   private readonly api: KbApiClient;
   private readonly uploader: FileUploader;
   private readonly opts: RemoteFsOptions;
-  private readonly filePatterns: string[];
-  private readonly excludePatterns: string[];
+  private readonly syncScope: SyncScopeOptions;
 
   // Resolved by init().
   private resolvedProjectId: string | null = null;
@@ -83,8 +85,11 @@ export class RemoteFsAdapter {
     this.api = api;
     this.uploader = new FileUploader(api);
     this.opts = opts;
-    this.filePatterns = opts.filePatterns ?? DEFAULT_FILE_PATTERNS;
-    this.excludePatterns = opts.excludePatterns ?? DEFAULT_EXCLUDE_PATTERNS;
+    this.syncScope = {
+      filePatterns: opts.filePatterns ?? DEFAULT_FILE_PATTERNS,
+      excludePatterns: opts.excludePatterns ?? DEFAULT_EXCLUDE_PATTERNS,
+      syncDotFiles: opts.syncDotFiles ?? DEFAULT_SYNC_DOT_FILES,
+    };
   }
 
   getRootFileId(): string {
@@ -326,7 +331,7 @@ export class RemoteFsAdapter {
     let cursor: string | undefined;
     let page = 0;
 
-    const apiSuffix = buildListDescendantFilesSuffix(this.filePatterns);
+    const apiSuffix = buildListDescendantFilesSuffix(this.syncScope.filePatterns);
     console.log(`[RemoteFs] listDescendantFiles API suffix=${apiSuffix}`);
 
     do {
@@ -351,9 +356,8 @@ export class RemoteFsAdapter {
         const rawPath = item.relativePath ?? item.name;
         const safePath = canonicalizeRelativeSyncPath(rawPath);
 
-        // Even with API suffix filtering, still apply full include/exclude patterns locally.
-        if (micromatch.isMatch(safePath, this.excludePatterns)) continue;
-        if (!micromatch.isMatch(safePath, this.filePatterns)) continue;
+        // Even with API suffix filtering, still apply full include/exclude/syncDot scope locally.
+        if (!isRemotePathInSyncScope(safePath, this.syncScope)) continue;
 
         entries.push({
           path: safePath,

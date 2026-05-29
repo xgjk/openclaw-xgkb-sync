@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.WATCH_PULL_IGNORE_TAIL_MS = exports.WATCH_AWAIT_WRITE_POLL_MS = exports.WATCH_AWAIT_WRITE_STABILITY_MS = exports.DEFAULT_WATCH_USE_POLLING = exports.DEFAULT_PUSH_DEBOUNCE_MS = exports.DEFAULT_WATCH_ENABLED = exports.FILE_INDEX_CONSUME_MAX_RETRIES = exports.FILE_INDEX_PUBLISH_MAX_RETRIES = exports.FILE_INDEX_NAME = exports.VERSION_REMARK = exports.DEFAULT_MAX_CONCURRENT_MAPPINGS = exports.DEFAULT_MANAGEMENT_HOST = exports.DEFAULT_MANAGEMENT_PORT = exports.DEFAULT_FULL_RECONCILE_INTERVAL_SEC = exports.DEFAULT_AUTO_SYNC_INTERVAL_SEC = exports.DEFAULT_SERVER_URL = exports.DEFAULT_DB_PATH = exports.DEFAULT_EXCLUDE_PATTERNS = exports.DEFAULT_FILE_PATTERNS = exports.MTIME_TOLERANCE_MS = exports.API_ERROR_MESSAGE_BODY_MAX = exports.API_ERROR_LOG_MAX_CHARS = exports.REQUEST_TIMEOUT_MS = exports.RETRY_BASE_DELAY_MS = exports.MAX_RETRIES = exports.CHANGES_SAFETY_WINDOW_MS = exports.STARTUP_JITTER_MAX_MS = exports.TRANSIENT_RESULT_CODES = exports.RATE_LIMIT_RESULT_CODES = exports.RATE_LIMIT_COOLDOWN_MS = exports.DEFAULT_RATE_LIMIT_BURST = exports.DEFAULT_MAX_REQUESTS_PER_MINUTE = exports.EXECUTE_BATCH_PAUSE_MS = exports.UPLOAD_CONCURRENCY = exports.DOWNLOAD_CONCURRENCY = exports.BATCH_GET_META_MAX = exports.BATCH_GET_CONTENT_MAX = exports.DEFAULT_RENAME_NAME_CONFLICT_STRATEGY = exports.DEFAULT_MOVE_NAME_CONFLICT_STRATEGY = exports.MOVE_FILE_CONFLICT = exports.UPDATE_FILE_NAME_CONFLICT = exports.API_PATHS = void 0;
+exports.WATCH_PULL_IGNORE_TAIL_MS = exports.WATCH_AWAIT_WRITE_POLL_MS = exports.WATCH_AWAIT_WRITE_STABILITY_MS = exports.DEFAULT_WATCH_USE_POLLING = exports.DEFAULT_PUSH_DEBOUNCE_MS = exports.DEFAULT_WATCH_ENABLED = exports.FILE_INDEX_CONSUME_MAX_RETRIES = exports.FILE_INDEX_PUBLISH_MAX_RETRIES = exports.FILE_INDEX_NAME = exports.VERSION_REMARK = exports.DEFAULT_MAX_CONCURRENT_MAPPINGS = exports.DEFAULT_MANAGEMENT_HOST = exports.DEFAULT_MANAGEMENT_PORT = exports.DEFAULT_FULL_RECONCILE_INTERVAL_SEC = exports.DEFAULT_AUTO_SYNC_INTERVAL_SEC = exports.DEFAULT_SERVER_URL = exports.DEFAULT_DB_PATH = exports.RECOMMENDED_DOT_DIR_EXCLUDE_PATTERNS = exports.DEFAULT_SYNC_DOT_FILES = exports.DEFAULT_EXCLUDE_PATTERNS = exports.DEFAULT_FILE_PATTERNS = exports.MTIME_TOLERANCE_MS = exports.API_ERROR_MESSAGE_BODY_MAX = exports.API_ERROR_LOG_MAX_CHARS = exports.REQUEST_TIMEOUT_MS = exports.RETRY_BASE_DELAY_MS = exports.MAX_RETRIES = exports.CHANGES_SAFETY_WINDOW_MS = exports.STOP_DRAIN_TIMEOUT_MS = exports.STARTUP_JITTER_MAX_MS = exports.TRANSIENT_RESULT_CODES = exports.RATE_LIMIT_RESULT_CODES = exports.RATE_LIMIT_COOLDOWN_MS = exports.DEFAULT_RATE_LIMIT_BURST = exports.DEFAULT_MAX_REQUESTS_PER_MINUTE = exports.EXECUTE_BATCH_PAUSE_MS = exports.UPLOAD_CONCURRENCY = exports.DOWNLOAD_CONCURRENCY = exports.BATCH_GET_META_MAX = exports.BATCH_GET_CONTENT_MAX = exports.DEFAULT_RENAME_NAME_CONFLICT_STRATEGY = exports.DEFAULT_MOVE_NAME_CONFLICT_STRATEGY = exports.MOVE_FILE_CONFLICT = exports.UPDATE_FILE_NAME_CONFLICT = exports.API_PATHS = void 0;
 exports.cleanContent = cleanContent;
 exports.buildListDescendantFilesSuffix = buildListDescendantFilesSuffix;
 exports.extractUniqueSuffix = extractUniqueSuffix;
@@ -97,6 +97,8 @@ exports.RATE_LIMIT_RESULT_CODES = new Set([610012]);
 exports.TRANSIENT_RESULT_CODES = new Set([500]);
 /** 启动时随机抖动最大值（毫秒），分散多实例同时启动导致的请求突刺 */
 exports.STARTUP_JITTER_MAX_MS = 20_000;
+/** stop()/reload 时等待进行中的 mapping 同步结束的最长时间（毫秒） */
+exports.STOP_DRAIN_TIMEOUT_MS = 5 * 60_000;
 /** listChanges 安全回拨窗口（毫秒），避免时钟偏差漏事件 */
 exports.CHANGES_SAFETY_WINDOW_MS = 5_000;
 /** HTTP 请求最大重试次数 */
@@ -115,6 +117,23 @@ exports.MTIME_TOLERANCE_MS = 1_000;
 exports.DEFAULT_FILE_PATTERNS = ['**/*.md'];
 /** 默认排除匹配模式 */
 exports.DEFAULT_EXCLUDE_PATTERNS = ['**/_conflict_*', '**/.tmp/**'];
+/**
+ * 是否同步以 `.` 开头的路径段（点文件 / 点目录）。
+ * false：由 syncDotFiles 机制排除；true 时仅由 filePatterns / excludePatterns 决定。
+ */
+exports.DEFAULT_SYNC_DOT_FILES = false;
+/**
+ * syncDotFiles=true 时建议在 excludePatterns 中追加的常见点目录（文档参考，非默认注入）。
+ * 避免 `.git`、`.obsidian` 等工具目录被同步到知识库。
+ */
+exports.RECOMMENDED_DOT_DIR_EXCLUDE_PATTERNS = [
+    '**/.git/**',
+    '**/.obsidian/**',
+    '**/.vscode/**',
+    '**/.idea/**',
+    '**/.cache/**',
+    '**/.tmp/**',
+];
 /** 默认状态库文件路径 */
 exports.DEFAULT_DB_PATH = './openclaw-sync-state.db';
 /** 默认知识库 Open API 根地址（生产环境） */

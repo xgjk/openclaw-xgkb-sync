@@ -14,7 +14,12 @@ export declare class SyncScheduler {
     private readonly runStates;
     private readonly watchers;
     private timers;
+    /** triggerAll 错峰、启动抖动、pendingSync 等延迟任务 */
+    private readonly pendingTimers;
+    private activeSyncCount;
+    private readonly syncDrainWaiters;
     private running;
+    private dbClosed;
     constructor(config: SyncConfig);
     /**
      * 按 appKey 获取或创建对应的限速器。
@@ -23,8 +28,15 @@ export declare class SyncScheduler {
     private getLimiter;
     /** 启动调度器：注册定时器，并立即触发一轮全量对账 */
     start(): void;
-    /** 停止调度器，清理定时器和数据库连接 */
-    stop(): void;
+    /**
+     * 停止调度器：取消未执行的延迟任务，等待进行中的 sync 结束，再关闭 DB。
+     * reload / 进程退出时必须 await，否则错峰 setTimeout 会在 DB 已关闭后触发。
+     */
+    stop(): Promise<void>;
+    private scheduleDelayed;
+    private clearPendingTimers;
+    private waitForActiveSyncs;
+    private notifySyncDrain;
     private startWatchers;
     private stopWatchers;
     /** 手动触发指定 mapping 同步 */

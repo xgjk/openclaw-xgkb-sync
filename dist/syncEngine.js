@@ -32,18 +32,15 @@ var __importStar = (this && this.__importStar) || (function () {
         return result;
     };
 })();
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.SyncEngine = void 0;
-const micromatch_1 = __importDefault(require("micromatch"));
 const nodePath = __importStar(require("path"));
 const reconcileEngine_1 = require("./reconcileEngine");
 const constants_1 = require("./constants");
 const pathSanitize_1 = require("./pathSanitize");
 const trashBin_1 = require("./trashBin");
 const fileIndexService_1 = require("./fileIndexService");
+const pathSyncScope_1 = require("./pathSyncScope");
 /**
  * 核心同步引擎（OpenClaw 版）
  * 与 Obsidian 版的主要差异：
@@ -60,6 +57,7 @@ class SyncEngine {
     progress;
     filePatterns;
     excludePatterns;
+    syncScope;
     downloadConcurrency;
     uploadConcurrency;
     /** pull/bidirectional 本轮 sync 写入本地的路径，供 FileWatcher resume 后 echo 过滤 */
@@ -71,6 +69,11 @@ class SyncEngine {
         this.mapping = mapping;
         this.filePatterns = mapping.filePatterns ?? constants_1.DEFAULT_FILE_PATTERNS;
         this.excludePatterns = mapping.excludePatterns ?? constants_1.DEFAULT_EXCLUDE_PATTERNS;
+        this.syncScope = {
+            filePatterns: this.filePatterns,
+            excludePatterns: this.excludePatterns,
+            syncDotFiles: mapping.syncDotFiles ?? constants_1.DEFAULT_SYNC_DOT_FILES,
+        };
         this.downloadConcurrency = opts?.downloadConcurrency ?? constants_1.DOWNLOAD_CONCURRENCY;
         this.uploadConcurrency = opts?.uploadConcurrency ?? constants_1.UPLOAD_CONCURRENCY;
         this.stats = this.emptyStats();
@@ -81,9 +84,7 @@ class SyncEngine {
     }
     /** 判断路径是否应纳入同步范围 */
     matchesSync(path) {
-        if (micromatch_1.default.isMatch(path, this.excludePatterns))
-            return false;
-        return micromatch_1.default.isMatch(path, this.filePatterns);
+        return (0, pathSyncScope_1.isRemotePathInSyncScope)(path, this.syncScope);
     }
     /** 本轮 sync 中 pull 侧写入本地的路径（供 chokidar echo 过滤） */
     getPullLocalTouchPaths() {

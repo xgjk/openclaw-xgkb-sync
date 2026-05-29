@@ -19,6 +19,7 @@ export declare class SyncEngine {
     private progress;
     private readonly filePatterns;
     private readonly excludePatterns;
+    private readonly syncScope;
     private readonly downloadConcurrency;
     private readonly uploadConcurrency;
     /** pull/bidirectional 本轮 sync 写入本地的路径，供 FileWatcher resume 后 echo 过滤 */

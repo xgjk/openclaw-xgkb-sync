@@ -1,8 +1,8 @@
+import { type SyncScopeOptions } from './pathSyncScope';
 export interface FileWatcherOptions {
     mappingId: string;
     localRoot: string;
-    filePatterns: string[];
-    excludePatterns: string[];
+    scope: SyncScopeOptions;
     debounceMs: number;
     usePolling: boolean;
     onBatchReady: (pathCount: number) => void;
@@ -39,8 +39,8 @@ export declare class FileWatcher {
     /** 与 SyncEngine.matchesSync 一致：仅纳入同步范围的文件路径 */
     private matchesSyncScope;
     /**
-     * chokidar ignored：仅排除 dot 文件、索引文件、exclude 目录。
-     * 勿在此处按 filePatterns 排除，也勿 ignore 同步根（rel===''），否则 Windows 上可能收不到任何子路径事件。
+     * chokidar ignored：索引文件、可选点路径规则、exclude 目录。
+     * 勿 ignore 同步根（rel===''），否则 Windows 上可能收不到任何子路径事件。
      */
     private shouldIgnoreWatchTarget;
 }

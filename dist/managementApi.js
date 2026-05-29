@@ -39,6 +39,7 @@ const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
 const scheduler_1 = require("./scheduler");
 const config_1 = require("./config");
+const pathSyncScope_1 = require("./pathSyncScope");
 const managementApiCredentials_1 = require("./managementApiCredentials");
 const watchHelpers_1 = require("./watchHelpers");
 /** 读取 package.json 里的版本号，失败则返回 'unknown' */
@@ -86,6 +87,7 @@ const EDITABLE_CONFIG_FIELDS = [
     'watchEnabled',
     'pushDebounceMs',
     'watchUsePolling',
+    'syncDotFiles',
 ];
 /**
  * HTTP 管理 API 服务
@@ -137,6 +139,9 @@ class ManagementApi {
             this.server = null;
             console.log('[ManagementApi] 已停止');
         }
+    }
+    invokeReload() {
+        return Promise.resolve(this.opts.onReload());
     }
     async handle(req, res) {
         const method = req.method ?? 'GET';
@@ -259,6 +264,7 @@ class ManagementApi {
                 watchEnabled: config.watchEnabled,
                 pushDebounceMs: config.pushDebounceMs,
                 watchUsePolling: config.watchUsePolling,
+                syncDotFiles: config.syncDotFiles,
                 maxConcurrentMappings: config.maxConcurrentMappings,
                 maxConcurrentMappingsMode: config.maxConcurrentMappingsMode,
                 effectiveMaxConcurrentMappings: (0, scheduler_1.resolveMaxConcurrentMappings)(config),
@@ -269,9 +275,9 @@ class ManagementApi {
             mappings,
         });
     }
-    handleReload(res) {
+    async handleReload(res) {
         console.log('[ManagementApi] 收到 /reload 请求，重载配置...');
-        const result = this.opts.onReload();
+        const result = await this.invokeReload();
         if (!result.ok) {
             console.error('[ManagementApi] 配置重载失败:', result.error);
             return this.sendJson(res, 400, { ok: false, error: result.error });
@@ -424,7 +430,7 @@ class ManagementApi {
                     raw.pushDebounceMs = val;
                     continue;
                 }
-                if (key === 'watchEnabled' || key === 'watchUsePolling') {
+                if (key === 'watchEnabled' || key === 'watchUsePolling' || key === 'syncDotFiles') {
                     if (typeof val !== 'boolean') {
                         throw new Error(`${key} 必须是 boolean`);
                     }
@@ -457,7 +463,7 @@ class ManagementApi {
         if (!writeResult.ok) {
             return this.sendJson(res, 400, { ok: false, error: writeResult.error });
         }
-        const reloadResult = this.opts.onReload();
+        const reloadResult = await this.invokeReload();
         if (!reloadResult.ok) {
             return this.sendJson(res, 500, {
                 ok: false,
@@ -533,7 +539,7 @@ class ManagementApi {
             return this.sendJson(res, 400, { ok: false, error: writeResult.error });
         }
         // 热重载使新 mapping 立即生效
-        const reloadResult = this.opts.onReload();
+        const reloadResult = await this.invokeReload();
         if (!reloadResult.ok) {
             return this.sendJson(res, 500, { ok: false, error: `mapping 已写入但重载失败: ${reloadResult.error}` });
         }
@@ -605,7 +611,7 @@ class ManagementApi {
             });
         }
         if (created) {
-            const reloadResult = this.opts.onReload();
+            const reloadResult = await this.invokeReload();
             if (!reloadResult.ok) {
                 return this.sendJson(res, 500, { ok: false, error: `mapping 已写入但重载失败: ${reloadResult.error}` });
             }
@@ -631,7 +637,7 @@ class ManagementApi {
             this.opts.getScheduler().resetMappingState(mappingId);
             console.log(`[ManagementApi] 身份字段已变更 [${changedIdentityFields.join(', ')}]，已重置 mapping "${mappingId}" 的同步状态`);
         }
-        const reloadResult = this.opts.onReload();
+        const reloadResult = await this.invokeReload();
         if (!reloadResult.ok) {
             return this.sendJson(res, 500, { ok: false, error: `mapping 已写入但重载失败: ${reloadResult.error}` });
         }
@@ -649,7 +655,7 @@ class ManagementApi {
             mapping: this.mappingSummary(mapping),
         });
     }
-    handleDeleteMapping(res, mappingId) {
+    async handleDeleteMapping(res, mappingId) {
         const writeResult = this.modifyConfigMappings((mappings) => {
             if (!mappings.some((m) => m.mappingId === mappingId)) {
                 throw new Error(`未找到 mapping "${mappingId}"`);
@@ -660,7 +666,7 @@ class ManagementApi {
             const status = writeResult.error.includes('未找到') ? 404 : 400;
             return this.sendJson(res, status, { ok: false, error: writeResult.error });
         }
-        const reloadResult = this.opts.onReload();
+        const reloadResult = await this.invokeReload();
         if (!reloadResult.ok) {
             return this.sendJson(res, 500, { ok: false, error: `mapping 已删除但重载失败: ${reloadResult.error}` });
         }
@@ -775,6 +781,8 @@ class ManagementApi {
             syncDirection: m.syncDirection,
             filePatterns: m.filePatterns,
             excludePatterns: m.excludePatterns,
+            syncDotFiles: m.syncDotFiles,
+            effectiveSyncDotFiles: (0, pathSyncScope_1.resolveSyncScopeOptions)(m, cfg).syncDotFiles,
             moveNameConflictStrategy: m.moveNameConflictStrategy,
             renameNameConflictStrategy: m.renameNameConflictStrategy,
             enableFileIndex: m.enableFileIndex,
@@ -810,6 +818,7 @@ class ManagementApi {
             watchEnabled: config.watchEnabled,
             pushDebounceMs: config.pushDebounceMs,
             watchUsePolling: config.watchUsePolling,
+            syncDotFiles: config.syncDotFiles,
         };
     }
     serveStaticFile(res, relativePath) {

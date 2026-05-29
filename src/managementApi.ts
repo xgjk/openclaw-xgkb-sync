@@ -5,6 +5,7 @@ import { SyncScheduler } from './scheduler';
 import { resolveMaxConcurrentMappings } from './scheduler';
 import { SyncConfig, SyncMapping } from './types';
 import { generateUniqueMappingId, validateMapping } from './config';
+import { resolveSyncScopeOptions } from './pathSyncScope';
 import { getMappingCredentialsViolation } from './managementApiCredentials';
 import {
   resolvePushDebounceMs,
@@ -58,6 +59,7 @@ const EDITABLE_CONFIG_FIELDS = [
   'watchEnabled',
   'pushDebounceMs',
   'watchUsePolling',
+  'syncDotFiles',
 ] as const;
 
 type EditableConfigField = (typeof EDITABLE_CONFIG_FIELDS)[number];
@@ -72,7 +74,7 @@ export interface ManagementApiOptions {
   /** 获取当前 scheduler 实例（reload 后引用会变） */
   getScheduler: () => SyncScheduler;
   /** 热重载回调：重新读取配置文件并重建 scheduler，返回新配置或错误 */
-  onReload: () => ReloadResult;
+  onReload: () => ReloadResult | Promise<ReloadResult>;
 }
 
 /**
@@ -133,6 +135,10 @@ export class ManagementApi {
       this.server = null;
       console.log('[ManagementApi] 已停止');
     }
+  }
+
+  private invokeReload(): Promise<ReloadResult> {
+    return Promise.resolve(this.opts.onReload());
   }
 
   private async handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
@@ -277,6 +283,7 @@ export class ManagementApi {
         watchEnabled: config.watchEnabled,
         pushDebounceMs: config.pushDebounceMs,
         watchUsePolling: config.watchUsePolling,
+        syncDotFiles: config.syncDotFiles,
         maxConcurrentMappings: config.maxConcurrentMappings,
         maxConcurrentMappingsMode: config.maxConcurrentMappingsMode,
         effectiveMaxConcurrentMappings: resolveMaxConcurrentMappings(config),
@@ -288,9 +295,9 @@ export class ManagementApi {
     });
   }
 
-  private handleReload(res: http.ServerResponse): void {
+  private async handleReload(res: http.ServerResponse): Promise<void> {
     console.log('[ManagementApi] 收到 /reload 请求，重载配置...');
-    const result = this.opts.onReload();
+    const result = await this.invokeReload();
     if (!result.ok) {
       console.error('[ManagementApi] 配置重载失败:', result.error);
       return this.sendJson(res, 400, { ok: false, error: result.error });
@@ -454,7 +461,7 @@ export class ManagementApi {
           raw.pushDebounceMs = val;
           continue;
         }
-        if (key === 'watchEnabled' || key === 'watchUsePolling') {
+        if (key === 'watchEnabled' || key === 'watchUsePolling' || key === 'syncDotFiles') {
           if (typeof val !== 'boolean') {
             throw new Error(`${key} 必须是 boolean`);
           }
@@ -489,7 +496,7 @@ export class ManagementApi {
       return this.sendJson(res, 400, { ok: false, error: writeResult.error });
     }
 
-    const reloadResult = this.opts.onReload();
+    const reloadResult = await this.invokeReload();
     if (!reloadResult.ok) {
       return this.sendJson(res, 500, {
         ok: false,
@@ -576,7 +583,7 @@ export class ManagementApi {
     }
 
     // 热重载使新 mapping 立即生效
-    const reloadResult = this.opts.onReload();
+    const reloadResult = await this.invokeReload();
     if (!reloadResult.ok) {
       return this.sendJson(res, 500, { ok: false, error: `mapping 已写入但重载失败: ${reloadResult.error}` });
     }
@@ -666,7 +673,7 @@ export class ManagementApi {
     }
 
     if (created) {
-      const reloadResult = this.opts.onReload();
+      const reloadResult = await this.invokeReload();
       if (!reloadResult.ok) {
         return this.sendJson(res, 500, { ok: false, error: `mapping 已写入但重载失败: ${reloadResult.error}` });
       }
@@ -701,7 +708,7 @@ export class ManagementApi {
       );
     }
 
-    const reloadResult = this.opts.onReload();
+    const reloadResult = await this.invokeReload();
     if (!reloadResult.ok) {
       return this.sendJson(res, 500, { ok: false, error: `mapping 已写入但重载失败: ${reloadResult.error}` });
     }
@@ -721,7 +728,7 @@ export class ManagementApi {
     });
   }
 
-  private handleDeleteMapping(res: http.ServerResponse, mappingId: string): void {
+  private async handleDeleteMapping(res: http.ServerResponse, mappingId: string): Promise<void> {
     const writeResult = this.modifyConfigMappings((mappings) => {
       if (!mappings.some((m) => m.mappingId === mappingId)) {
         throw new Error(`未找到 mapping "${mappingId}"`);
@@ -733,7 +740,7 @@ export class ManagementApi {
       return this.sendJson(res, status, { ok: false, error: writeResult.error });
     }
 
-    const reloadResult = this.opts.onReload();
+    const reloadResult = await this.invokeReload();
     if (!reloadResult.ok) {
       return this.sendJson(res, 500, { ok: false, error: `mapping 已删除但重载失败: ${reloadResult.error}` });
     }
@@ -857,6 +864,8 @@ export class ManagementApi {
       syncDirection: m.syncDirection,
       filePatterns: m.filePatterns,
       excludePatterns: m.excludePatterns,
+      syncDotFiles: m.syncDotFiles,
+      effectiveSyncDotFiles: resolveSyncScopeOptions(m, cfg).syncDotFiles,
       moveNameConflictStrategy: m.moveNameConflictStrategy,
       renameNameConflictStrategy: m.renameNameConflictStrategy,
       enableFileIndex: m.enableFileIndex,
@@ -894,6 +903,7 @@ export class ManagementApi {
       watchEnabled: config.watchEnabled,
       pushDebounceMs: config.pushDebounceMs,
       watchUsePolling: config.watchUsePolling,
+      syncDotFiles: config.syncDotFiles,
     };
   }
 

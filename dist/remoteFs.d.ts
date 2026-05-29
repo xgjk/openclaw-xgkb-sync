@@ -21,6 +21,8 @@ export interface RemoteFsOptions {
     filePatterns?: string[];
     /** File exclude patterns, used for client-side filtering. */
     excludePatterns?: string[];
+    /** Whether dot-segment paths participate in remote list filtering. */
+    syncDotFiles?: boolean;
 }
 /** Resolved IDs returned by init() for Scheduler to persist. */
 export interface RemoteFsInitResult {
@@ -41,8 +43,7 @@ export declare class RemoteFsAdapter {
     private readonly api;
     private readonly uploader;
     private readonly opts;
-    private readonly filePatterns;
-    private readonly excludePatterns;
+    private readonly syncScope;
     private resolvedProjectId;
     private resolvedRootFileId;
     private resolvedRootFolderPath;

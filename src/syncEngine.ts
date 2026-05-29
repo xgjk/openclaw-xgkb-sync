@@ -1,4 +1,3 @@
-import micromatch from 'micromatch';
 import * as nodePath from 'path';
 import { LocalFsAdapter } from './localFs';
 import { RemoteFsAdapter } from './remoteFs';
@@ -23,6 +22,7 @@ import {
   DEFAULT_FILE_PATTERNS,
   DEFAULT_MOVE_NAME_CONFLICT_STRATEGY,
   DEFAULT_RENAME_NAME_CONFLICT_STRATEGY,
+  DEFAULT_SYNC_DOT_FILES,
   DOWNLOAD_CONCURRENCY,
   EXECUTE_BATCH_PAUSE_MS,
   MTIME_TOLERANCE_MS,
@@ -32,6 +32,7 @@ import {
 import { pathsShadowedByAncestorFiles, sanitizePathSegment, canonicalizeRelativeSyncPath } from './pathSanitize';
 import { moveToTrash, cleanupTrash } from './trashBin';
 import { FileIndexService } from './fileIndexService';
+import { isRemotePathInSyncScope, type SyncScopeOptions } from './pathSyncScope';
 
 type ProgressCallback = (msg: string) => void;
 
@@ -79,6 +80,7 @@ export class SyncEngine {
 
   private readonly filePatterns: string[];
   private readonly excludePatterns: string[];
+  private readonly syncScope: SyncScopeOptions;
   private readonly downloadConcurrency: number;
   private readonly uploadConcurrency: number;
   /** pull/bidirectional 本轮 sync 写入本地的路径，供 FileWatcher resume 后 echo 过滤 */
@@ -97,6 +99,11 @@ export class SyncEngine {
     this.mapping = mapping;
     this.filePatterns = mapping.filePatterns ?? DEFAULT_FILE_PATTERNS;
     this.excludePatterns = mapping.excludePatterns ?? DEFAULT_EXCLUDE_PATTERNS;
+    this.syncScope = {
+      filePatterns: this.filePatterns,
+      excludePatterns: this.excludePatterns,
+      syncDotFiles: mapping.syncDotFiles ?? DEFAULT_SYNC_DOT_FILES,
+    };
     this.downloadConcurrency = opts?.downloadConcurrency ?? DOWNLOAD_CONCURRENCY;
     this.uploadConcurrency = opts?.uploadConcurrency ?? UPLOAD_CONCURRENCY;
     this.stats = this.emptyStats();
@@ -109,8 +116,7 @@ export class SyncEngine {
 
   /** 判断路径是否应纳入同步范围 */
   private matchesSync(path: string): boolean {
-    if (micromatch.isMatch(path, this.excludePatterns)) return false;
-    return micromatch.isMatch(path, this.filePatterns);
+    return isRemotePathInSyncScope(path, this.syncScope);
   }
 
   /** 本轮 sync 中 pull 侧写入本地的路径（供 chokidar echo 过滤） */

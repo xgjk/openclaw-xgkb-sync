@@ -112,6 +112,9 @@ export const TRANSIENT_RESULT_CODES = new Set<number>([500]);
 /** 启动时随机抖动最大值（毫秒），分散多实例同时启动导致的请求突刺 */
 export const STARTUP_JITTER_MAX_MS = 20_000;
 
+/** stop()/reload 时等待进行中的 mapping 同步结束的最长时间（毫秒） */
+export const STOP_DRAIN_TIMEOUT_MS = 5 * 60_000;
+
 /** listChanges 安全回拨窗口（毫秒），避免时钟偏差漏事件 */
 export const CHANGES_SAFETY_WINDOW_MS = 5_000;
 
@@ -138,6 +141,25 @@ export const DEFAULT_FILE_PATTERNS = ['**/*.md'];
 
 /** 默认排除匹配模式 */
 export const DEFAULT_EXCLUDE_PATTERNS = ['**/_conflict_*', '**/.tmp/**'];
+
+/**
+ * 是否同步以 `.` 开头的路径段（点文件 / 点目录）。
+ * false：由 syncDotFiles 机制排除；true 时仅由 filePatterns / excludePatterns 决定。
+ */
+export const DEFAULT_SYNC_DOT_FILES = false;
+
+/**
+ * syncDotFiles=true 时建议在 excludePatterns 中追加的常见点目录（文档参考，非默认注入）。
+ * 避免 `.git`、`.obsidian` 等工具目录被同步到知识库。
+ */
+export const RECOMMENDED_DOT_DIR_EXCLUDE_PATTERNS = [
+  '**/.git/**',
+  '**/.obsidian/**',
+  '**/.vscode/**',
+  '**/.idea/**',
+  '**/.cache/**',
+  '**/.tmp/**',
+] as const;
 
 /** 默认状态库文件路径 */
 export const DEFAULT_DB_PATH = './openclaw-sync-state.db';

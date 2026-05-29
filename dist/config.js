@@ -69,6 +69,7 @@ function getDefaultConfigRaw() {
         watchEnabled: constants_1.DEFAULT_WATCH_ENABLED,
         pushDebounceMs: constants_1.DEFAULT_PUSH_DEBOUNCE_MS,
         watchUsePolling: constants_1.DEFAULT_WATCH_USE_POLLING,
+        syncDotFiles: constants_1.DEFAULT_SYNC_DOT_FILES,
         mappings: [],
     };
 }
@@ -93,6 +94,7 @@ function configToRaw(config) {
         watchEnabled: config.watchEnabled,
         pushDebounceMs: config.pushDebounceMs,
         watchUsePolling: config.watchUsePolling,
+        syncDotFiles: config.syncDotFiles,
         mappings: config.mappings,
     };
     if (config.appKey)
@@ -269,6 +271,7 @@ function validateConfig(raw, filePath) {
         watchUsePolling: typeof obj.watchUsePolling === 'boolean'
             ? obj.watchUsePolling
             : constants_1.DEFAULT_WATCH_USE_POLLING,
+        syncDotFiles: typeof obj.syncDotFiles === 'boolean' ? obj.syncDotFiles : constants_1.DEFAULT_SYNC_DOT_FILES,
         mappings,
     };
 }
@@ -317,6 +320,9 @@ function validateMapping(raw, idx, filePath) {
     if (m.watchUsePolling !== undefined && typeof m.watchUsePolling !== 'boolean') {
         throw new Error(`${loc}.watchUsePolling 必须是 boolean: ${filePath}`);
     }
+    if (m.syncDotFiles !== undefined && typeof m.syncDotFiles !== 'boolean') {
+        throw new Error(`${loc}.syncDotFiles 必须是 boolean: ${filePath}`);
+    }
     return {
         mappingId: m.mappingId,
         enabled: typeof m.enabled === 'boolean' ? m.enabled : true,
@@ -334,6 +340,7 @@ function validateMapping(raw, idx, filePath) {
         watchEnabled: typeof m.watchEnabled === 'boolean' ? m.watchEnabled : undefined,
         pushDebounceMs: typeof m.pushDebounceMs === 'number' ? m.pushDebounceMs : undefined,
         watchUsePolling: typeof m.watchUsePolling === 'boolean' ? m.watchUsePolling : undefined,
+        syncDotFiles: typeof m.syncDotFiles === 'boolean' ? m.syncDotFiles : undefined,
     };
 }
 function parseMoveConflictStrategy(raw, filePath, loc) {
