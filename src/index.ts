@@ -105,7 +105,14 @@ async function main() {
         return { ok: false, error: e instanceof Error ? e.message : String(e) };
       }
       console.log('[OpenClaw Sync] 配置重载：停止旧调度器...');
-      await schedulerRef.current.stop();
+      const stopped = await schedulerRef.current.stop();
+      if (!stopped) {
+        return {
+          ok: false,
+          error:
+            '旧调度器仍有同步未完成，已跳过重载以避免 Database already closed；请稍后重试或重启进程',
+        };
+      }
       schedulerRef.current = new SyncScheduler(newConfig);
       schedulerRef.current.start();
       console.log('[OpenClaw Sync] 配置重载完成');

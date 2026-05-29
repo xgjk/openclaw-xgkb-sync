@@ -7,6 +7,8 @@ export declare function resolveMaxConcurrentMappings(config: SyncConfig): number
  * - 定时触发 + 手动触发双路径
  */
 export declare class SyncScheduler {
+    /** 每个 scheduler 实例唯一 ID，延迟任务携带此 ID，防止旧实例回调在 stop 后仍执行 */
+    private readonly instanceId;
     private readonly config;
     private readonly db;
     /** 按 appKey 分组的限速器，每个 appKey 独享自己的令牌桶 */
@@ -17,6 +19,9 @@ export declare class SyncScheduler {
     /** triggerAll 错峰、启动抖动、pendingSync 等延迟任务 */
     private readonly pendingTimers;
     private activeSyncCount;
+    /** 全局同时进行中的 mapping 同步数（真·运行上限，保护事件循环与 /health） */
+    private globalRunningSyncs;
+    private readonly maxGlobalRunningSyncs;
     private readonly syncDrainWaiters;
     private running;
     private dbClosed;
@@ -30,13 +35,20 @@ export declare class SyncScheduler {
     start(): void;
     /**
      * 停止调度器：取消未执行的延迟任务，等待进行中的 sync 结束，再关闭 DB。
-     * reload / 进程退出时必须 await，否则错峰 setTimeout 会在 DB 已关闭后触发。
+     * @returns true 表示已安全停止并关闭 DB；false 表示仍有同步未完成（未关 DB，避免 Database already closed）
      */
-    stop(): Promise<void>;
+    stop(): Promise<boolean>;
     private scheduleDelayed;
     private clearPendingTimers;
     private waitForActiveSyncs;
     private notifySyncDrain;
+    /** 全局并发空出后，唤醒一条 pending 的 mapping */
+    private drainOnePendingSync;
+    /** 供探针判断负载：全局并行同步数 / 上限 */
+    getGlobalSyncPressure(): {
+        running: number;
+        max: number;
+    };
     private startWatchers;
     private stopWatchers;
     /** 手动触发指定 mapping 同步 */

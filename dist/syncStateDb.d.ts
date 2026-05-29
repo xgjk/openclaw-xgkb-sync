@@ -2,7 +2,10 @@ import { FileState, FolderState, MappingState } from './types';
 /** SQLite 状态库（使用 node-sqlite3-wasm，无需原生编译） */
 export declare class SyncStateDb {
     private readonly db;
+    private closed;
     constructor(dbPath?: string);
+    get isClosed(): boolean;
+    private assertOpen;
     private initSchema;
     getMappingState(mappingId: string): MappingState | undefined;
     upsertMappingState(state: Partial<Omit<MappingState, 'mappingId'>> & {

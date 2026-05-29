@@ -26,6 +26,9 @@ export declare class ManagementApi {
     private readonly opts;
     private readonly startedAt;
     private server;
+    /** 事件循环延迟（ms），用于判断 HTTP 是否可能被同步阻塞 */
+    private lastEventLoopLagMs;
+    private eventLoopTimer;
     constructor(opts: ManagementApiOptions);
     start(): void;
     stop(): void;

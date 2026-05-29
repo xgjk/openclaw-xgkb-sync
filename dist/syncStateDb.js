@@ -6,9 +6,18 @@ const constants_1 = require("./constants");
 /** SQLite 状态库（使用 node-sqlite3-wasm，无需原生编译） */
 class SyncStateDb {
     db;
+    closed = false;
     constructor(dbPath = constants_1.DEFAULT_DB_PATH) {
         this.db = new node_sqlite3_wasm_1.Database(dbPath);
         this.initSchema();
+    }
+    get isClosed() {
+        return this.closed;
+    }
+    assertOpen() {
+        if (this.closed) {
+            throw new Error('SyncStateDb is closed');
+        }
     }
     initSchema() {
         this.db.exec(`
@@ -114,6 +123,7 @@ class SyncStateDb {
     }
     // ==================== mapping 状态 ====================
     getMappingState(mappingId) {
+        this.assertOpen();
         const rows = this.db.all('SELECT * FROM sync_mapping_state WHERE mapping_id = ?', [mappingId]);
         return rows.length > 0 ? rowToMappingState(rows[0]) : undefined;
     }
@@ -390,6 +400,9 @@ class SyncStateDb {
         }
     }
     close() {
+        if (this.closed)
+            return;
+        this.closed = true;
         this.db.close();
     }
 }

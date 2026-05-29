@@ -98,6 +98,9 @@ class ManagementApi {
     opts;
     startedAt = Date.now();
     server = null;
+    /** 事件循环延迟（ms），用于判断 HTTP 是否可能被同步阻塞 */
+    lastEventLoopLagMs = 0;
+    eventLoopTimer = null;
     constructor(opts) {
         this.opts = opts;
     }
@@ -112,6 +115,15 @@ class ManagementApi {
                 this.sendJson(res, 500, { ok: false, error: 'internal error' });
             });
         });
+        // 长请求（reload / status）可等待；黑盒探针应单独用 /health 且超时 ≥10s
+        this.server.timeout = 120_000;
+        this.eventLoopTimer = setInterval(() => {
+            const t0 = Date.now();
+            setImmediate(() => {
+                this.lastEventLoopLagMs = Date.now() - t0;
+            });
+        }, 1000);
+        this.eventLoopTimer.unref();
         this.server.listen(this.opts.port, this.opts.host, () => {
             console.log(`[ManagementApi] 已启动，监听 http://${this.opts.host}:${this.opts.port}`);
             console.log(`[ManagementApi] 可用接口:`);
@@ -134,6 +146,10 @@ class ManagementApi {
         });
     }
     stop() {
+        if (this.eventLoopTimer) {
+            clearInterval(this.eventLoopTimer);
+            this.eventLoopTimer = null;
+        }
         if (this.server) {
             this.server.close();
             this.server = null;
@@ -147,6 +163,10 @@ class ManagementApi {
         const method = req.method ?? 'GET';
         const url = req.url ?? '/';
         const urlPath = url.split('?')[0];
+        // GET /health — 最先处理，仅证明进程与事件循环可响应（不访问 SQLite）
+        if (method === 'GET' && urlPath === '/health') {
+            return this.handleHealth(res);
+        }
         // GET / — 管理控制台
         if (method === 'GET' && (urlPath === '/' || urlPath === '/index.html')) {
             return this.serveStaticFile(res, 'index.html');
@@ -155,10 +175,6 @@ class ManagementApi {
         if (method === 'GET' && urlPath.startsWith('/static/')) {
             const rel = 'static/' + urlPath.slice('/static/'.length);
             return this.serveStaticFile(res, rel);
-        }
-        // GET /health
-        if (method === 'GET' && urlPath === '/health') {
-            return this.handleHealth(res);
         }
         // GET /status
         if (method === 'GET' && urlPath === '/status') {
@@ -215,6 +231,10 @@ class ManagementApi {
         const scheduler = this.opts.getScheduler();
         const config = scheduler.getConfig();
         const enabledCount = config.mappings.filter((m) => m.enabled).length;
+        const pressure = scheduler.getGlobalSyncPressure();
+        const overloaded = pressure.running >= pressure.max && pressure.max > 0;
+        const highLag = this.lastEventLoopLagMs > 15_000;
+        // 能执行到这里说明事件循环未完全卡死；黑盒探针应认 200，负载用字段表达
         this.sendJson(res, 200, {
             ok: true,
             version: VERSION,
@@ -224,6 +244,18 @@ class ManagementApi {
             mappingCount: config.mappings.length,
             enabledMappingCount: enabledCount,
             nodeVersion: process.version,
+            eventLoopLagMs: this.lastEventLoopLagMs,
+            globalSyncRunning: pressure.running,
+            globalSyncMax: pressure.max,
+            degraded: highLag || overloaded,
+            ...(highLag && {
+                warn: 'event_loop_lag_high',
+                hint: '同步阻塞事件循环，HTTP 可能间歇超时；请调大黑盒 timeout 或降低并行同步',
+            }),
+            ...(overloaded && {
+                warn: 'global_sync_saturated',
+                hint: '全局同步并发已满，新任务在排队',
+            }),
         });
     }
     handleStatus(res) {

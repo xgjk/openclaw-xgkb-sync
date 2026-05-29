@@ -5,10 +5,21 @@ import { DEFAULT_DB_PATH } from './constants';
 /** SQLite 状态库（使用 node-sqlite3-wasm，无需原生编译） */
 export class SyncStateDb {
   private readonly db: Database;
+  private closed = false;
 
   constructor(dbPath: string = DEFAULT_DB_PATH) {
     this.db = new Database(dbPath);
     this.initSchema();
+  }
+
+  get isClosed(): boolean {
+    return this.closed;
+  }
+
+  private assertOpen(): void {
+    if (this.closed) {
+      throw new Error('SyncStateDb is closed');
+    }
   }
 
   private initSchema(): void {
@@ -118,6 +129,7 @@ export class SyncStateDb {
   // ==================== mapping 状态 ====================
 
   getMappingState(mappingId: string): MappingState | undefined {
+    this.assertOpen();
     const rows = this.db.all(
       'SELECT * FROM sync_mapping_state WHERE mapping_id = ?',
       [mappingId],
@@ -494,6 +506,8 @@ export class SyncStateDb {
   }
 
   close(): void {
+    if (this.closed) return;
+    this.closed = true;
     this.db.close();
   }
 }

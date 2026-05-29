@@ -26,6 +26,8 @@ import {
 } from './watchHelpers';
 import { resolveSyncScopeOptions } from './pathSyncScope';
 
+let schedulerInstanceSeq = 0;
+
 interface MappingRunState {
   isSyncing: boolean;
   /** 当前正在同步时收到新触发，完成后立刻再执行一轮 */
@@ -62,6 +64,8 @@ export function resolveMaxConcurrentMappings(config: SyncConfig): number {
  * - 定时触发 + 手动触发双路径
  */
 export class SyncScheduler {
+  /** 每个 scheduler 实例唯一 ID，延迟任务携带此 ID，防止旧实例回调在 stop 后仍执行 */
+  private readonly instanceId = ++schedulerInstanceSeq;
   private readonly config: SyncConfig;
   private readonly db: SyncStateDb;
   /** 按 appKey 分组的限速器，每个 appKey 独享自己的令牌桶 */
@@ -72,15 +76,21 @@ export class SyncScheduler {
   /** triggerAll 错峰、启动抖动、pendingSync 等延迟任务 */
   private readonly pendingTimers = new Set<NodeJS.Timeout>();
   private activeSyncCount = 0;
+  /** 全局同时进行中的 mapping 同步数（真·运行上限，保护事件循环与 /health） */
+  private globalRunningSyncs = 0;
+  private readonly maxGlobalRunningSyncs: number;
   private readonly syncDrainWaiters: Array<() => void> = [];
   private running = false;
   private dbClosed = false;
 
   constructor(config: SyncConfig) {
     this.config = config;
+    this.maxGlobalRunningSyncs = resolveMaxConcurrentMappings(config);
     const dbPath = config.stateDbPath ?? DEFAULT_DB_PATH;
     this.db = new SyncStateDb(dbPath);
-    console.log(`[Scheduler] 状态库: ${dbPath}`);
+    console.log(
+      `[Scheduler] 实例#${this.instanceId} 状态库: ${dbPath}，全局最多 ${this.maxGlobalRunningSyncs} 路并行同步`,
+    );
   }
 
   /**
@@ -147,11 +157,12 @@ export class SyncScheduler {
 
   /**
    * 停止调度器：取消未执行的延迟任务，等待进行中的 sync 结束，再关闭 DB。
-   * reload / 进程退出时必须 await，否则错峰 setTimeout 会在 DB 已关闭后触发。
+   * @returns true 表示已安全停止并关闭 DB；false 表示仍有同步未完成（未关 DB，避免 Database already closed）
    */
-  async stop(): Promise<void> {
-    if (this.dbClosed) return;
+  async stop(): Promise<boolean> {
+    if (this.dbClosed) return true;
 
+    console.log(`[Scheduler] 实例#${this.instanceId} 正在停止...`);
     this.running = false;
     for (const t of this.timers) clearInterval(t);
     this.timers = [];
@@ -165,7 +176,7 @@ export class SyncScheduler {
         await this.waitForActiveSyncs(STOP_DRAIN_TIMEOUT_MS);
       } catch (e) {
         console.warn(
-          '[Scheduler] 等待同步结束超时，仍将关闭数据库:',
+          '[Scheduler] 等待同步结束超时:',
           e instanceof Error ? e.message : String(e),
         );
       }
@@ -173,17 +184,27 @@ export class SyncScheduler {
 
     await this.stopWatchers();
     this.limiters.clear();
+
+    if (this.activeSyncCount > 0) {
+      console.error(
+        `[Scheduler] 实例#${this.instanceId} 仍有 ${this.activeSyncCount} 个同步未完成，保留数据库连接（避免 Database already closed）`,
+      );
+      return false;
+    }
+
     if (!this.dbClosed) {
       this.db.close();
       this.dbClosed = true;
     }
-    console.log('[Scheduler] 已停止');
+    console.log(`[Scheduler] 实例#${this.instanceId} 已停止`);
+    return true;
   }
 
   private scheduleDelayed(fn: () => void, delayMs: number): void {
+    const instanceId = this.instanceId;
     const timer = setTimeout(() => {
       this.pendingTimers.delete(timer);
-      if (!this.running || this.dbClosed) return;
+      if (instanceId !== this.instanceId || !this.running || this.dbClosed) return;
       fn();
     }, delayMs);
     this.pendingTimers.add(timer);
@@ -214,6 +235,31 @@ export class SyncScheduler {
     if (this.activeSyncCount > 0) return;
     const waiters = this.syncDrainWaiters.splice(0);
     for (const w of waiters) w();
+  }
+
+  /** 全局并发空出后，唤醒一条 pending 的 mapping */
+  private drainOnePendingSync(): void {
+    if (!this.running || this.dbClosed) return;
+    if (this.globalRunningSyncs >= this.maxGlobalRunningSyncs) return;
+
+    for (const [mappingId, runState] of this.runStates) {
+      if (!runState.pendingSync || runState.isSyncing) continue;
+      const mapping = this.config.mappings.find((m) => m.mappingId === mappingId && m.enabled);
+      if (!mapping) continue;
+      runState.pendingSync = false;
+      const reason = runState.pendingReason ?? 'manual';
+      runState.pendingReason = undefined;
+      console.log(
+        `[Scheduler][${mappingId}] 全局限流空位，开始排队中的同步 (${formatSyncTriggerReason(reason)})`,
+      );
+      this.scheduleMapping(mapping, reason);
+      return;
+    }
+  }
+
+  /** 供探针判断负载：全局并行同步数 / 上限 */
+  getGlobalSyncPressure(): { running: number; max: number } {
+    return { running: this.globalRunningSyncs, max: this.maxGlobalRunningSyncs };
   }
 
   private startWatchers(mappings: SyncMapping[]): void {
@@ -314,6 +360,17 @@ export class SyncScheduler {
       return;
     }
 
+    if (this.globalRunningSyncs >= this.maxGlobalRunningSyncs) {
+      state.pendingSync = true;
+      if (reason === 'watch' || state.pendingReason !== 'watch') {
+        state.pendingReason = reason;
+      }
+      console.log(
+        `[Scheduler][${mapping.mappingId}] 全局限流 (${this.globalRunningSyncs}/${this.maxGlobalRunningSyncs})，排队 (${formatSyncTriggerReason(reason)})`,
+      );
+      return;
+    }
+
     state.lastTriggerReason = reason;
     if (reason === 'watch') {
       state.lastWatchTriggerAt = Date.now();
@@ -330,10 +387,11 @@ export class SyncScheduler {
   ): Promise<void> {
     if (!this.running || this.dbClosed) return;
 
+    this.activeSyncCount++;
+    this.globalRunningSyncs++;
     state.isSyncing = true;
     state.pendingSync = false;
     state.pendingReason = undefined;
-    this.activeSyncCount++;
 
     const watcher = this.watchers.get(mapping.mappingId);
     watcher?.pause();
@@ -345,7 +403,9 @@ export class SyncScheduler {
       watcher?.resumeAfterSync(pullTouchPaths);
       state.isSyncing = false;
       this.activeSyncCount--;
+      this.globalRunningSyncs--;
       this.notifySyncDrain();
+      this.drainOnePendingSync();
 
       // 若同步期间有新触发，再执行一轮
       if (this.running && !this.dbClosed && state.pendingSync) {
@@ -364,7 +424,7 @@ export class SyncScheduler {
   }
 
   private async doSync(mapping: SyncMapping, reason: SyncTriggerReason): Promise<string[]> {
-    if (!this.running || this.dbClosed) return [];
+    if (!this.running || this.dbClosed || this.db.isClosed) return [];
 
     console.log(
       `[Scheduler][${mapping.mappingId}] ===== 开始同步 (${formatSyncTriggerReason(reason)}) =====`,
