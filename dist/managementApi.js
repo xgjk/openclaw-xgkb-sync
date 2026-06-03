@@ -42,19 +42,7 @@ const config_1 = require("./config");
 const pathSyncScope_1 = require("./pathSyncScope");
 const managementApiCredentials_1 = require("./managementApiCredentials");
 const watchHelpers_1 = require("./watchHelpers");
-/** 读取 package.json 里的版本号，失败则返回 'unknown' */
-function readVersion() {
-    try {
-        const pkgPath = path.resolve(__dirname, '../package.json');
-        const raw = fs.readFileSync(pkgPath, 'utf-8');
-        const pkg = JSON.parse(raw);
-        return pkg.version ?? 'unknown';
-    }
-    catch {
-        return 'unknown';
-    }
-}
-const VERSION = readVersion();
+const version_1 = require("./version");
 /** 静态管理页面目录（与 dist/ 或 src/ 同级的 public/） */
 const PUBLIC_DIR = path.resolve(__dirname, '../public');
 /** 仅用于界面展示的脱敏 AppKey，避免返回明文。 */
@@ -156,6 +144,9 @@ class ManagementApi {
             console.log('[ManagementApi] 已停止');
         }
     }
+    getEventLoopLagMs() {
+        return this.lastEventLoopLagMs;
+    }
     invokeReload() {
         return Promise.resolve(this.opts.onReload());
     }
@@ -235,9 +226,13 @@ class ManagementApi {
         const overloaded = pressure.running >= pressure.max && pressure.max > 0;
         const highLag = this.lastEventLoopLagMs > 15_000;
         // 能执行到这里说明事件循环未完全卡死；黑盒探针应认 200，负载用字段表达
+        const id = this.opts.nodeIdentity;
         this.sendJson(res, 200, {
             ok: true,
-            version: VERSION,
+            version: version_1.APP_VERSION,
+            nodeId: id.nodeId,
+            advertiseIp: id.advertiseIp,
+            nodeIdSource: id.source,
             pid: process.pid,
             uptime: Math.floor((Date.now() - this.startedAt) / 1000),
             startedAt: new Date(this.startedAt).toISOString(),
@@ -283,7 +278,7 @@ class ManagementApi {
             };
         }
         this.sendJson(res, 200, {
-            version: VERSION,
+            version: version_1.APP_VERSION,
             pid: process.pid,
             uptime: Math.floor((Date.now() - this.startedAt) / 1000),
             startedAt: new Date(this.startedAt).toISOString(),
@@ -807,6 +802,7 @@ class ManagementApi {
             enabled: m.enabled,
             localRoot: m.localRoot,
             hasOwnAppKey: !!m.appKey,
+            appKeyMasked: maskSecret(m.appKey),
             projectId: m.projectId,
             remoteRootFolderPath: m.remoteRootFolderPath,
             remoteRootFileId: m.remoteRootFileId,

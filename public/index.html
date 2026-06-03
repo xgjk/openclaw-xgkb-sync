@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>OpenClaw 同步管理</title>
-  <link rel="stylesheet" href="/static/styles.css?v=sync-direction-ui-1" />
+  <link rel="stylesheet" href="/static/styles.css?v=central-manage-ui-1" />
 </head>
 <body>
   <div class="app">
@@ -57,6 +57,7 @@
       </div>
       <div class="settings-tabs" role="tablist" aria-label="全局配置分类">
         <button type="button" class="settings-tab active" data-settings-tab="basic">普通设置</button>
+        <button type="button" class="settings-tab" data-settings-tab="central">集中管理</button>
         <button type="button" class="settings-tab" data-settings-tab="advanced">高级设置</button>
       </div>
       <form id="globalForm">
@@ -103,6 +104,51 @@
               </label>
               <small>inotify 不可靠时开启；与「定时 sync」无关，仅改变监听方式。</small>
             </div>
+          </div>
+        </div>
+        <div class="settings-panel" id="settings-central">
+          <div class="form-grid">
+            <p class="settings-section-desc" id="centralManagerStatus">未配置 sync-manage 地址时，节点不会向中心上报。</p>
+            <label>
+              <span>sync-manage 地址 (centralManagerUrl)</span>
+              <input type="url" name="centralManagerUrl" placeholder="https://cwork-api-test.xgjktech.com.cn/sync-manage" autocomplete="off" />
+              <small>填写后启用心跳与 execution-log 上报；留空则关闭。保存后立即生效（无需重启进程）。</small>
+            </label>
+            <label>
+              <span>心跳间隔（秒）</span>
+              <input type="number" name="centralHeartbeatIntervalSec" min="15" step="1" placeholder="45" />
+              <small>建议 30～60 秒；最小 15 秒。</small>
+            </label>
+            <label class="readonly-field">
+              <span>当前 nodeId（只读）</span>
+              <output id="effectiveNodeId" class="readonly-value">—</output>
+              <small id="effectiveNodeIdHint">格式为 内网IP:管理端口；由下方覆盖项或自动探测生成。</small>
+            </label>
+            <label>
+              <span>nodeId 覆盖（可选）</span>
+              <input type="text" name="nodeId" placeholder="192.168.1.100:9090" autocomplete="off" spellcheck="false" />
+              <small>留空则按「宣告 IP + 管理端口」自动生成；禁止 127.0.0.1。</small>
+            </label>
+            <label>
+              <span>宣告内网 IP (nodeAdvertiseIp)</span>
+              <input type="text" name="nodeAdvertiseIp" placeholder="192.168.1.100" autocomplete="off" />
+              <small>多网卡时手工指定；留空则自动探测。禁止 127.0.0.1。</small>
+            </label>
+            <label class="readonly-field">
+              <span>配置版本 localConfigVersion（只读）</span>
+              <output id="localConfigVersionDisplay" class="readonly-value">0</output>
+              <small>由 sync-manage 下发配置后自动更新，请勿手工修改。</small>
+            </label>
+            <label class="checkbox-row">
+              <input type="checkbox" name="autoUpgradeEnabled" />
+              <span>发现新版本时自动升级 (autoUpgradeEnabled)</span>
+            </label>
+            <small>需部署 git + pm2/systemd；升级脚本默认 scripts/auto-upgrade.ps1|.sh。</small>
+            <label>
+              <span>升级脚本路径（可选）</span>
+              <input type="text" name="autoUpgradeScript" placeholder="./scripts/auto-upgrade.ps1" autocomplete="off" />
+              <small>留空使用默认脚本路径。</small>
+            </label>
           </div>
         </div>
         <div class="settings-panel" id="settings-advanced">
@@ -277,6 +323,6 @@
     </form>
   </dialog>
 
-  <script src="/static/app.js?v=sync-direction-ui-1"></script>
+  <script src="/static/app.js?v=central-manage-ui-1"></script>
 </body>
 </html>

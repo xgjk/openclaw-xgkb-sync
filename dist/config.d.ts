@@ -19,6 +19,8 @@ export declare function writeConfigFile(configPath: string, raw: Record<string, 
  */
 export declare function loadConfig(configPath?: string): SyncConfig;
 export declare function loadConfigWithMeta(configPath?: string): LoadConfigResult;
+/** 从 JSON 对象解析 SyncConfig（供中心配置 merge 等内存场景） */
+export declare function parseSyncConfig(raw: unknown, filePath?: string): SyncConfig;
 export declare function validateMapping(raw: unknown, idx: number, filePath: string): SyncMapping;
 /**
  * 为 POST /mappings 生成不与现有列表冲突的 mappingId。

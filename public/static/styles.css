@@ -457,6 +457,36 @@ body {
 .secret-status.is-empty {
   color: var(--warning);
   border-color: rgba(245, 158, 11, 0.35);
+}
+
+.settings-section-desc {
+  grid-column: 1 / -1;
+  margin: 0 0 4px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.settings-section-desc.is-set {
+  color: var(--success);
+  border-color: rgba(34, 197, 94, 0.35);
+  background: rgba(34, 197, 94, 0.08);
+}
+
+.readonly-field .readonly-value {
+  display: block;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.9rem;
+}
   background: rgba(245, 158, 11, 0.1);
 }
 

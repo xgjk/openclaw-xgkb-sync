@@ -12,22 +12,8 @@ import {
   resolveWatchEnabled,
   resolveWatchUsePolling,
 } from './watchHelpers';
-
-/** 读取 package.json 里的版本号，失败则返回 'unknown' */
-function readVersion(): string {
-  try {
-    const pkgPath = path.resolve(__dirname, '../package.json');
-    const raw = fs.readFileSync(pkgPath, 'utf-8');
-    const pkg = JSON.parse(raw) as { version?: string };
-    return pkg.version ?? 'unknown';
-  } catch {
-    return 'unknown';
-  }
-}
-
-const VERSION = readVersion();
-
-/** 静态管理页面目录（与 dist/ 或 src/ 同级的 public/） */
+import type { NodeIdentityInfo } from './nodeIdentity';
+import { APP_VERSION } from './version';
 const PUBLIC_DIR = path.resolve(__dirname, '../public');
 
 /** 仅用于界面展示的脱敏 AppKey，避免返回明文。 */
@@ -60,6 +46,12 @@ const EDITABLE_CONFIG_FIELDS = [
   'pushDebounceMs',
   'watchUsePolling',
   'syncDotFiles',
+  'centralManagerUrl',
+  'centralHeartbeatIntervalSec',
+  'autoUpgradeEnabled',
+  'autoUpgradeScript',
+  'nodeId',
+  'nodeAdvertiseIp',
 ] as const;
 
 type EditableConfigField = (typeof EDITABLE_CONFIG_FIELDS)[number];
@@ -71,6 +63,8 @@ export interface ManagementApiOptions {
   host: string;
   /** config.json 的绝对路径，供 mapping CRUD 接口读写 */
   configPath: string;
+  /** sync-manage 节点身份（随配置重载更新） */
+  getNodeIdentity: () => NodeIdentityInfo;
   /** 获取当前 scheduler 实例（reload 后引用会变） */
   getScheduler: () => SyncScheduler;
   /** 热重载回调：重新读取配置文件并重建 scheduler，返回新配置或错误 */
@@ -152,6 +146,10 @@ export class ManagementApi {
       this.server = null;
       console.log('[ManagementApi] 已停止');
     }
+  }
+
+  getEventLoopLagMs(): number {
+    return this.lastEventLoopLagMs;
   }
 
   private invokeReload(): Promise<ReloadResult> {
@@ -253,9 +251,13 @@ export class ManagementApi {
     const highLag = this.lastEventLoopLagMs > 15_000;
 
     // 能执行到这里说明事件循环未完全卡死；黑盒探针应认 200，负载用字段表达
+    const id = this.opts.getNodeIdentity();
     this.sendJson(res, 200, {
       ok: true,
-      version: VERSION,
+      version: APP_VERSION,
+      nodeId: id.nodeId,
+      advertiseIp: id.advertiseIp,
+      nodeIdSource: id.source,
       pid: process.pid,
       uptime: Math.floor((Date.now() - this.startedAt) / 1000),
       startedAt: new Date(this.startedAt).toISOString(),
@@ -304,7 +306,7 @@ export class ManagementApi {
     }
 
     this.sendJson(res, 200, {
-      version: VERSION,
+      version: APP_VERSION,
       pid: process.pid,
       uptime: Math.floor((Date.now() - this.startedAt) / 1000),
       startedAt: new Date(this.startedAt).toISOString(),
@@ -385,10 +387,11 @@ export class ManagementApi {
 
   private handleGetConfig(res: http.ServerResponse): void {
     const config = this.opts.getScheduler().getConfig();
+    const identity = this.opts.getNodeIdentity();
     this.sendJson(res, 200, {
       ok: true,
       hasGlobalAppKey: !!(config.appKey && config.appKey.trim()),
-      config: this.globalConfigSummary(config),
+      config: this.globalConfigSummary(config, identity),
     });
   }
 
@@ -516,6 +519,68 @@ export class ManagementApi {
           raw.maxConcurrentMappings = val;
           continue;
         }
+        if (key === 'centralManagerUrl') {
+          if (val === null || val === '') {
+            delete raw.centralManagerUrl;
+          } else if (typeof val === 'string') {
+            raw.centralManagerUrl = val.trim().replace(/\/+$/, '');
+          } else {
+            throw new Error('centralManagerUrl 必须是字符串或 null');
+          }
+          continue;
+        }
+        if (key === 'centralHeartbeatIntervalSec') {
+          if (typeof val !== 'number' || !Number.isInteger(val) || val < 15) {
+            throw new Error('centralHeartbeatIntervalSec 必须是 >= 15 的整数');
+          }
+          raw.centralHeartbeatIntervalSec = val;
+          continue;
+        }
+        if (key === 'autoUpgradeEnabled') {
+          if (typeof val !== 'boolean') {
+            throw new Error('autoUpgradeEnabled 必须是 boolean');
+          }
+          raw.autoUpgradeEnabled = val;
+          continue;
+        }
+        if (key === 'autoUpgradeScript') {
+          if (val === null || val === '') {
+            delete raw.autoUpgradeScript;
+          } else if (typeof val === 'string') {
+            raw.autoUpgradeScript = val.trim();
+          } else {
+            throw new Error('autoUpgradeScript 必须是字符串或 null');
+          }
+          continue;
+        }
+        if (key === 'nodeId') {
+          if (val === null || val === '') {
+            delete raw.nodeId;
+          } else if (typeof val === 'string') {
+            const id = val.trim();
+            if (/^127\.0\.0\.1(?::|$)/.test(id) || id.startsWith('localhost')) {
+              throw new Error('nodeId 不能使用 127.0.0.1 或 localhost');
+            }
+            raw.nodeId = id;
+          } else {
+            throw new Error('nodeId 必须是字符串或 null');
+          }
+          continue;
+        }
+        if (key === 'nodeAdvertiseIp') {
+          if (val === null || val === '') {
+            delete raw.nodeAdvertiseIp;
+          } else if (typeof val === 'string') {
+            const ip = val.trim();
+            if (/^127\./.test(ip)) {
+              throw new Error('nodeAdvertiseIp 不能使用回环地址');
+            }
+            raw.nodeAdvertiseIp = ip;
+          } else {
+            throw new Error('nodeAdvertiseIp 必须是字符串或 null');
+          }
+          continue;
+        }
         if (key === 'stateDbPath') {
           if (typeof val !== 'string' || !val.trim()) {
             throw new Error('stateDbPath 必须是非空字符串');
@@ -543,7 +608,7 @@ export class ManagementApi {
       ok: true,
       message: '全局配置已更新并生效',
       hasGlobalAppKey: !!(reloadResult.config.appKey && reloadResult.config.appKey.trim()),
-      config: this.globalConfigSummary(reloadResult.config),
+      config: this.globalConfigSummary(reloadResult.config, this.opts.getNodeIdentity()),
       ...(requiresRestartFields.length > 0 && {
         warnings: [
           `字段 [${requiresRestartFields.join(', ')}] 已写入 config.json，但需重启进程后才会生效`,
@@ -892,6 +957,7 @@ export class ManagementApi {
       enabled: m.enabled,
       localRoot: m.localRoot,
       hasOwnAppKey: !!m.appKey,
+      appKeyMasked: maskSecret(m.appKey),
       projectId: m.projectId,
       remoteRootFolderPath: m.remoteRootFolderPath,
       remoteRootFileId: m.remoteRootFileId,
@@ -915,7 +981,12 @@ export class ManagementApi {
   // ==================== 工具方法 ====================
 
   /** 非敏感全局配置摘要（不含 appKey 明文） */
-  private globalConfigSummary(config: SyncConfig): Record<string, unknown> {
+  private globalConfigSummary(
+    config: SyncConfig,
+    identity?: NodeIdentityInfo,
+  ): Record<string, unknown> {
+    const id = identity ?? this.opts.getNodeIdentity();
+    const centralUrl = config.centralManagerUrl?.trim() ?? '';
     return {
       serverUrl: config.serverUrl,
       appKeyMasked: maskSecret(config.appKey),
@@ -938,6 +1009,17 @@ export class ManagementApi {
       pushDebounceMs: config.pushDebounceMs,
       watchUsePolling: config.watchUsePolling,
       syncDotFiles: config.syncDotFiles,
+      centralManagerUrl: centralUrl,
+      centralManagerEnabled: !!centralUrl,
+      centralHeartbeatIntervalSec: config.centralHeartbeatIntervalSec,
+      autoUpgradeEnabled: config.autoUpgradeEnabled ?? false,
+      autoUpgradeScript: config.autoUpgradeScript ?? '',
+      nodeId: config.nodeId ?? '',
+      nodeAdvertiseIp: config.nodeAdvertiseIp ?? '',
+      effectiveNodeId: id.nodeId,
+      effectiveAdvertiseIp: id.advertiseIp,
+      nodeIdSource: id.source,
+      localConfigVersion: config.localConfigVersion ?? 0,
     };
   }
 

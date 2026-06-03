@@ -1,0 +1,1 @@
+{"version":3,"file":"versionCompare.d.ts","sourceRoot":"","sources":["../src/versionCompare.ts"],"names":[],"mappings":"AAAA;;;GAGG;AACH,wBAAgB,eAAe,CAC7B,CAAC,EAAE,MAAM,EACT,CAAC,EAAE,MAAM,GACR;IAAE,MAAM,EAAE,CAAC,CAAC,GAAG,CAAC,GAAG,CAAC,CAAC;IAAC,MAAM,EAAE,OAAO,CAAA;CAAE,CAezC;AAED,wBAAgB,cAAc,CAAC,MAAM,EAAE,MAAM,EAAE,OAAO,EAAE,MAAM,GAAG,OAAO,CAGvE"}

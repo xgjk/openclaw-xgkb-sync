@@ -5,7 +5,7 @@ import { RateLimiter } from './rateLimiter';
 import { RemoteFsAdapter, RemoteFsInitResult } from './remoteFs';
 import { SyncEngine } from './syncEngine';
 import { SyncStateDb } from './syncStateDb';
-import { SyncConfig, SyncMapping, SyncStats, SyncTriggerReason } from './types';
+import { SyncConfig, SyncMapping, MappingSyncRunResult, SyncStats, SyncTriggerReason } from './types';
 import {
   DEFAULT_DB_PATH,
   DEFAULT_FULL_RECONCILE_INTERVAL_SEC,
@@ -37,6 +37,12 @@ interface MappingRunState {
   lastTriggerReason?: SyncTriggerReason;
   /** 最近一次由 watch 触发的本地时间戳（毫秒） */
   lastWatchTriggerAt?: number;
+}
+
+interface DoSyncResult {
+  pullTouchPaths: string[];
+  stats?: SyncStats;
+  errorMsg?: string;
 }
 
 export function resolveMaxConcurrentMappings(config: SyncConfig): number {
@@ -82,9 +88,14 @@ export class SyncScheduler {
   private readonly syncDrainWaiters: Array<() => void> = [];
   private running = false;
   private dbClosed = false;
+  private readonly onMappingSyncFinished?: (result: MappingSyncRunResult) => void;
 
-  constructor(config: SyncConfig) {
+  constructor(
+    config: SyncConfig,
+    opts?: { onMappingSyncFinished?: (result: MappingSyncRunResult) => void },
+  ) {
     this.config = config;
+    this.onMappingSyncFinished = opts?.onMappingSyncFinished;
     this.maxGlobalRunningSyncs = resolveMaxConcurrentMappings(config);
     const dbPath = config.stateDbPath ?? DEFAULT_DB_PATH;
     this.db = new SyncStateDb(dbPath);
@@ -262,6 +273,11 @@ export class SyncScheduler {
     return { running: this.globalRunningSyncs, max: this.maxGlobalRunningSyncs };
   }
 
+  /** 无进行中的 mapping 同步（供自动升级等场景） */
+  isSyncIdle(): boolean {
+    return this.activeSyncCount === 0 && this.globalRunningSyncs === 0;
+  }
+
   private startWatchers(mappings: SyncMapping[]): void {
     for (const mapping of mappings) {
       if (!resolveWatchEnabled(mapping, this.config)) continue;
@@ -396,16 +412,36 @@ export class SyncScheduler {
     const watcher = this.watchers.get(mapping.mappingId);
     watcher?.pause();
 
-    let pullTouchPaths: string[] = [];
+    const startTime = Date.now();
+    let syncResult: DoSyncResult = { pullTouchPaths: [] };
     try {
-      pullTouchPaths = await this.doSync(mapping, reason);
+      syncResult = await this.doSync(mapping, reason);
     } finally {
-      watcher?.resumeAfterSync(pullTouchPaths);
+      watcher?.resumeAfterSync(syncResult.pullTouchPaths);
       state.isSyncing = false;
       this.activeSyncCount--;
       this.globalRunningSyncs--;
       this.notifySyncDrain();
       this.drainOnePendingSync();
+
+      const endTime = Date.now();
+      const stats = syncResult.stats;
+      let errorMsg = syncResult.errorMsg;
+      if (!errorMsg && stats && stats.failed > 0) {
+        errorMsg = stats.errors.slice(0, 3).join('; ');
+      }
+      this.onMappingSyncFinished?.({
+        mappingId: mapping.mappingId,
+        triggerReason: reason,
+        startTime,
+        endTime,
+        uploaded: stats?.uploaded ?? 0,
+        downloaded: stats?.downloaded ?? 0,
+        deleted: stats?.deleted ?? 0,
+        skipped: stats?.skipped ?? 0,
+        failed: stats?.failed ?? 0,
+        errorMsg,
+      });
 
       // 若同步期间有新触发，再执行一轮
       if (this.running && !this.dbClosed && state.pendingSync) {
@@ -423,8 +459,10 @@ export class SyncScheduler {
     }
   }
 
-  private async doSync(mapping: SyncMapping, reason: SyncTriggerReason): Promise<string[]> {
-    if (!this.running || this.dbClosed || this.db.isClosed) return [];
+  private async doSync(mapping: SyncMapping, reason: SyncTriggerReason): Promise<DoSyncResult> {
+    if (!this.running || this.dbClosed || this.db.isClosed) {
+      return { pullTouchPaths: [] };
+    }
 
     console.log(
       `[Scheduler][${mapping.mappingId}] ===== 开始同步 (${formatSyncTriggerReason(reason)}) =====`,
@@ -477,7 +515,7 @@ export class SyncScheduler {
       const msg = `远端初始化失败: ${initResult.error}`;
       console.error(`[Scheduler][${mapping.mappingId}] ${msg}`);
       this.db.upsertMappingState({ mappingId: mapping.mappingId, lastError: msg });
-      return [];
+      return { pullTouchPaths: [], errorMsg: msg };
     }
     const resolved: RemoteFsInitResult = initResult.value;
     this.db.upsertMappingState({
@@ -519,7 +557,7 @@ export class SyncScheduler {
         mappingId: mapping.mappingId,
         lastError: msg,
       });
-      return pullTouchPaths;
+      return { pullTouchPaths, errorMsg: msg };
     }
 
     // 仅在无系统性失败时推进水位
@@ -551,7 +589,7 @@ export class SyncScheduler {
     console.log(
       `[Scheduler][${mapping.mappingId}] ===== 同步完成 ↑${stats.uploaded} ↓${stats.downloaded} ✗${stats.deleted} fail:${stats.failed} =====`,
     );
-    return pullTouchPaths;
+    return { pullTouchPaths, stats };
   }
 
   /** 获取当前生效的配置（供 ManagementApi 读取） */

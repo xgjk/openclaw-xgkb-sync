@@ -4,6 +4,7 @@ import { randomBytes } from 'crypto';
 import { SyncConfig, SyncMapping } from './types';
 import {
   DEFAULT_AUTO_SYNC_INTERVAL_SEC,
+  DEFAULT_CENTRAL_HEARTBEAT_INTERVAL_SEC,
   DEFAULT_DB_PATH,
   DEFAULT_EXCLUDE_PATTERNS,
   DEFAULT_FILE_PATTERNS,
@@ -86,6 +87,7 @@ export function configToRaw(config: SyncConfig): Record<string, unknown> {
     mappings: config.mappings,
   };
   if (config.appKey) raw.appKey = config.appKey;
+  if (config.localConfigVersion != null) raw.localConfigVersion = config.localConfigVersion;
   return raw;
 }
 
@@ -199,6 +201,11 @@ export function loadConfigWithMeta(configPath: string = DEFAULT_CONFIG_PATH): Lo
   return { config, bootstrapped };
 }
 
+/** 从 JSON 对象解析 SyncConfig（供中心配置 merge 等内存场景） */
+export function parseSyncConfig(raw: unknown, filePath = '<memory>'): SyncConfig {
+  return validateConfig(raw, filePath);
+}
+
 function validateConfig(raw: unknown, filePath: string): SyncConfig {
   if (typeof raw !== 'object' || raw === null) {
     throw new Error(`配置文件内容必须是 JSON 对象: ${filePath}`);
@@ -296,6 +303,28 @@ function validateConfig(raw: unknown, filePath: string): SyncConfig {
         : DEFAULT_WATCH_USE_POLLING,
     syncDotFiles:
       typeof obj.syncDotFiles === 'boolean' ? obj.syncDotFiles : DEFAULT_SYNC_DOT_FILES,
+    ...(typeof obj.nodeId === 'string' && obj.nodeId.trim() ? { nodeId: obj.nodeId.trim() } : {}),
+    ...(typeof obj.nodeAdvertiseIp === 'string' && obj.nodeAdvertiseIp.trim()
+      ? { nodeAdvertiseIp: obj.nodeAdvertiseIp.trim() }
+      : {}),
+    ...(Array.isArray(obj.nodeExcludeInterfaces)
+      ? { nodeExcludeInterfaces: (obj.nodeExcludeInterfaces as unknown[]).map(String) }
+      : {}),
+    ...(typeof obj.centralManagerUrl === 'string' && obj.centralManagerUrl.trim()
+      ? { centralManagerUrl: obj.centralManagerUrl.trim() }
+      : {}),
+    ...(typeof obj.centralHeartbeatIntervalSec === 'number'
+      ? { centralHeartbeatIntervalSec: obj.centralHeartbeatIntervalSec }
+      : {}),
+    ...(typeof obj.autoUpgradeEnabled === 'boolean'
+      ? { autoUpgradeEnabled: obj.autoUpgradeEnabled }
+      : {}),
+    ...(typeof obj.autoUpgradeScript === 'string' && obj.autoUpgradeScript.trim()
+      ? { autoUpgradeScript: obj.autoUpgradeScript.trim() }
+      : {}),
+    ...(typeof obj.localConfigVersion === 'number' && Number.isFinite(obj.localConfigVersion)
+      ? { localConfigVersion: Math.max(0, Math.floor(obj.localConfigVersion)) }
+      : {}),
     mappings,
   };
 }

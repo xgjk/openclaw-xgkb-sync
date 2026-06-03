@@ -53,8 +53,10 @@ class SyncScheduler {
     syncDrainWaiters = [];
     running = false;
     dbClosed = false;
-    constructor(config) {
+    onMappingSyncFinished;
+    constructor(config, opts) {
         this.config = config;
+        this.onMappingSyncFinished = opts?.onMappingSyncFinished;
         this.maxGlobalRunningSyncs = resolveMaxConcurrentMappings(config);
         const dbPath = config.stateDbPath ?? constants_1.DEFAULT_DB_PATH;
         this.db = new syncStateDb_1.SyncStateDb(dbPath);
@@ -208,6 +210,10 @@ class SyncScheduler {
     getGlobalSyncPressure() {
         return { running: this.globalRunningSyncs, max: this.maxGlobalRunningSyncs };
     }
+    /** 无进行中的 mapping 同步（供自动升级等场景） */
+    isSyncIdle() {
+        return this.activeSyncCount === 0 && this.globalRunningSyncs === 0;
+    }
     startWatchers(mappings) {
         for (const mapping of mappings) {
             if (!(0, watchHelpers_1.resolveWatchEnabled)(mapping, this.config))
@@ -311,17 +317,36 @@ class SyncScheduler {
         state.pendingReason = undefined;
         const watcher = this.watchers.get(mapping.mappingId);
         watcher?.pause();
-        let pullTouchPaths = [];
+        const startTime = Date.now();
+        let syncResult = { pullTouchPaths: [] };
         try {
-            pullTouchPaths = await this.doSync(mapping, reason);
+            syncResult = await this.doSync(mapping, reason);
         }
         finally {
-            watcher?.resumeAfterSync(pullTouchPaths);
+            watcher?.resumeAfterSync(syncResult.pullTouchPaths);
             state.isSyncing = false;
             this.activeSyncCount--;
             this.globalRunningSyncs--;
             this.notifySyncDrain();
             this.drainOnePendingSync();
+            const endTime = Date.now();
+            const stats = syncResult.stats;
+            let errorMsg = syncResult.errorMsg;
+            if (!errorMsg && stats && stats.failed > 0) {
+                errorMsg = stats.errors.slice(0, 3).join('; ');
+            }
+            this.onMappingSyncFinished?.({
+                mappingId: mapping.mappingId,
+                triggerReason: reason,
+                startTime,
+                endTime,
+                uploaded: stats?.uploaded ?? 0,
+                downloaded: stats?.downloaded ?? 0,
+                deleted: stats?.deleted ?? 0,
+                skipped: stats?.skipped ?? 0,
+                failed: stats?.failed ?? 0,
+                errorMsg,
+            });
             // 若同步期间有新触发，再执行一轮
             if (this.running && !this.dbClosed && state.pendingSync) {
                 const pendingReason = state.pendingReason ?? 'manual';
@@ -337,8 +362,9 @@ class SyncScheduler {
         }
     }
     async doSync(mapping, reason) {
-        if (!this.running || this.dbClosed || this.db.isClosed)
-            return [];
+        if (!this.running || this.dbClosed || this.db.isClosed) {
+            return { pullTouchPaths: [] };
+        }
         console.log(`[Scheduler][${mapping.mappingId}] ===== 开始同步 (${(0, watchHelpers_1.formatSyncTriggerReason)(reason)}) =====`);
         console.log(`  localRoot: ${mapping.localRoot}`);
         console.log(`  projectId: ${mapping.projectId}  remoteRootFileId: ${mapping.remoteRootFileId}`);
@@ -381,7 +407,7 @@ class SyncScheduler {
             const msg = `远端初始化失败: ${initResult.error}`;
             console.error(`[Scheduler][${mapping.mappingId}] ${msg}`);
             this.db.upsertMappingState({ mappingId: mapping.mappingId, lastError: msg });
-            return [];
+            return { pullTouchPaths: [], errorMsg: msg };
         }
         const resolved = initResult.value;
         this.db.upsertMappingState({
@@ -410,7 +436,7 @@ class SyncScheduler {
                 mappingId: mapping.mappingId,
                 lastError: msg,
             });
-            return pullTouchPaths;
+            return { pullTouchPaths, errorMsg: msg };
         }
         // 仅在无系统性失败时推进水位
         if (stats.failed === 0 && stats.newSince) {
@@ -435,7 +461,7 @@ class SyncScheduler {
             console.warn(`[Scheduler][${mapping.mappingId}] 存在 ${stats.failed} 个失败文件，水位未推进，下轮将重试`);
         }
         console.log(`[Scheduler][${mapping.mappingId}] ===== 同步完成 ↑${stats.uploaded} ↓${stats.downloaded} ✗${stats.deleted} fail:${stats.failed} =====`);
-        return pullTouchPaths;
+        return { pullTouchPaths, stats };
     }
     /** 获取当前生效的配置（供 ManagementApi 读取） */
     getConfig() {

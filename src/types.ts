@@ -79,6 +79,20 @@ export interface SyncMapping {
 /** 同步触发来源（日志与诊断） */
 export type SyncTriggerReason = 'watch' | 'timer' | 'startup' | 'manual';
 
+/** 单轮 mapping 同步结束结果（供 sync-manage execution-log 上报） */
+export interface MappingSyncRunResult {
+  mappingId: string;
+  triggerReason: SyncTriggerReason;
+  startTime: number;
+  endTime: number;
+  uploaded: number;
+  downloaded: number;
+  deleted: number;
+  skipped: number;
+  failed: number;
+  errorMsg?: string;
+}
+
 export interface SyncConfig {
   /** 知识库 Open API 根地址；省略时使用生产环境默认地址（见 constants.DEFAULT_SERVER_URL） */
   serverUrl: string;
@@ -152,6 +166,30 @@ export interface SyncConfig {
    * 默认 false。
    */
   syncDotFiles?: boolean;
+  /**
+   * 节点在 sync-manage 中的唯一 ID，格式建议 `{内网IP}:{managementPort}`。
+   * 不填则按 nodeAdvertiseIp + managementPort 或自动探测内网 IP 生成。
+   */
+  nodeId?: string;
+  /**
+   * 对外宣告的内网 IPv4（多网卡时手工指定）。禁止 127.0.0.1。
+   */
+  nodeAdvertiseIp?: string;
+  /** 排除的网卡名（正则或子串），用于自动探测 IP */
+  nodeExcludeInterfaces?: string[];
+  /** sync-manage API 根地址（接入心跳后使用） */
+  centralManagerUrl?: string;
+  /** 心跳间隔（秒），默认 45 */
+  centralHeartbeatIntervalSec?: number;
+  /** 是否在发现 latestAppVersion 更新且空闲时触发升级脚本 */
+  autoUpgradeEnabled?: boolean;
+  /** 升级脚本路径，默认 scripts/auto-upgrade.sh|.ps1 */
+  autoUpgradeScript?: string;
+  /**
+   * 本地已应用的 sync-manage 配置版本号。
+   * 心跳上报 localConfigVersion；应用中心下发 config 后更新为 data.configVersion。
+   */
+  localConfigVersion?: number;
   mappings: SyncMapping[];
 }
 

@@ -1,4 +1,4 @@
-import { SyncConfig, SyncTriggerReason } from './types';
+import { SyncConfig, MappingSyncRunResult, SyncTriggerReason } from './types';
 export declare function resolveMaxConcurrentMappings(config: SyncConfig): number;
 /**
  * 多 Mapping 同步调度器
@@ -25,7 +25,10 @@ export declare class SyncScheduler {
     private readonly syncDrainWaiters;
     private running;
     private dbClosed;
-    constructor(config: SyncConfig);
+    private readonly onMappingSyncFinished?;
+    constructor(config: SyncConfig, opts?: {
+        onMappingSyncFinished?: (result: MappingSyncRunResult) => void;
+    });
     /**
      * 按 appKey 获取或创建对应的限速器。
      * 同一 appKey 的所有请求共享一个令牌桶，不同 appKey 互不干扰。
@@ -49,6 +52,8 @@ export declare class SyncScheduler {
         running: number;
         max: number;
     };
+    /** 无进行中的 mapping 同步（供自动升级等场景） */
+    isSyncIdle(): boolean;
     private startWatchers;
     private stopWatchers;
     /** 手动触发指定 mapping 同步 */

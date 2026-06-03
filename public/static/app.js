@@ -543,6 +543,8 @@
       $('input[name="watchEnabled"]', mappingForm).checked = true;
       $('input[name="watchUsePolling"]', mappingForm).checked = false;
       $('input[name="pushDebounceMs"]', mappingForm).value = '';
+      const newAppKeyInput = $('input[name="appKey"]', mappingForm);
+      if (newAppKeyInput) { newAppKeyInput.type = 'password'; newAppKeyInput.dataset.maskedValue = ''; }
     } else {
       const m = mappingsCache.find((x) => x.mappingId === id);
       if (!m) return;
@@ -572,6 +574,11 @@
       $('input[name="watchUsePolling"]', mappingForm).checked = !!m.watchUsePolling;
       $('input[name="pushDebounceMs"]', mappingForm).value =
         m.pushDebounceMs != null ? String(m.pushDebounceMs) : '';
+      const mappingAppKeyInput = $('input[name="appKey"]', mappingForm);
+      const maskedVal = m.appKeyMasked || '';
+      mappingAppKeyInput.value = maskedVal;
+      mappingAppKeyInput.dataset.maskedValue = maskedVal;
+      mappingAppKeyInput.type = maskedVal ? 'text' : 'password';
     }
 
     updateMappingSyncDirectionUi();
@@ -585,6 +592,25 @@
   $('#btnAddMapping').addEventListener('click', () => openMappingModal(null));
   $('#btnCloseModal').addEventListener('click', closeMappingModal);
   $('#btnCancelModal').addEventListener('click', closeMappingModal);
+
+  // 映射 appKey：聚焦时切 password 模式便于输入新值；失焦若未改动则还原脱敏文本显示
+  const mappingAppKeyField = $('input[name="appKey"]', mappingForm);
+  if (mappingAppKeyField) {
+    mappingAppKeyField.addEventListener('focus', () => {
+      const masked = mappingAppKeyField.dataset.maskedValue || '';
+      if (mappingAppKeyField.value === masked && masked) {
+        mappingAppKeyField.type = 'password';
+        mappingAppKeyField.value = '';
+      }
+    });
+    mappingAppKeyField.addEventListener('blur', () => {
+      const masked = mappingAppKeyField.dataset.maskedValue || '';
+      if (!mappingAppKeyField.value && masked) {
+        mappingAppKeyField.value = masked;
+        mappingAppKeyField.type = 'text';
+      }
+    });
+  }
 
   $('#mappingSyncDirection')?.addEventListener('change', updateMappingSyncDirectionUi);
 
@@ -616,8 +642,11 @@
       if (renameConflict) body.renameNameConflictStrategy = Number(renameConflict);
     }
 
+    const appKeyInput = mappingForm.elements.namedItem('appKey');
     const appKey = (fd.get('appKey') || '').toString().trim();
-    if (appKey) body.appKey = appKey;
+    const appKeyMaskedValue = (appKeyInput && appKeyInput.dataset.maskedValue) || '';
+    const appKeyChanged = appKey && appKey !== appKeyMaskedValue;
+    if (appKeyChanged) body.appKey = appKey;
 
     const projectId = (fd.get('projectId') || '').toString().trim();
     if (projectId) body.projectId = projectId;
@@ -641,7 +670,7 @@
       return;
     }
 
-    if (!hasGlobalAppKey && !appKey && mode === 'create') {
+    if (!hasGlobalAppKey && !appKeyChanged && mode === 'create') {
       toast('未配置全局 AppKey，请填写本条映射的 AppKey', 'error');
       return;
     }
@@ -683,6 +712,29 @@
     }
   }
 
+  function updateCentralManageUi(cfg) {
+    const status = $('#centralManagerStatus');
+    if (status) {
+      const enabled = !!cfg.centralManagerEnabled;
+      status.textContent = enabled
+        ? `已启用 sync-manage 上报 · nodeId=${cfg.effectiveNodeId || '—'}`
+        : '未配置 centralManagerUrl，节点不会向中心上报。';
+      status.classList.toggle('is-set', enabled);
+    }
+    const nodeIdOut = $('#effectiveNodeId');
+    if (nodeIdOut) {
+      nodeIdOut.textContent = cfg.effectiveNodeId || '—';
+    }
+    const hint = $('#effectiveNodeIdHint');
+    if (hint && cfg.nodeIdSource) {
+      hint.textContent = `来源：${cfg.nodeIdSource} · 宣告 IP：${cfg.effectiveAdvertiseIp || '—'}`;
+    }
+    const verOut = $('#localConfigVersionDisplay');
+    if (verOut) {
+      verOut.textContent = String(cfg.localConfigVersion ?? 0);
+    }
+  }
+
   async function loadGlobalConfig() {
     const data = await api('GET', '/config');
     hasGlobalAppKey = data.hasGlobalAppKey;
@@ -704,6 +756,7 @@
     updateGlobalAppKeyHint();
     updateMappingConcurrencyUi();
     updateGlobalSyncDirectionUi();
+    updateCentralManageUi(cfg);
   }
 
   $('#btnSaveGlobal').addEventListener('click', async () => {
@@ -711,8 +764,9 @@
     const body = {};
     const fields = [
       'serverUrl', 'syncDirection', 'autoSyncIntervalSec', 'maxConcurrentMappingsMode', 'maxConcurrentMappings',
-      'maxRequestsPerMinute', 'stateDbPath', 'downloadConcurrency', 'uploadConcurrency',
+      'fullReconcileIntervalSec', 'maxRequestsPerMinute', 'stateDbPath', 'downloadConcurrency', 'uploadConcurrency',
       'managementPort', 'managementHost', 'pushDebounceMs',
+      'centralManagerUrl', 'centralHeartbeatIntervalSec', 'autoUpgradeScript', 'nodeId', 'nodeAdvertiseIp',
     ];
     for (const name of fields) {
       const el = form.elements.namedItem(name);
@@ -725,6 +779,7 @@
     }
     body.watchEnabled = form.elements.namedItem('watchEnabled')?.checked ?? true;
     body.watchUsePolling = form.elements.namedItem('watchUsePolling')?.checked ?? false;
+    body.autoUpgradeEnabled = form.elements.namedItem('autoUpgradeEnabled')?.checked ?? false;
     const appKeyInput = form.elements.namedItem('appKey');
     const appKey = appKeyInput.value.trim();
     const maskedValue = appKeyInput.dataset.maskedValue || '';

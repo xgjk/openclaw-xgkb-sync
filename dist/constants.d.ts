@@ -133,6 +133,8 @@ export declare const DEFAULT_FULL_RECONCILE_INTERVAL_SEC = 3600;
 export declare const DEFAULT_MANAGEMENT_PORT = 9090;
 /** 默认 HTTP 管理 API 监听地址 */
 export declare const DEFAULT_MANAGEMENT_HOST = "0.0.0.0";
+/** sync-manage 心跳默认间隔（秒） */
+export declare const DEFAULT_CENTRAL_HEARTBEAT_INTERVAL_SEC = 45;
 /** 默认最大并发 mapping 数 */
 export declare const DEFAULT_MAX_CONCURRENT_MAPPINGS = 2;
 /** 版本备注 */

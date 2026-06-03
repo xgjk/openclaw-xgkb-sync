@@ -144,6 +144,8 @@ Web 控制台与管理 API 的修改都会写回 `config.json`。高级用户可
 
 ## 四、已有环境更新
 
+> **维护者发版打 Tag**：见 [RELEASE_TAG.md](./RELEASE_TAG.md)。Windows 一键：`.\scripts\release-tag.ps1 -Version 1.0.6 -Push`
+
 更新代码时**不要覆盖**本地 `config.json` 和 SQLite 状态库（默认 `./openclaw-sync-state.db`），否则会丢失密钥与同步水位。
 
 ### 标准更新流程

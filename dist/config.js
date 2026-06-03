@@ -38,6 +38,7 @@ exports.configToRaw = configToRaw;
 exports.writeConfigFile = writeConfigFile;
 exports.loadConfig = loadConfig;
 exports.loadConfigWithMeta = loadConfigWithMeta;
+exports.parseSyncConfig = parseSyncConfig;
 exports.validateMapping = validateMapping;
 exports.generateUniqueMappingId = generateUniqueMappingId;
 const fs = __importStar(require("fs"));
@@ -99,6 +100,8 @@ function configToRaw(config) {
     };
     if (config.appKey)
         raw.appKey = config.appKey;
+    if (config.localConfigVersion != null)
+        raw.localConfigVersion = config.localConfigVersion;
     return raw;
 }
 /** 原子写入 config.json */
@@ -206,6 +209,10 @@ function loadConfigWithMeta(configPath = DEFAULT_CONFIG_PATH) {
     }
     return { config, bootstrapped };
 }
+/** 从 JSON 对象解析 SyncConfig（供中心配置 merge 等内存场景） */
+function parseSyncConfig(raw, filePath = '<memory>') {
+    return validateConfig(raw, filePath);
+}
 function validateConfig(raw, filePath) {
     if (typeof raw !== 'object' || raw === null) {
         throw new Error(`配置文件内容必须是 JSON 对象: ${filePath}`);
@@ -272,6 +279,28 @@ function validateConfig(raw, filePath) {
             ? obj.watchUsePolling
             : constants_1.DEFAULT_WATCH_USE_POLLING,
         syncDotFiles: typeof obj.syncDotFiles === 'boolean' ? obj.syncDotFiles : constants_1.DEFAULT_SYNC_DOT_FILES,
+        ...(typeof obj.nodeId === 'string' && obj.nodeId.trim() ? { nodeId: obj.nodeId.trim() } : {}),
+        ...(typeof obj.nodeAdvertiseIp === 'string' && obj.nodeAdvertiseIp.trim()
+            ? { nodeAdvertiseIp: obj.nodeAdvertiseIp.trim() }
+            : {}),
+        ...(Array.isArray(obj.nodeExcludeInterfaces)
+            ? { nodeExcludeInterfaces: obj.nodeExcludeInterfaces.map(String) }
+            : {}),
+        ...(typeof obj.centralManagerUrl === 'string' && obj.centralManagerUrl.trim()
+            ? { centralManagerUrl: obj.centralManagerUrl.trim() }
+            : {}),
+        ...(typeof obj.centralHeartbeatIntervalSec === 'number'
+            ? { centralHeartbeatIntervalSec: obj.centralHeartbeatIntervalSec }
+            : {}),
+        ...(typeof obj.autoUpgradeEnabled === 'boolean'
+            ? { autoUpgradeEnabled: obj.autoUpgradeEnabled }
+            : {}),
+        ...(typeof obj.autoUpgradeScript === 'string' && obj.autoUpgradeScript.trim()
+            ? { autoUpgradeScript: obj.autoUpgradeScript.trim() }
+            : {}),
+        ...(typeof obj.localConfigVersion === 'number' && Number.isFinite(obj.localConfigVersion)
+            ? { localConfigVersion: Math.max(0, Math.floor(obj.localConfigVersion)) }
+            : {}),
         mappings,
     };
 }

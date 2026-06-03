@@ -1,5 +1,6 @@
 import { SyncScheduler } from './scheduler';
 import { SyncConfig } from './types';
+import type { NodeIdentityInfo } from './nodeIdentity';
 export type ReloadResult = {
     ok: true;
     config: SyncConfig;
@@ -12,6 +13,8 @@ export interface ManagementApiOptions {
     host: string;
     /** config.json 的绝对路径，供 mapping CRUD 接口读写 */
     configPath: string;
+    /** sync-manage 节点 ID（内网 IP:端口） */
+    nodeIdentity: NodeIdentityInfo;
     /** 获取当前 scheduler 实例（reload 后引用会变） */
     getScheduler: () => SyncScheduler;
     /** 热重载回调：重新读取配置文件并重建 scheduler，返回新配置或错误 */
@@ -32,6 +35,7 @@ export declare class ManagementApi {
     constructor(opts: ManagementApiOptions);
     start(): void;
     stop(): void;
+    getEventLoopLagMs(): number;
     private invokeReload;
     private handle;
     private handleHealth;

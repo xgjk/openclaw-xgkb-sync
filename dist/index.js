@@ -39,6 +39,9 @@ const constants_1 = require("./constants");
 const config_1 = require("./config");
 const scheduler_1 = require("./scheduler");
 const managementApi_1 = require("./managementApi");
+const nodeIdentity_1 = require("./nodeIdentity");
+const centralReporter_1 = require("./centralReporter");
+const version_1 = require("./version");
 /** 默认日志目录（相对进程工作目录，一般为项目根） */
 const DEFAULT_LOG_DIR = 'logs';
 function formatLogDate(d = new Date()) {
@@ -108,8 +111,33 @@ async function main() {
     console.log(`[OpenClaw Sync] serverUrl: ${config.serverUrl}`);
     console.log(`[OpenClaw Sync] 同步方向: ${config.syncDirection}`);
     console.log(`[OpenClaw Sync] mapping 数量: ${config.mappings.length}（已启用: ${config.mappings.filter((m) => m.enabled).length}）`);
+    let nodeIdentity;
+    try {
+        nodeIdentity = (0, nodeIdentity_1.describeNodeIdentity)({
+            nodeId: config.nodeId,
+            advertiseIp: config.nodeAdvertiseIp,
+            excludeInterfaces: config.nodeExcludeInterfaces,
+            managementPort: config.managementPort ?? constants_1.DEFAULT_MANAGEMENT_PORT,
+        });
+        console.log(`[OpenClaw Sync] nodeId=${nodeIdentity.nodeId} advertiseIp=${nodeIdentity.advertiseIp} (source=${nodeIdentity.source})`);
+    }
+    catch (e) {
+        if (e instanceof nodeIdentity_1.NodeIdentityError) {
+            console.error('[OpenClaw Sync] 节点身份解析失败:', e.message);
+            process.exit(1);
+        }
+        throw e;
+    }
     // 用可变引用包装 scheduler，reload 时替换其中的实例
-    const schedulerRef = { current: new scheduler_1.SyncScheduler(config) };
+    let centralReporter = null;
+    function createScheduler(cfg) {
+        return new scheduler_1.SyncScheduler(cfg, {
+            onMappingSyncFinished: (result) => {
+                centralReporter?.reportExecutionLog(result);
+            },
+        });
+    }
+    const schedulerRef = { current: createScheduler(config) };
     // 热重载：等待旧 scheduler 排空并关闭 DB 后，再重建（防止错峰 timer 访问已关闭的 DB）
     let reloadInFlight = null;
     async function doReload() {
@@ -131,7 +159,7 @@ async function main() {
                     error: '旧调度器仍有同步未完成，已跳过重载以避免 Database already closed；请稍后重试或重启进程',
                 };
             }
-            schedulerRef.current = new scheduler_1.SyncScheduler(newConfig);
+            schedulerRef.current = createScheduler(newConfig);
             schedulerRef.current.start();
             console.log('[OpenClaw Sync] 配置重载完成');
             return { ok: true, config: newConfig };
@@ -148,13 +176,27 @@ async function main() {
         port: config.managementPort ?? 9090,
         host: config.managementHost ?? constants_1.DEFAULT_MANAGEMENT_HOST,
         configPath: absConfigPath,
+        nodeIdentity,
         getScheduler: () => schedulerRef.current,
         onReload: doReload,
     });
     managementApi.start();
+    centralReporter = new centralReporter_1.CentralReporter({
+        nodeId: nodeIdentity.nodeId,
+        advertiseIp: nodeIdentity.advertiseIp,
+        configPath: absConfigPath,
+        projectRoot: (0, centralReporter_1.resolveProjectRoot)(),
+        appVersion: version_1.APP_VERSION,
+        getConfig: () => schedulerRef.current.getConfig(),
+        getScheduler: () => schedulerRef.current,
+        getEventLoopLagMs: () => managementApi.getEventLoopLagMs(),
+        onReload: doReload,
+    });
+    centralReporter.start();
     // 优雅退出
     async function shutdown(signal) {
         console.log(`\n[OpenClaw Sync] 收到 ${signal}，正在停止...`);
+        centralReporter?.stop();
         managementApi.stop();
         await schedulerRef.current.stop();
         process.exit(0);
