@@ -43,7 +43,6 @@ const pathSyncScope_1 = require("./pathSyncScope");
 const managementApiCredentials_1 = require("./managementApiCredentials");
 const watchHelpers_1 = require("./watchHelpers");
 const version_1 = require("./version");
-/** 静态管理页面目录（与 dist/ 或 src/ 同级的 public/） */
 const PUBLIC_DIR = path.resolve(__dirname, '../public');
 /** 仅用于界面展示的脱敏 AppKey，避免返回明文。 */
 function maskSecret(value) {
@@ -76,6 +75,12 @@ const EDITABLE_CONFIG_FIELDS = [
     'pushDebounceMs',
     'watchUsePolling',
     'syncDotFiles',
+    'centralManagerUrl',
+    'centralHeartbeatIntervalSec',
+    'autoUpgradeEnabled',
+    'autoUpgradeScript',
+    'nodeId',
+    'nodeAdvertiseIp',
 ];
 /**
  * HTTP 管理 API 服务
@@ -226,7 +231,7 @@ class ManagementApi {
         const overloaded = pressure.running >= pressure.max && pressure.max > 0;
         const highLag = this.lastEventLoopLagMs > 15_000;
         // 能执行到这里说明事件循环未完全卡死；黑盒探针应认 200，负载用字段表达
-        const id = this.opts.nodeIdentity;
+        const id = this.opts.getNodeIdentity();
         this.sendJson(res, 200, {
             ok: true,
             version: version_1.APP_VERSION,
@@ -354,10 +359,11 @@ class ManagementApi {
     // ==================== 全局配置 ====================
     handleGetConfig(res) {
         const config = this.opts.getScheduler().getConfig();
+        const identity = this.opts.getNodeIdentity();
         this.sendJson(res, 200, {
             ok: true,
             hasGlobalAppKey: !!(config.appKey && config.appKey.trim()),
-            config: this.globalConfigSummary(config),
+            config: this.globalConfigSummary(config, identity),
         });
     }
     async handleUpdateConfig(req, res) {
@@ -478,6 +484,76 @@ class ManagementApi {
                     raw.maxConcurrentMappings = val;
                     continue;
                 }
+                if (key === 'centralManagerUrl') {
+                    if (val === null || val === '') {
+                        delete raw.centralManagerUrl;
+                    }
+                    else if (typeof val === 'string') {
+                        raw.centralManagerUrl = val.trim().replace(/\/+$/, '');
+                    }
+                    else {
+                        throw new Error('centralManagerUrl 必须是字符串或 null');
+                    }
+                    continue;
+                }
+                if (key === 'centralHeartbeatIntervalSec') {
+                    if (typeof val !== 'number' || !Number.isInteger(val) || val < 15) {
+                        throw new Error('centralHeartbeatIntervalSec 必须是 >= 15 的整数');
+                    }
+                    raw.centralHeartbeatIntervalSec = val;
+                    continue;
+                }
+                if (key === 'autoUpgradeEnabled') {
+                    if (typeof val !== 'boolean') {
+                        throw new Error('autoUpgradeEnabled 必须是 boolean');
+                    }
+                    raw.autoUpgradeEnabled = val;
+                    continue;
+                }
+                if (key === 'autoUpgradeScript') {
+                    if (val === null || val === '') {
+                        delete raw.autoUpgradeScript;
+                    }
+                    else if (typeof val === 'string') {
+                        raw.autoUpgradeScript = val.trim();
+                    }
+                    else {
+                        throw new Error('autoUpgradeScript 必须是字符串或 null');
+                    }
+                    continue;
+                }
+                if (key === 'nodeId') {
+                    if (val === null || val === '') {
+                        delete raw.nodeId;
+                    }
+                    else if (typeof val === 'string') {
+                        const id = val.trim();
+                        if (/^127\.0\.0\.1(?::|$)/.test(id) || id.startsWith('localhost')) {
+                            throw new Error('nodeId 不能使用 127.0.0.1 或 localhost');
+                        }
+                        raw.nodeId = id;
+                    }
+                    else {
+                        throw new Error('nodeId 必须是字符串或 null');
+                    }
+                    continue;
+                }
+                if (key === 'nodeAdvertiseIp') {
+                    if (val === null || val === '') {
+                        delete raw.nodeAdvertiseIp;
+                    }
+                    else if (typeof val === 'string') {
+                        const ip = val.trim();
+                        if (/^127\./.test(ip)) {
+                            throw new Error('nodeAdvertiseIp 不能使用回环地址');
+                        }
+                        raw.nodeAdvertiseIp = ip;
+                    }
+                    else {
+                        throw new Error('nodeAdvertiseIp 必须是字符串或 null');
+                    }
+                    continue;
+                }
                 if (key === 'stateDbPath') {
                     if (typeof val !== 'string' || !val.trim()) {
                         throw new Error('stateDbPath 必须是非空字符串');
@@ -502,7 +578,7 @@ class ManagementApi {
             ok: true,
             message: '全局配置已更新并生效',
             hasGlobalAppKey: !!(reloadResult.config.appKey && reloadResult.config.appKey.trim()),
-            config: this.globalConfigSummary(reloadResult.config),
+            config: this.globalConfigSummary(reloadResult.config, this.opts.getNodeIdentity()),
             ...(requiresRestartFields.length > 0 && {
                 warnings: [
                     `字段 [${requiresRestartFields.join(', ')}] 已写入 config.json，但需重启进程后才会生效`,
@@ -824,7 +900,9 @@ class ManagementApi {
     }
     // ==================== 工具方法 ====================
     /** 非敏感全局配置摘要（不含 appKey 明文） */
-    globalConfigSummary(config) {
+    globalConfigSummary(config, identity) {
+        const id = identity ?? this.opts.getNodeIdentity();
+        const centralUrl = config.centralManagerUrl?.trim() ?? '';
         return {
             serverUrl: config.serverUrl,
             appKeyMasked: maskSecret(config.appKey),
@@ -847,6 +925,17 @@ class ManagementApi {
             pushDebounceMs: config.pushDebounceMs,
             watchUsePolling: config.watchUsePolling,
             syncDotFiles: config.syncDotFiles,
+            centralManagerUrl: centralUrl,
+            centralManagerEnabled: !!centralUrl,
+            centralHeartbeatIntervalSec: config.centralHeartbeatIntervalSec,
+            autoUpgradeEnabled: config.autoUpgradeEnabled ?? false,
+            autoUpgradeScript: config.autoUpgradeScript ?? '',
+            nodeId: config.nodeId ?? '',
+            nodeAdvertiseIp: config.nodeAdvertiseIp ?? '',
+            effectiveNodeId: id.nodeId,
+            effectiveAdvertiseIp: id.advertiseIp,
+            nodeIdSource: id.source,
+            localConfigVersion: config.localConfigVersion ?? 0,
         };
     }
     serveStaticFile(res, relativePath) {

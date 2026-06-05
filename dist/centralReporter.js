@@ -56,7 +56,7 @@ class CentralReporter {
             return;
         }
         const intervalSec = Math.max(15, config.centralHeartbeatIntervalSec ?? constants_1.DEFAULT_CENTRAL_HEARTBEAT_INTERVAL_SEC);
-        console.log(`[CentralReporter] 已启用，目标 ${url}，心跳间隔 ${intervalSec}s，nodeId=${this.opts.nodeId}`);
+        console.log(`[CentralReporter] 已启用，目标 ${url}，心跳间隔 ${intervalSec}s，nodeId=${this.opts.getNodeIdentity().nodeId}`);
         const tick = () => void this.sendHeartbeat().catch((e) => {
             console.warn('[CentralReporter] 心跳异常:', e instanceof Error ? e.message : String(e));
         });
@@ -70,6 +70,13 @@ class CentralReporter {
             clearInterval(this.timer);
             this.timer = null;
         }
+    }
+    /** 配置变更后重启心跳定时器（如 Web 保存 centralManagerUrl） */
+    restart() {
+        this.stop();
+        this.stopped = false;
+        this.heartbeatInFlight = false;
+        this.start();
     }
     /** mapping 同步结束后上报 execution-log */
     reportExecutionLog(result) {
@@ -105,9 +112,10 @@ class CentralReporter {
             const scheduler = this.opts.getScheduler();
             const pressure = scheduler.getGlobalSyncPressure();
             const maxConcurrent = (0, scheduler_1.resolveMaxConcurrentMappings)(config);
+            const identity = this.opts.getNodeIdentity();
             const body = {
                 version: this.opts.appVersion,
-                ipAddress: this.opts.advertiseIp,
+                ipAddress: identity.advertiseIp,
                 eventLoopLagMs: this.opts.getEventLoopLagMs(),
                 globalSyncRunning: pressure.running,
                 globalSyncMax: maxConcurrent,
@@ -176,7 +184,7 @@ class CentralReporter {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                'X-Node-Id': this.opts.nodeId,
+                'X-Node-Id': this.opts.getNodeIdentity().nodeId,
             },
             body: JSON.stringify(body),
         });

@@ -18,8 +18,10 @@ export interface HeartbeatResponseData {
     config?: Record<string, unknown> | null;
 }
 export interface CentralReporterOptions {
-    nodeId: string;
-    advertiseIp: string;
+    getNodeIdentity: () => {
+        nodeId: string;
+        advertiseIp: string;
+    };
     configPath: string;
     projectRoot: string;
     appVersion: string;
@@ -36,6 +38,8 @@ export declare class CentralReporter {
     constructor(opts: CentralReporterOptions);
     start(): void;
     stop(): void;
+    /** 配置变更后重启心跳定时器（如 Web 保存 centralManagerUrl） */
+    restart(): void;
     /** mapping 同步结束后上报 execution-log */
     reportExecutionLog(result: MappingSyncRunResult): void;
     private sendHeartbeat;

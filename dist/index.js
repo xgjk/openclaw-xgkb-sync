@@ -111,14 +111,17 @@ async function main() {
     console.log(`[OpenClaw Sync] serverUrl: ${config.serverUrl}`);
     console.log(`[OpenClaw Sync] 同步方向: ${config.syncDirection}`);
     console.log(`[OpenClaw Sync] mapping 数量: ${config.mappings.length}（已启用: ${config.mappings.filter((m) => m.enabled).length}）`);
+    function resolveNodeIdentity(cfg) {
+        return (0, nodeIdentity_1.describeNodeIdentity)({
+            nodeId: cfg.nodeId,
+            advertiseIp: cfg.nodeAdvertiseIp,
+            excludeInterfaces: cfg.nodeExcludeInterfaces,
+            managementPort: cfg.managementPort ?? constants_1.DEFAULT_MANAGEMENT_PORT,
+        });
+    }
     let nodeIdentity;
     try {
-        nodeIdentity = (0, nodeIdentity_1.describeNodeIdentity)({
-            nodeId: config.nodeId,
-            advertiseIp: config.nodeAdvertiseIp,
-            excludeInterfaces: config.nodeExcludeInterfaces,
-            managementPort: config.managementPort ?? constants_1.DEFAULT_MANAGEMENT_PORT,
-        });
+        nodeIdentity = resolveNodeIdentity(config);
         console.log(`[OpenClaw Sync] nodeId=${nodeIdentity.nodeId} advertiseIp=${nodeIdentity.advertiseIp} (source=${nodeIdentity.source})`);
     }
     catch (e) {
@@ -162,6 +165,7 @@ async function main() {
             schedulerRef.current = createScheduler(newConfig);
             schedulerRef.current.start();
             console.log('[OpenClaw Sync] 配置重载完成');
+            centralReporter?.restart();
             return { ok: true, config: newConfig };
         })();
         try {
@@ -176,14 +180,13 @@ async function main() {
         port: config.managementPort ?? 9090,
         host: config.managementHost ?? constants_1.DEFAULT_MANAGEMENT_HOST,
         configPath: absConfigPath,
-        nodeIdentity,
+        getNodeIdentity: () => resolveNodeIdentity(schedulerRef.current.getConfig()),
         getScheduler: () => schedulerRef.current,
         onReload: doReload,
     });
     managementApi.start();
     centralReporter = new centralReporter_1.CentralReporter({
-        nodeId: nodeIdentity.nodeId,
-        advertiseIp: nodeIdentity.advertiseIp,
+        getNodeIdentity: () => resolveNodeIdentity(schedulerRef.current.getConfig()),
         configPath: absConfigPath,
         projectRoot: (0, centralReporter_1.resolveProjectRoot)(),
         appVersion: version_1.APP_VERSION,
