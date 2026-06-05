@@ -193,7 +193,6 @@ async function main() {
         getConfig: () => schedulerRef.current.getConfig(),
         getScheduler: () => schedulerRef.current,
         getEventLoopLagMs: () => managementApi.getEventLoopLagMs(),
-        onReload: doReload,
     });
     centralReporter.start();
     // 优雅退出

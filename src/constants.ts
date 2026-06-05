@@ -186,6 +186,9 @@ export const DEFAULT_CENTRAL_MANAGER_URL =
 /** sync-manage 心跳默认间隔（秒） */
 export const DEFAULT_CENTRAL_HEARTBEAT_INTERVAL_SEC = 45;
 
+/** 发现 latestAppVersion 更新时默认自动升级（显式 false 可关闭） */
+export const DEFAULT_AUTO_UPGRADE_ENABLED = true;
+
 /** 默认最大并发 mapping 数 */
 export const DEFAULT_MAX_CONCURRENT_MAPPINGS = 2;
 

@@ -84,6 +84,7 @@ function maybeScheduleAutoUpgrade(latestAppVersion, opts) {
     child.unref();
     child.on('error', (e) => {
         upgradeInFlight = false;
+        lastAttemptedTarget = null;
         opts.log?.(`[AutoUpgrade] 启动升级脚本失败: ${e instanceof Error ? e.message : String(e)}`);
     });
     // 脚本负责停服与重启；本进程可能被 SIGTERM，不再在这里 reset upgradeInFlight

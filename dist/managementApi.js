@@ -928,7 +928,7 @@ class ManagementApi {
             centralManagerUrl: centralUrl,
             centralManagerEnabled: !!centralUrl,
             centralHeartbeatIntervalSec: config.centralHeartbeatIntervalSec,
-            autoUpgradeEnabled: config.autoUpgradeEnabled ?? false,
+            autoUpgradeEnabled: config.autoUpgradeEnabled !== false,
             autoUpgradeScript: config.autoUpgradeScript ?? '',
             nodeId: config.nodeId ?? '',
             nodeAdvertiseIp: config.nodeAdvertiseIp ?? '',

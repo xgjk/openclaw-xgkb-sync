@@ -1,4 +1,3 @@
-import { ReloadResult } from './managementApi';
 import { SyncScheduler } from './scheduler';
 import { MappingSyncRunResult } from './types';
 import { SyncConfig } from './types';
@@ -28,8 +27,9 @@ export interface CentralReporterOptions {
     getConfig: () => SyncConfig;
     getScheduler: () => SyncScheduler;
     getEventLoopLagMs: () => number;
-    onReload: () => Promise<ReloadResult>;
 }
+/** 是否启用自动升级（默认开启，仅显式 false 关闭） */
+export declare function isAutoUpgradeEnabled(config: SyncConfig): boolean;
 export declare class CentralReporter {
     private readonly opts;
     private timer;

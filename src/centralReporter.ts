@@ -1,12 +1,12 @@
 import * as path from 'path';
 import { maybeScheduleAutoUpgrade } from './autoUpgrade';
-import { applyCentralConfigPatch, buildReportedConfig } from './centralConfigMerge';
-import { ReloadResult } from './managementApi';
+import { buildReportedConfig } from './centralConfigMerge';
 import { resolveMaxConcurrentMappings } from './scheduler';
 import { SyncScheduler } from './scheduler';
 import { MappingSyncRunResult } from './types';
 import { SyncConfig } from './types';
 import { DEFAULT_CENTRAL_HEARTBEAT_INTERVAL_SEC } from './constants';
+import { isNewerVersion } from './versionCompare';
 
 export interface CentralMappingStatPayload {
   mappingId: string;
@@ -33,7 +33,11 @@ export interface CentralReporterOptions {
   getConfig: () => SyncConfig;
   getScheduler: () => SyncScheduler;
   getEventLoopLagMs: () => number;
-  onReload: () => Promise<ReloadResult>;
+}
+
+/** 是否启用自动升级（默认开启，仅显式 false 关闭） */
+export function isAutoUpgradeEnabled(config: SyncConfig): boolean {
+  return config.autoUpgradeEnabled !== false;
 }
 
 export class CentralReporter {
@@ -59,8 +63,9 @@ export class CentralReporter {
       config.centralHeartbeatIntervalSec ?? DEFAULT_CENTRAL_HEARTBEAT_INTERVAL_SEC,
     );
 
+    const upgradeHint = isAutoUpgradeEnabled(config) ? '自动升级已启用' : '自动升级已关闭';
     console.log(
-      `[CentralReporter] 已启用，目标 ${url}，心跳间隔 ${intervalSec}s，nodeId=${this.opts.getNodeIdentity().nodeId}`,
+      `[CentralReporter] 已启用，目标 ${url}，心跳间隔 ${intervalSec}s，nodeId=${this.opts.getNodeIdentity().nodeId}，${upgradeHint}`,
     );
 
     const tick = () => void this.sendHeartbeat().catch((e) => {
@@ -150,37 +155,28 @@ export class CentralReporter {
         body,
       );
 
-      maybeScheduleAutoUpgrade(data.latestAppVersion, {
-        enabled: config.autoUpgradeEnabled === true,
-        scriptPath: config.autoUpgradeScript,
-        projectRoot: this.opts.projectRoot,
-        currentVersion: this.opts.appVersion,
-        isSyncIdle: () => scheduler.isSyncIdle(),
-        log: (msg) => console.log(msg),
-      });
-
-      if (data.config && typeof data.config === 'object') {
-        const configVersion =
-          typeof data.configVersion === 'number' ? data.configVersion : undefined;
-        if (configVersion == null) {
-          console.warn('[CentralReporter] 响应含 config 但缺少 configVersion，跳过 merge');
-          return;
+      const latest = data.latestAppVersion?.trim();
+      if (latest && isAutoUpgradeEnabled(config)) {
+        if (isNewerVersion(latest, this.opts.appVersion)) {
+          console.log(
+            `[CentralReporter] 中心发布新版本 ${latest}（当前 ${this.opts.appVersion}），检查是否可自动升级…`,
+          );
         }
-
-        applyCentralConfigPatch({
-          configPath: this.opts.configPath,
-          local: config,
-          patch: data.config,
-          configVersion,
-          resetMappingState: (id) => scheduler.resetMappingState(id),
+        maybeScheduleAutoUpgrade(latest, {
+          enabled: true,
+          scriptPath: config.autoUpgradeScript,
+          projectRoot: this.opts.projectRoot,
+          currentVersion: this.opts.appVersion,
+          isSyncIdle: () => scheduler.isSyncIdle(),
+          log: (msg) => console.log(msg),
         });
+      }
 
-        const reloadResult = await this.opts.onReload();
-        if (!reloadResult.ok) {
-          console.warn(`[CentralReporter] 中心配置已写入但 reload 失败: ${reloadResult.error}`);
-        } else {
-          console.log('[CentralReporter] 中心配置已 merge 并重载');
-        }
+      // 节点侧自行维护 config.json，暂不应用中心下发的 config
+      if (data.config && typeof data.config === 'object') {
+        console.log(
+          '[CentralReporter] 心跳响应含 config 字段，已忽略（节点配置由本地 Web/文件维护）',
+        );
       }
     } finally {
       this.heartbeatInFlight = false;

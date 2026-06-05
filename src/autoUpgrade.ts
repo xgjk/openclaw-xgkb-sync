@@ -66,6 +66,7 @@ export function maybeScheduleAutoUpgrade(
 
   child.on('error', (e) => {
     upgradeInFlight = false;
+    lastAttemptedTarget = null;
     opts.log?.(`[AutoUpgrade] 启动升级脚本失败: ${e instanceof Error ? e.message : String(e)}`);
   });
 

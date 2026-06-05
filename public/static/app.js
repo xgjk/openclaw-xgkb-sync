@@ -779,7 +779,7 @@
     }
     body.watchEnabled = form.elements.namedItem('watchEnabled')?.checked ?? true;
     body.watchUsePolling = form.elements.namedItem('watchUsePolling')?.checked ?? false;
-    body.autoUpgradeEnabled = form.elements.namedItem('autoUpgradeEnabled')?.checked ?? false;
+    body.autoUpgradeEnabled = form.elements.namedItem('autoUpgradeEnabled')?.checked ?? true;
     const appKeyInput = form.elements.namedItem('appKey');
     const appKey = appKeyInput.value.trim();
     const maskedValue = appKeyInput.dataset.maskedValue || '';

@@ -32,7 +32,7 @@
   "centralManagerUrl": "https://cwork-api-test.xgjktech.com.cn/sync-manage",
   "centralHeartbeatIntervalSec": 45,
   "localConfigVersion": 0,
-  "autoUpgradeEnabled": false,
+  "autoUpgradeEnabled": true,
 
   "mappings": [
     {

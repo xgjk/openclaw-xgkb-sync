@@ -10,9 +10,38 @@ cd "$ROOT"
 
 log() { echo "[auto-upgrade] $(date '+%Y-%m-%d %H:%M:%S') $*"; }
 
-log "开始升级 current=${CURRENT} target=${TARGET} root=${ROOT}"
+read_management_port() {
+  local port=9090
+  if [[ -f config.json ]]; then
+    port="$(node -e "try{const c=require('./config.json');process.stdout.write(String(c.managementPort>0?c.managementPort:9090))}catch(e){process.stdout.write('9090')}" 2>/dev/null || echo 9090)"
+  fi
+  echo "$port"
+}
 
-# 1) 停服（避免占用 dist/node_modules）
+stop_sync_by_port() {
+  local port="$1"
+  if command -v lsof >/dev/null 2>&1; then
+    local pids
+    pids="$(lsof -ti:"$port" 2>/dev/null || true)"
+    if [[ -n "$pids" ]]; then
+      log "Stopping process(es) on port $port: $pids"
+      kill $pids 2>/dev/null || true
+    fi
+  elif command -v fuser >/dev/null 2>&1; then
+    fuser -k "${port}/tcp" 2>/dev/null || true
+  else
+    log "lsof/fuser not found; ensure sync process is stopped before upgrade"
+  fi
+}
+
+start_sync_detached() {
+  mkdir -p logs
+  log "Starting npm start (nohup), log: logs/auto-upgrade-restart.log"
+  nohup npm start >> logs/auto-upgrade-restart.log 2>&1 &
+}
+
+log "upgrade start current=${CURRENT} target=${TARGET} root=${ROOT}"
+
 if command -v pm2 >/dev/null 2>&1; then
   pm2 stop openclaw-xgkb-sync >/dev/null 2>&1 || true
   sleep 2
@@ -20,15 +49,15 @@ elif systemctl is-active --quiet openclaw-xgkb-sync 2>/dev/null; then
   sudo systemctl stop openclaw-xgkb-sync
   sleep 2
 else
-  log "未检测到 pm2/systemd，请确保同步进程已停止后再升级"
+  stop_sync_by_port "$(read_management_port)"
+  sleep 2
 fi
 
-# 2) 拉代码并构建（与 docs/INSTALL_AND_UPDATE.md 一致）
 git fetch --tags origin
 if git rev-parse "v${TARGET}" >/dev/null 2>&1; then
-  git checkout "v${TARGET}"
+  git checkout -f "v${TARGET}"
 elif git rev-parse "${TARGET}" >/dev/null 2>&1; then
-  git checkout "${TARGET}"
+  git checkout -f "${TARGET}"
 else
   git pull origin main || git pull origin master
 fi
@@ -36,14 +65,12 @@ fi
 npm install
 npm run build
 
-# 3) 由进程管理器拉起（按环境选择其一）
 if command -v pm2 >/dev/null 2>&1; then
   pm2 restart openclaw-xgkb-sync || pm2 start dist/index.js --name openclaw-xgkb-sync -- --config config.json
 elif systemctl is-active --quiet openclaw-xgkb-sync 2>/dev/null; then
   sudo systemctl restart openclaw-xgkb-sync
 else
-  log "未检测到 pm2/systemd，请手动执行: npm start"
-  exit 0
+  start_sync_detached
 fi
 
-log "升级流程结束"
+log "upgrade finished"

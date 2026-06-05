@@ -4,6 +4,7 @@ import { randomBytes } from 'crypto';
 import { SyncConfig, SyncMapping } from './types';
 import {
   DEFAULT_AUTO_SYNC_INTERVAL_SEC,
+  DEFAULT_AUTO_UPGRADE_ENABLED,
   DEFAULT_CENTRAL_HEARTBEAT_INTERVAL_SEC,
   DEFAULT_CENTRAL_MANAGER_URL,
   DEFAULT_DB_PATH,
@@ -61,6 +62,7 @@ export function getDefaultConfigRaw(): Record<string, unknown> {
     syncDotFiles: DEFAULT_SYNC_DOT_FILES,
     centralManagerUrl: DEFAULT_CENTRAL_MANAGER_URL,
     centralHeartbeatIntervalSec: DEFAULT_CENTRAL_HEARTBEAT_INTERVAL_SEC,
+    autoUpgradeEnabled: DEFAULT_AUTO_UPGRADE_ENABLED,
     mappings: [],
   };
 }
@@ -95,7 +97,11 @@ export function configToRaw(config: SyncConfig): Record<string, unknown> {
   if (config.centralHeartbeatIntervalSec != null) {
     raw.centralHeartbeatIntervalSec = config.centralHeartbeatIntervalSec;
   }
-  if (config.autoUpgradeEnabled != null) raw.autoUpgradeEnabled = config.autoUpgradeEnabled;
+  if (config.autoUpgradeEnabled != null) {
+    raw.autoUpgradeEnabled = config.autoUpgradeEnabled;
+  } else {
+    raw.autoUpgradeEnabled = DEFAULT_AUTO_UPGRADE_ENABLED;
+  }
   if (config.autoUpgradeScript) raw.autoUpgradeScript = config.autoUpgradeScript;
   if (config.nodeId) raw.nodeId = config.nodeId;
   if (config.nodeAdvertiseIp) raw.nodeAdvertiseIp = config.nodeAdvertiseIp;
@@ -343,9 +349,10 @@ function validateConfig(raw: unknown, filePath: string): SyncConfig {
     ...(typeof obj.centralHeartbeatIntervalSec === 'number'
       ? { centralHeartbeatIntervalSec: obj.centralHeartbeatIntervalSec }
       : {}),
-    ...(typeof obj.autoUpgradeEnabled === 'boolean'
-      ? { autoUpgradeEnabled: obj.autoUpgradeEnabled }
-      : {}),
+    autoUpgradeEnabled:
+      typeof obj.autoUpgradeEnabled === 'boolean'
+        ? obj.autoUpgradeEnabled
+        : DEFAULT_AUTO_UPGRADE_ENABLED,
     ...(typeof obj.autoUpgradeScript === 'string' && obj.autoUpgradeScript.trim()
       ? { autoUpgradeScript: obj.autoUpgradeScript.trim() }
       : {}),

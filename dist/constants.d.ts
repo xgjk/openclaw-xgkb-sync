@@ -137,6 +137,8 @@ export declare const DEFAULT_MANAGEMENT_HOST = "0.0.0.0";
 export declare const DEFAULT_CENTRAL_MANAGER_URL = "https://cwork-api-test.xgjktech.com.cn/sync-manage";
 /** sync-manage 心跳默认间隔（秒） */
 export declare const DEFAULT_CENTRAL_HEARTBEAT_INTERVAL_SEC = 45;
+/** 发现 latestAppVersion 更新时默认自动升级（显式 false 可关闭） */
+export declare const DEFAULT_AUTO_UPGRADE_ENABLED = true;
 /** 默认最大并发 mapping 数 */
 export declare const DEFAULT_MAX_CONCURRENT_MAPPINGS = 2;
 /** 版本备注 */

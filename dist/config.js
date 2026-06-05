@@ -73,6 +73,7 @@ function getDefaultConfigRaw() {
         syncDotFiles: constants_1.DEFAULT_SYNC_DOT_FILES,
         centralManagerUrl: constants_1.DEFAULT_CENTRAL_MANAGER_URL,
         centralHeartbeatIntervalSec: constants_1.DEFAULT_CENTRAL_HEARTBEAT_INTERVAL_SEC,
+        autoUpgradeEnabled: constants_1.DEFAULT_AUTO_UPGRADE_ENABLED,
         mappings: [],
     };
 }
@@ -109,8 +110,12 @@ function configToRaw(config) {
     if (config.centralHeartbeatIntervalSec != null) {
         raw.centralHeartbeatIntervalSec = config.centralHeartbeatIntervalSec;
     }
-    if (config.autoUpgradeEnabled != null)
+    if (config.autoUpgradeEnabled != null) {
         raw.autoUpgradeEnabled = config.autoUpgradeEnabled;
+    }
+    else {
+        raw.autoUpgradeEnabled = constants_1.DEFAULT_AUTO_UPGRADE_ENABLED;
+    }
     if (config.autoUpgradeScript)
         raw.autoUpgradeScript = config.autoUpgradeScript;
     if (config.nodeId)
@@ -320,9 +325,9 @@ function validateConfig(raw, filePath) {
         ...(typeof obj.centralHeartbeatIntervalSec === 'number'
             ? { centralHeartbeatIntervalSec: obj.centralHeartbeatIntervalSec }
             : {}),
-        ...(typeof obj.autoUpgradeEnabled === 'boolean'
-            ? { autoUpgradeEnabled: obj.autoUpgradeEnabled }
-            : {}),
+        autoUpgradeEnabled: typeof obj.autoUpgradeEnabled === 'boolean'
+            ? obj.autoUpgradeEnabled
+            : constants_1.DEFAULT_AUTO_UPGRADE_ENABLED,
         ...(typeof obj.autoUpgradeScript === 'string' && obj.autoUpgradeScript.trim()
             ? { autoUpgradeScript: obj.autoUpgradeScript.trim() }
             : {}),

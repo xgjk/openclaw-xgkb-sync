@@ -34,12 +34,18 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.CentralReporter = void 0;
+exports.isAutoUpgradeEnabled = isAutoUpgradeEnabled;
 exports.resolveProjectRoot = resolveProjectRoot;
 const path = __importStar(require("path"));
 const autoUpgrade_1 = require("./autoUpgrade");
 const centralConfigMerge_1 = require("./centralConfigMerge");
 const scheduler_1 = require("./scheduler");
 const constants_1 = require("./constants");
+const versionCompare_1 = require("./versionCompare");
+/** 是否启用自动升级（默认开启，仅显式 false 关闭） */
+function isAutoUpgradeEnabled(config) {
+    return config.autoUpgradeEnabled !== false;
+}
 class CentralReporter {
     opts;
     timer = null;
@@ -56,7 +62,8 @@ class CentralReporter {
             return;
         }
         const intervalSec = Math.max(15, config.centralHeartbeatIntervalSec ?? constants_1.DEFAULT_CENTRAL_HEARTBEAT_INTERVAL_SEC);
-        console.log(`[CentralReporter] 已启用，目标 ${url}，心跳间隔 ${intervalSec}s，nodeId=${this.opts.getNodeIdentity().nodeId}`);
+        const upgradeHint = isAutoUpgradeEnabled(config) ? '自动升级已启用' : '自动升级已关闭';
+        console.log(`[CentralReporter] 已启用，目标 ${url}，心跳间隔 ${intervalSec}s，nodeId=${this.opts.getNodeIdentity().nodeId}，${upgradeHint}`);
         const tick = () => void this.sendHeartbeat().catch((e) => {
             console.warn('[CentralReporter] 心跳异常:', e instanceof Error ? e.message : String(e));
         });
@@ -125,34 +132,23 @@ class CentralReporter {
                 reportedConfig: (0, centralConfigMerge_1.buildReportedConfig)(config),
             };
             const data = await this.postJson(baseUrl, '/nologin/node/heartbeat', body);
-            (0, autoUpgrade_1.maybeScheduleAutoUpgrade)(data.latestAppVersion, {
-                enabled: config.autoUpgradeEnabled === true,
-                scriptPath: config.autoUpgradeScript,
-                projectRoot: this.opts.projectRoot,
-                currentVersion: this.opts.appVersion,
-                isSyncIdle: () => scheduler.isSyncIdle(),
-                log: (msg) => console.log(msg),
-            });
-            if (data.config && typeof data.config === 'object') {
-                const configVersion = typeof data.configVersion === 'number' ? data.configVersion : undefined;
-                if (configVersion == null) {
-                    console.warn('[CentralReporter] 响应含 config 但缺少 configVersion，跳过 merge');
-                    return;
+            const latest = data.latestAppVersion?.trim();
+            if (latest && isAutoUpgradeEnabled(config)) {
+                if ((0, versionCompare_1.isNewerVersion)(latest, this.opts.appVersion)) {
+                    console.log(`[CentralReporter] 中心发布新版本 ${latest}（当前 ${this.opts.appVersion}），检查是否可自动升级…`);
                 }
-                (0, centralConfigMerge_1.applyCentralConfigPatch)({
-                    configPath: this.opts.configPath,
-                    local: config,
-                    patch: data.config,
-                    configVersion,
-                    resetMappingState: (id) => scheduler.resetMappingState(id),
+                (0, autoUpgrade_1.maybeScheduleAutoUpgrade)(latest, {
+                    enabled: true,
+                    scriptPath: config.autoUpgradeScript,
+                    projectRoot: this.opts.projectRoot,
+                    currentVersion: this.opts.appVersion,
+                    isSyncIdle: () => scheduler.isSyncIdle(),
+                    log: (msg) => console.log(msg),
                 });
-                const reloadResult = await this.opts.onReload();
-                if (!reloadResult.ok) {
-                    console.warn(`[CentralReporter] 中心配置已写入但 reload 失败: ${reloadResult.error}`);
-                }
-                else {
-                    console.log('[CentralReporter] 中心配置已 merge 并重载');
-                }
+            }
+            // 节点侧自行维护 config.json，暂不应用中心下发的 config
+            if (data.config && typeof data.config === 'object') {
+                console.log('[CentralReporter] 心跳响应含 config 字段，已忽略（节点配置由本地 Web/文件维护）');
             }
         }
         finally {
