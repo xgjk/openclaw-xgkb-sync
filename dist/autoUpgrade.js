@@ -80,6 +80,9 @@ function maybeScheduleAutoUpgrade(latestAppVersion, opts) {
             ...process.env,
             OPENCLAW_SYNC_TARGET_VERSION: latest,
             OPENCLAW_SYNC_CURRENT_VERSION: current,
+            /** 与当前运行进程相同的 node，供升级脚本 build/重启（避免 Mac nvm PATH 丢失） */
+            OPENCLAW_SYNC_NODE: process.execPath,
+            OPENCLAW_SYNC_PROJECT_ROOT: opts.projectRoot,
         },
         ...(process.platform === 'win32' ? { windowsHide: true } : {}),
     };

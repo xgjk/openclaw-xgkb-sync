@@ -106,7 +106,8 @@
 |------|----------|----------|
 | Windows | `scripts/auto-upgrade.ps1` | `powershell -ExecutionPolicy Bypass -File …` |
 | macOS / Mac mini / Linux | `scripts/auto-upgrade.sh` | `/bin/bash scripts/auto-upgrade.sh …` |
-| 无 pm2/systemd | 同上 | 按 `config.json` 的 `managementPort` 停旧进程，再 `npm start`（后台） |
+| 无 pm2/systemd | 同上 | 按 `config.json` 的 `managementPort` 停旧进程，再 **`node dist/index.js`** 后台启动（不用 `npm start`，避免 Mac PATH 丢失） |
+| 排查 | `logs/auto-upgrade.log`（升级脚本全程） / `logs/auto-upgrade-restart.log`（新进程 stdout） |
 
 ### 2.4 安全闸门
 

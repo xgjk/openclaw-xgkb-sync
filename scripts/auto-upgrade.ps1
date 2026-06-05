@@ -8,11 +8,27 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $Root
 
+$LogDir = Join-Path $Root "logs"
+if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir | Out-Null }
+$LogFile = Join-Path $LogDir "auto-upgrade.log"
+$RestartLog = Join-Path $LogDir "auto-upgrade-restart.log"
+
 function Log($msg) {
-  Write-Host "[auto-upgrade] $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $msg"
+  $line = "[auto-upgrade] $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $msg"
+  Write-Host $line
+  Add-Content -Path $LogFile -Value $line -Encoding UTF8
 }
 
-function Get-ManagementPort {
+function Resolve-NodeBin {
+  if ($env:OPENCLAW_SYNC_NODE -and (Test-Path $env:OPENCLAW_SYNC_NODE)) {
+    return $env:OPENCLAW_SYNC_NODE
+  }
+  $node = Get-Command node -ErrorAction SilentlyContinue
+  if ($node) { return $node.Source }
+  throw "node not found; set OPENCLAW_SYNC_NODE or fix PATH"
+}
+
+function Get-ManagementPort([string]$NodeBin) {
   $port = 9090
   $configPath = Join-Path $Root "config.json"
   if (Test-Path $configPath) {
@@ -38,52 +54,70 @@ function Stop-SyncByPort([int]$Port) {
       Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
     }
   }
-}
-
-function Start-SyncDetached {
-  $logDir = Join-Path $Root "logs"
-  if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir | Out-Null }
-  $logFile = Join-Path $logDir "auto-upgrade-restart.log"
-  Log "Starting npm start (detached), log: $logFile"
-  Start-Process -FilePath "npm" -ArgumentList "start" -WorkingDirectory $Root -WindowStyle Hidden `
-    -RedirectStandardOutput $logFile -RedirectStandardError $logFile
-}
-
-Log "upgrade start current=$CurrentVersion target=$TargetVersion root=$Root"
-
-$pm2Cmd = Get-Command pm2 -ErrorAction SilentlyContinue
-if ($pm2Cmd) {
-  pm2 stop openclaw-xgkb-sync 2>$null
-  Start-Sleep -Seconds 2
-} else {
-  Stop-SyncByPort (Get-ManagementPort)
   Start-Sleep -Seconds 2
 }
 
-git fetch --tags origin
-$tag = "v$TargetVersion"
-if (git rev-parse $tag 2>$null) {
-  git checkout -f $tag
-} elseif (git rev-parse $TargetVersion 2>$null) {
-  git checkout -f $TargetVersion
-} else {
-  git pull origin main
-  if ($LASTEXITCODE -ne 0) { git pull origin master }
-}
-
-npm install
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-npm run build
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-$pm2 = Get-Command pm2 -ErrorAction SilentlyContinue
-if ($pm2) {
-  pm2 restart openclaw-xgkb-sync
-  if ($LASTEXITCODE -ne 0) {
-    pm2 start dist/index.js --name openclaw-xgkb-sync -- --config config.json
+function Start-SyncDetached([string]$NodeBin, [int]$Port) {
+  $dist = Join-Path $Root "dist\index.js"
+  $config = Join-Path $Root "config.json"
+  if (-not (Test-Path $dist)) {
+    throw "dist/index.js missing (npm run build failed?)"
   }
-} else {
-  Start-SyncDetached
+  Log "Starting node dist/index.js (detached), service log: $RestartLog"
+  Start-Process -FilePath $NodeBin -ArgumentList @("dist/index.js", "--config", $config) `
+    -WorkingDirectory $Root -WindowStyle Hidden `
+    -RedirectStandardOutput $RestartLog -RedirectStandardError $RestartLog
+  Start-Sleep -Seconds 4
+  $listening = netstat -ano | Select-String ":$Port\s+.*LISTENING"
+  if ($listening) {
+    Log "restart OK: port $Port is listening"
+  } else {
+    throw "restart FAILED: port $Port not listening; check $RestartLog"
+  }
 }
 
-Log "upgrade finished"
+try {
+  Log "======== upgrade start current=$CurrentVersion target=$TargetVersion root=$Root ========"
+  $nodeBin = Resolve-NodeBin
+  Log "using node: $nodeBin"
+  $mgmtPort = Get-ManagementPort $nodeBin
+
+  $pm2Cmd = Get-Command pm2 -ErrorAction SilentlyContinue
+  if ($pm2Cmd) {
+    pm2 stop openclaw-xgkb-sync 2>$null
+    Start-Sleep -Seconds 2
+  } else {
+    Stop-SyncByPort $mgmtPort
+  }
+
+  git fetch --tags origin
+  $tag = "v$TargetVersion"
+  if (git rev-parse $tag 2>$null) {
+    git checkout -f $tag
+  } elseif (git rev-parse $TargetVersion 2>$null) {
+    git checkout -f $TargetVersion
+  } else {
+    git pull origin main
+    if ($LASTEXITCODE -ne 0) { git pull origin master }
+  }
+
+  npm install
+  if ($LASTEXITCODE -ne 0) { throw "npm install failed" }
+  npm run build
+  if ($LASTEXITCODE -ne 0) { throw "npm run build failed" }
+
+  $pm2 = Get-Command pm2 -ErrorAction SilentlyContinue
+  if ($pm2) {
+    pm2 restart openclaw-xgkb-sync
+    if ($LASTEXITCODE -ne 0) {
+      pm2 start dist/index.js --name openclaw-xgkb-sync -- --config config.json
+    }
+  } else {
+    Start-SyncDetached $nodeBin $mgmtPort
+  }
+
+  Log "======== upgrade finished ========"
+} catch {
+  Log "ERROR: $($_.Exception.Message)"
+  exit 1
+}
