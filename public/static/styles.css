@@ -487,13 +487,50 @@ body {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.9rem;
 }
-  background: rgba(245, 158, 11, 0.1);
+
+/* 同步方向相关字段组：在 form-grid 内展开为多列子网格 */
+.form-grid .sync-direction-group {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 16px;
 }
 
-.checkbox-row {
-  flex-direction: row !important;
+.modal-body .sync-direction-group {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* 与其它表单项一致：标题在上，控件在下，左对齐 */
+.checkbox-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.8125rem;
+}
+
+.checkbox-field .checkbox-inline {
+  display: inline-flex;
   align-items: center;
-  gap: 8px !important;
+  gap: 8px;
+  align-self: flex-start;
+}
+
+.checkbox-field input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  margin: 0;
+  flex-shrink: 0;
+  accent-color: var(--primary);
+  cursor: pointer;
+}
+
+.checkbox-field .checkbox-inline > span:last-child {
+  color: var(--text);
+  font-size: 0.8125rem;
+  line-height: 1.4;
 }
 
 .status-grid {

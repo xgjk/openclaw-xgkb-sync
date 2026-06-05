@@ -88,21 +88,27 @@
               <small id="globalAutoSyncHint">定时触发完整 sync 的间隔；具体角色见下方说明（随同步方向变化）。</small>
             </label>
             <div id="globalWatchSettings" class="sync-direction-group">
-              <label class="checkbox-row">
-                <input type="checkbox" name="watchEnabled" checked />
+              <label class="checkbox-field">
                 <span>启用本地文件监听 (watchEnabled)</span>
+                <span class="checkbox-inline">
+                  <input type="checkbox" name="watchEnabled" checked />
+                  <span>开启</span>
+                </span>
+                <small id="globalWatchEnabledHint">push/bidirectional：本地保存后约 debounce 内触发 sync。</small>
               </label>
-              <small id="globalWatchEnabledHint">push/bidirectional：本地保存后约 debounce 内触发 sync。</small>
               <label>
                 <span>监听防抖 (pushDebounceMs，毫秒)</span>
                 <input type="number" name="pushDebounceMs" min="100" step="100" placeholder="1500" />
                 <small>编辑器连续保存合并为一次同步；留空使用默认 1500。</small>
               </label>
-              <label class="checkbox-row">
-                <input type="checkbox" name="watchUsePolling" />
+              <label class="checkbox-field">
                 <span>NFS/Docker 卷使用轮询监听 (watchUsePolling)</span>
+                <span class="checkbox-inline">
+                  <input type="checkbox" name="watchUsePolling" />
+                  <span>开启</span>
+                </span>
+                <small>inotify 不可靠时开启；与「定时 sync」无关，仅改变监听方式。</small>
               </label>
-              <small>inotify 不可靠时开启；与「定时 sync」无关，仅改变监听方式。</small>
             </div>
           </div>
         </div>
@@ -139,11 +145,14 @@
               <output id="localConfigVersionDisplay" class="readonly-value">0</output>
               <small>由 sync-manage 下发配置后自动更新，请勿手工修改。</small>
             </label>
-            <label class="checkbox-row">
-              <input type="checkbox" name="autoUpgradeEnabled" />
+            <label class="checkbox-field">
               <span>发现新版本时自动升级 (autoUpgradeEnabled)</span>
+              <span class="checkbox-inline">
+                <input type="checkbox" name="autoUpgradeEnabled" />
+                <span>开启</span>
+              </span>
+              <small>需部署 git + pm2/systemd；升级脚本默认 scripts/auto-upgrade.ps1|.sh。</small>
             </label>
-            <small>需部署 git + pm2/systemd；升级脚本默认 scripts/auto-upgrade.ps1|.sh。</small>
             <label>
               <span>升级脚本路径（可选）</span>
               <input type="text" name="autoUpgradeScript" placeholder="./scripts/auto-upgrade.ps1" autocomplete="off" />
@@ -229,9 +238,12 @@
           <input type="text" name="mappingId" id="fieldMappingId" />
           <small>新建时可留空，服务端自动生成</small>
         </label>
-        <label class="checkbox-row">
-          <input type="checkbox" name="enabled" checked />
+        <label class="checkbox-field">
           <span>启用此映射</span>
+          <span class="checkbox-inline">
+            <input type="checkbox" name="enabled" checked />
+            <span>启用</span>
+          </span>
         </label>
         <label>
           <span>本地根目录 <em>*</em></span>
@@ -294,25 +306,34 @@
           <span>排除规则 (excludePatterns)</span>
           <input type="text" name="excludePatterns" placeholder='["**/_conflict_*"]' />
         </label>
-        <label class="checkbox-row">
-          <input type="checkbox" name="enableFileIndex" />
+        <label class="checkbox-field">
           <span>启用映射索引 (enableFileIndex)</span>
+          <span class="checkbox-inline">
+            <input type="checkbox" name="enableFileIndex" />
+            <span>开启</span>
+          </span>
+          <small id="mappingFileIndexHint">在 mapping 根目录同步 <code>.openclaw-sync-map.json</code>；行为随同步方向自动 consume/publish。</small>
         </label>
-        <small id="mappingFileIndexHint">在 mapping 根目录同步 <code>.openclaw-sync-map.json</code>；行为随同步方向自动 consume/publish。</small>
         <div id="mappingWatchSettings" class="sync-direction-group">
-          <label class="checkbox-row">
-            <input type="checkbox" name="watchEnabled" checked />
+          <label class="checkbox-field">
             <span>启用本地文件监听 (watchEnabled)</span>
+            <span class="checkbox-inline">
+              <input type="checkbox" name="watchEnabled" checked />
+              <span>开启</span>
+            </span>
+            <small id="mappingWatchEnabledHint">覆盖全局；pull 方向无效。</small>
           </label>
-          <small id="mappingWatchEnabledHint">覆盖全局；pull 方向无效。</small>
           <label>
             <span>监听防抖 (pushDebounceMs，毫秒，可选)</span>
             <input type="number" name="pushDebounceMs" min="100" step="100" placeholder="1500" />
             <small>留空继承全局默认 1500。</small>
           </label>
-          <label class="checkbox-row">
-            <input type="checkbox" name="watchUsePolling" />
+          <label class="checkbox-field">
             <span>NFS/Docker 卷轮询监听 (watchUsePolling)</span>
+            <span class="checkbox-inline">
+              <input type="checkbox" name="watchUsePolling" />
+              <span>开启</span>
+            </span>
           </label>
         </div>
       </div>
