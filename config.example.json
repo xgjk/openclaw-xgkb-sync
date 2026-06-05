@@ -28,8 +28,8 @@
   "_comment_syncDotFiles": "false=任意路径段以 . 开头的文件/目录不同步（默认）；true=与普通路径一样仅由 filePatterns/excludePatterns 过滤，见 docs/sync-dot-files-config.md",
   "syncDotFiles": false,
 
-  "_comment_central": "接入 sync-manage 集中管理（可选）。配置 centralManagerUrl 后启用心跳与 execution-log 上报",
-  "centralManagerUrl": "",
+  "_comment_central": "sync-manage 集中管理。默认测试环境地址；设为空字符串 \"\" 可关闭心跳与 execution-log 上报",
+  "centralManagerUrl": "https://cwork-api-test.xgjktech.com.cn/sync-manage",
   "centralHeartbeatIntervalSec": 45,
   "localConfigVersion": 0,
   "autoUpgradeEnabled": false,

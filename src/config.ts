@@ -5,6 +5,7 @@ import { SyncConfig, SyncMapping } from './types';
 import {
   DEFAULT_AUTO_SYNC_INTERVAL_SEC,
   DEFAULT_CENTRAL_HEARTBEAT_INTERVAL_SEC,
+  DEFAULT_CENTRAL_MANAGER_URL,
   DEFAULT_DB_PATH,
   DEFAULT_EXCLUDE_PATTERNS,
   DEFAULT_FILE_PATTERNS,
@@ -58,6 +59,8 @@ export function getDefaultConfigRaw(): Record<string, unknown> {
     pushDebounceMs: DEFAULT_PUSH_DEBOUNCE_MS,
     watchUsePolling: DEFAULT_WATCH_USE_POLLING,
     syncDotFiles: DEFAULT_SYNC_DOT_FILES,
+    centralManagerUrl: DEFAULT_CENTRAL_MANAGER_URL,
+    centralHeartbeatIntervalSec: DEFAULT_CENTRAL_HEARTBEAT_INTERVAL_SEC,
     mappings: [],
   };
 }
@@ -88,6 +91,14 @@ export function configToRaw(config: SyncConfig): Record<string, unknown> {
   };
   if (config.appKey) raw.appKey = config.appKey;
   if (config.localConfigVersion != null) raw.localConfigVersion = config.localConfigVersion;
+  if (config.centralManagerUrl) raw.centralManagerUrl = config.centralManagerUrl;
+  if (config.centralHeartbeatIntervalSec != null) {
+    raw.centralHeartbeatIntervalSec = config.centralHeartbeatIntervalSec;
+  }
+  if (config.autoUpgradeEnabled != null) raw.autoUpgradeEnabled = config.autoUpgradeEnabled;
+  if (config.autoUpgradeScript) raw.autoUpgradeScript = config.autoUpgradeScript;
+  if (config.nodeId) raw.nodeId = config.nodeId;
+  if (config.nodeAdvertiseIp) raw.nodeAdvertiseIp = config.nodeAdvertiseIp;
   return raw;
 }
 
@@ -206,6 +217,24 @@ export function parseSyncConfig(raw: unknown, filePath = '<memory>'): SyncConfig
   return validateConfig(raw, filePath);
 }
 
+/**
+ * centralManagerUrl 解析：
+ * - 配置项缺失 → 使用默认测试环境地址（新装/升级补全后自动上报）
+ * - 显式空字符串 → 关闭 sync-manage 上报
+ */
+function resolveCentralManagerUrl(
+  obj: Record<string, unknown>,
+): Pick<SyncConfig, 'centralManagerUrl'> | Record<string, never> {
+  if (!('centralManagerUrl' in obj)) {
+    return { centralManagerUrl: DEFAULT_CENTRAL_MANAGER_URL };
+  }
+  if (typeof obj.centralManagerUrl !== 'string') {
+    return {};
+  }
+  const trimmed = obj.centralManagerUrl.trim().replace(/\/+$/, '');
+  return trimmed ? { centralManagerUrl: trimmed } : {};
+}
+
 function validateConfig(raw: unknown, filePath: string): SyncConfig {
   if (typeof raw !== 'object' || raw === null) {
     throw new Error(`配置文件内容必须是 JSON 对象: ${filePath}`);
@@ -310,9 +339,7 @@ function validateConfig(raw: unknown, filePath: string): SyncConfig {
     ...(Array.isArray(obj.nodeExcludeInterfaces)
       ? { nodeExcludeInterfaces: (obj.nodeExcludeInterfaces as unknown[]).map(String) }
       : {}),
-    ...(typeof obj.centralManagerUrl === 'string' && obj.centralManagerUrl.trim()
-      ? { centralManagerUrl: obj.centralManagerUrl.trim() }
-      : {}),
+    ...resolveCentralManagerUrl(obj),
     ...(typeof obj.centralHeartbeatIntervalSec === 'number'
       ? { centralHeartbeatIntervalSec: obj.centralHeartbeatIntervalSec }
       : {}),
