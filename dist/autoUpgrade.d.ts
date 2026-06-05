@@ -14,4 +14,9 @@ export interface AutoUpgradeOptions {
  * git pull / npm install / build / pm2|systemd 重启。
  */
 export declare function maybeScheduleAutoUpgrade(latestAppVersion: string | undefined, opts: AutoUpgradeOptions): void;
+/** 通过解释器启动，避免 Mac/Linux clone 后 .sh 无 +x 导致 EACCES */
+export declare function buildUpgradeSpawnSpec(script: string, targetVersion: string, currentVersion: string): {
+    command: string;
+    args: string[];
+};
 //# sourceMappingURL=autoUpgrade.d.ts.map

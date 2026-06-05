@@ -1,4 +1,4 @@
-import { spawn } from 'child_process';
+import { spawn, SpawnOptions } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import { isNewerVersion } from './versionCompare';
@@ -49,19 +49,25 @@ export function maybeScheduleAutoUpgrade(
 
   upgradeInFlight = true;
   lastAttemptedTarget = latest;
-  opts.log?.(`[AutoUpgrade] 触发升级 ${current} -> ${latest}，脚本: ${script}`);
 
-  const child = spawn(script, [latest, current], {
+  const spawnSpec = buildUpgradeSpawnSpec(script, latest, current);
+  opts.log?.(
+    `[AutoUpgrade] 触发升级 ${current} -> ${latest}，命令: ${spawnSpec.command} ${spawnSpec.args.join(' ')}`,
+  );
+
+  const spawnOpts: SpawnOptions = {
     cwd: opts.projectRoot,
     detached: true,
     stdio: 'ignore',
-    shell: process.platform === 'win32',
     env: {
       ...process.env,
       OPENCLAW_SYNC_TARGET_VERSION: latest,
       OPENCLAW_SYNC_CURRENT_VERSION: current,
     },
-  });
+    ...(process.platform === 'win32' ? { windowsHide: true } : {}),
+  };
+
+  const child = spawn(spawnSpec.command, spawnSpec.args, spawnOpts);
   child.unref();
 
   child.on('error', (e) => {
@@ -71,6 +77,47 @@ export function maybeScheduleAutoUpgrade(
   });
 
   // 脚本负责停服与重启；本进程可能被 SIGTERM，不再在这里 reset upgradeInFlight
+}
+
+/** 通过解释器启动，避免 Mac/Linux clone 后 .sh 无 +x 导致 EACCES */
+export function buildUpgradeSpawnSpec(
+  script: string,
+  targetVersion: string,
+  currentVersion: string,
+): { command: string; args: string[] } {
+  const ext = path.extname(script).toLowerCase();
+
+  if (ext === '.ps1' || (process.platform === 'win32' && ext !== '.sh')) {
+    return {
+      command: resolveWindowsPowerShell(),
+      args: [
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-File',
+        script,
+        targetVersion,
+        currentVersion,
+      ],
+    };
+  }
+
+  return {
+    command: resolveUnixBash(),
+    args: [script, targetVersion, currentVersion],
+  };
+}
+
+function resolveUnixBash(): string {
+  if (fs.existsSync('/bin/bash')) return '/bin/bash';
+  return 'bash';
+}
+
+function resolveWindowsPowerShell(): string {
+  const systemRoot = process.env.SystemRoot ?? 'C:\\Windows';
+  const pwsh = path.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  if (fs.existsSync(pwsh)) return pwsh;
+  return 'powershell.exe';
 }
 
 function resolveUpgradeScript(projectRoot: string, configured?: string): string {

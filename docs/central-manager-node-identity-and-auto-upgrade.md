@@ -98,6 +98,15 @@
 | 进程管理 | **pm2** 或 **systemd** 二选一；否则脚本只 build，需人工 `npm start` |
 | 发版 | 中心 Nacos 的 `openclaw.sync.latest-version` 与 git tag（如 `v1.0.6`）一致 |
 | 网络 | 机器能 `git fetch` / `npm install` |
+| 脚本权限 | **无需**手动 `chmod +x`：节点用 `bash auto-upgrade.sh`（Mac/Linux）或 `powershell -File auto-upgrade.ps1`（Windows）启动；仓库内 `.sh` 亦已设 git 可执行位 |
+
+**跨平台说明**
+
+| 平台 | 默认脚本 | 启动方式 |
+|------|----------|----------|
+| Windows | `scripts/auto-upgrade.ps1` | `powershell -ExecutionPolicy Bypass -File …` |
+| macOS / Mac mini / Linux | `scripts/auto-upgrade.sh` | `/bin/bash scripts/auto-upgrade.sh …` |
+| 无 pm2/systemd | 同上 | 按 `config.json` 的 `managementPort` 停旧进程，再 `npm start`（后台） |
 
 ### 2.4 安全闸门
 

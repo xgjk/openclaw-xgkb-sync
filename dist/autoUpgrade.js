@@ -34,6 +34,7 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.maybeScheduleAutoUpgrade = maybeScheduleAutoUpgrade;
+exports.buildUpgradeSpawnSpec = buildUpgradeSpawnSpec;
 const child_process_1 = require("child_process");
 const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
@@ -69,18 +70,20 @@ function maybeScheduleAutoUpgrade(latestAppVersion, opts) {
     }
     upgradeInFlight = true;
     lastAttemptedTarget = latest;
-    opts.log?.(`[AutoUpgrade] 触发升级 ${current} -> ${latest}，脚本: ${script}`);
-    const child = (0, child_process_1.spawn)(script, [latest, current], {
+    const spawnSpec = buildUpgradeSpawnSpec(script, latest, current);
+    opts.log?.(`[AutoUpgrade] 触发升级 ${current} -> ${latest}，命令: ${spawnSpec.command} ${spawnSpec.args.join(' ')}`);
+    const spawnOpts = {
         cwd: opts.projectRoot,
         detached: true,
         stdio: 'ignore',
-        shell: process.platform === 'win32',
         env: {
             ...process.env,
             OPENCLAW_SYNC_TARGET_VERSION: latest,
             OPENCLAW_SYNC_CURRENT_VERSION: current,
         },
-    });
+        ...(process.platform === 'win32' ? { windowsHide: true } : {}),
+    };
+    const child = (0, child_process_1.spawn)(spawnSpec.command, spawnSpec.args, spawnOpts);
     child.unref();
     child.on('error', (e) => {
         upgradeInFlight = false;
@@ -88,6 +91,40 @@ function maybeScheduleAutoUpgrade(latestAppVersion, opts) {
         opts.log?.(`[AutoUpgrade] 启动升级脚本失败: ${e instanceof Error ? e.message : String(e)}`);
     });
     // 脚本负责停服与重启；本进程可能被 SIGTERM，不再在这里 reset upgradeInFlight
+}
+/** 通过解释器启动，避免 Mac/Linux clone 后 .sh 无 +x 导致 EACCES */
+function buildUpgradeSpawnSpec(script, targetVersion, currentVersion) {
+    const ext = path.extname(script).toLowerCase();
+    if (ext === '.ps1' || (process.platform === 'win32' && ext !== '.sh')) {
+        return {
+            command: resolveWindowsPowerShell(),
+            args: [
+                '-NoProfile',
+                '-ExecutionPolicy',
+                'Bypass',
+                '-File',
+                script,
+                targetVersion,
+                currentVersion,
+            ],
+        };
+    }
+    return {
+        command: resolveUnixBash(),
+        args: [script, targetVersion, currentVersion],
+    };
+}
+function resolveUnixBash() {
+    if (fs.existsSync('/bin/bash'))
+        return '/bin/bash';
+    return 'bash';
+}
+function resolveWindowsPowerShell() {
+    const systemRoot = process.env.SystemRoot ?? 'C:\\Windows';
+    const pwsh = path.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+    if (fs.existsSync(pwsh))
+        return pwsh;
+    return 'powershell.exe';
 }
 function resolveUpgradeScript(projectRoot, configured) {
     if (configured?.trim()) {
