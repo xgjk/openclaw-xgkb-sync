@@ -209,6 +209,7 @@ export function loadConfigWithMeta(configPath: string = DEFAULT_CONFIG_PATH): Lo
   }
 
   const config = validateConfig(raw, absPath);
+  warnDuplicateLocalRoots(config.mappings, absPath);
 
   if (bootstrapped) {
     writeConfigFile(absPath, configToRaw(config));
@@ -241,7 +242,112 @@ function resolveCentralManagerUrl(
   return trimmed ? { centralManagerUrl: trimmed } : {};
 }
 
-function validateConfig(raw: unknown, filePath: string): SyncConfig {
+/** @deprecated 保留类型兼容；localRoot 重复不再阻断加载 */
+export type ValidateConfigOptions = {
+  skipDuplicateLocalRoots?: boolean;
+};
+
+export interface LocalRootDuplicateGroup {
+  localRoot: string;
+  mappingIds: string[];
+}
+
+/** 从 config.json 读取 mappings（不做 localRoot 唯一性校验，供管理 API 展示/修复） */
+export function readMappingsFromConfigFile(configPath: string): SyncMapping[] {
+  const absPath = path.resolve(configPath);
+  const raw = JSON.parse(fs.readFileSync(absPath, 'utf-8')) as Record<string, unknown>;
+  const mappingsInput = Array.isArray(raw.mappings) ? raw.mappings : [];
+  return mappingsInput.map((m, idx) => validateMapping(m, idx, absPath));
+}
+
+export function normalizeLocalRootPath(localRoot: string): string {
+  return path.resolve(localRoot);
+}
+
+export function findDuplicateLocalRootGroups(mappings: SyncMapping[]): LocalRootDuplicateGroup[] {
+  const byNorm = new Map<string, LocalRootDuplicateGroup>();
+  for (const m of mappings) {
+    const norm = normalizeLocalRootPath(m.localRoot);
+    const existing = byNorm.get(norm);
+    if (existing) {
+      existing.mappingIds.push(m.mappingId);
+    } else {
+      byNorm.set(norm, { localRoot: m.localRoot, mappingIds: [m.mappingId] });
+    }
+  }
+  return [...byNorm.values()].filter((g) => g.mappingIds.length > 1);
+}
+
+/** @deprecated 仅用于诊断；配置加载与 API 写入不再抛此错误 */
+export function assertUniqueLocalRoots(mappings: SyncMapping[]): void {
+  const groups = findDuplicateLocalRootGroups(mappings);
+  if (groups.length === 0) return;
+  const g = groups[0];
+  throw new Error(
+    `配置错误: localRoot "${g.localRoot}" 被多个 mapping 使用（mappingId: ${g.mappingIds.join(' 和 ')}），可能引起回环`,
+  );
+}
+
+export function warnDuplicateLocalRoots(mappings: SyncMapping[], filePath = '<config>'): void {
+  for (const g of findDuplicateLocalRootGroups(mappings)) {
+    console.warn(
+      `[Config] localRoot 冲突 (${filePath}): "${g.localRoot}" 被 ${g.mappingIds.length} 个 mapping 共用 [${g.mappingIds.join(', ')}]；` +
+        '同一目录仅先出现的已启用项会参与同步，请在 Web 控制台禁用或删除多余项',
+    );
+  }
+}
+
+/** 同一 localRoot 下仅 config 中先出现且 enabled 的 mapping 实际参与同步 */
+export function isMappingEffectiveEnabled(
+  mapping: SyncMapping,
+  allMappings: SyncMapping[],
+): boolean {
+  if (!mapping.enabled) return false;
+  const norm = normalizeLocalRootPath(mapping.localRoot);
+  const firstEnabled = allMappings.find(
+    (m) => m.enabled && normalizeLocalRootPath(m.localRoot) === norm,
+  );
+  return firstEnabled?.mappingId === mapping.mappingId;
+}
+
+/** 保存时：若 localRoot 冲突且请求为启用，降级为 disabled */
+export function downgradeMappingIfLocalRootConflict(
+  mapping: SyncMapping,
+  allMappings: SyncMapping[],
+): { mapping: SyncMapping; downgraded: boolean; warning?: string } {
+  if (!mapping.enabled) {
+    return { mapping, downgraded: false };
+  }
+  const norm = normalizeLocalRootPath(mapping.localRoot);
+  const conflictingEnabled = allMappings.filter(
+    (m) =>
+      m.mappingId !== mapping.mappingId
+      && m.enabled
+      && normalizeLocalRootPath(m.localRoot) === norm,
+  );
+  if (conflictingEnabled.length === 0) {
+    return { mapping, downgraded: false };
+  }
+  const others = conflictingEnabled.map((m) => m.mappingId);
+  return {
+    mapping: { ...mapping, enabled: false },
+    downgraded: true,
+    warning:
+      others.length > 0
+        ? `localRoot 与映射 ${others.join('、')} 冲突，已自动设为禁用；请调整目录或处理冲突项后再启用`
+        : 'localRoot 存在冲突，已自动设为禁用',
+  };
+}
+
+export function isLocalRootDuplicateError(err: unknown): boolean {
+  return err instanceof Error && err.message.includes('被多个 mapping 使用');
+}
+
+function validateConfig(
+  raw: unknown,
+  filePath: string,
+  options?: ValidateConfigOptions,
+): SyncConfig {
   if (typeof raw !== 'object' || raw === null) {
     throw new Error(`配置文件内容必须是 JSON 对象: ${filePath}`);
   }
@@ -268,17 +374,7 @@ function validateConfig(raw: unknown, filePath: string): SyncConfig {
     validateMapping(m, idx, filePath),
   );
 
-  // 校验同一 localRoot 不映射到多个云端根
-  const localRootSet = new Map<string, string>();
-  for (const m of mappings) {
-    const norm = path.resolve(m.localRoot);
-    if (localRootSet.has(norm)) {
-      throw new Error(
-        `配置错误: localRoot "${m.localRoot}" 被多个 mapping 使用（mappingId: ${localRootSet.get(norm)} 和 ${m.mappingId}），可能引起回环`,
-      );
-    }
-    localRootSet.set(norm, m.mappingId);
-  }
+  void options;
 
   return {
     serverUrl,

@@ -9,12 +9,13 @@ const rateLimiter_1 = require("./rateLimiter");
 const remoteFs_1 = require("./remoteFs");
 const syncEngine_1 = require("./syncEngine");
 const syncStateDb_1 = require("./syncStateDb");
+const config_1 = require("./config");
 const constants_1 = require("./constants");
 const watchHelpers_1 = require("./watchHelpers");
 const pathSyncScope_1 = require("./pathSyncScope");
 let schedulerInstanceSeq = 0;
 function resolveMaxConcurrentMappings(config) {
-    const enabledMappings = config.mappings.filter((m) => m.enabled);
+    const enabledMappings = config.mappings.filter((m) => (0, config_1.isMappingEffectiveEnabled)(m, config.mappings));
     if (enabledMappings.length === 0)
         return 0;
     if (config.maxConcurrentMappingsMode === 'manual') {
@@ -87,7 +88,7 @@ class SyncScheduler {
         if (this.running)
             return;
         this.running = true;
-        const enabledMappings = this.config.mappings.filter((m) => m.enabled);
+        const enabledMappings = this.config.mappings.filter((m) => (0, config_1.isMappingEffectiveEnabled)(m, this.config.mappings));
         console.log(`[Scheduler] 启动，映射规则: ${enabledMappings.length} 条，自动同步间隔: ${this.config.autoSyncIntervalSec}s`);
         for (const mapping of enabledMappings) {
             this.runStates.set(mapping.mappingId, { isSyncing: false, pendingSync: false });
@@ -195,7 +196,7 @@ class SyncScheduler {
         for (const [mappingId, runState] of this.runStates) {
             if (!runState.pendingSync || runState.isSyncing)
                 continue;
-            const mapping = this.config.mappings.find((m) => m.mappingId === mappingId && m.enabled);
+            const mapping = this.config.mappings.find((m) => m.mappingId === mappingId && (0, config_1.isMappingEffectiveEnabled)(m, this.config.mappings));
             if (!mapping)
                 continue;
             runState.pendingSync = false;
@@ -248,7 +249,7 @@ class SyncScheduler {
             console.warn(`[Scheduler] 调度器已停止，忽略同步触发: ${mappingId}`);
             return;
         }
-        const mapping = this.config.mappings.find((m) => m.mappingId === mappingId && m.enabled);
+        const mapping = this.config.mappings.find((m) => m.mappingId === mappingId && (0, config_1.isMappingEffectiveEnabled)(m, this.config.mappings));
         if (!mapping) {
             console.warn(`[Scheduler] 未找到或未启用的 mapping: ${mappingId}`);
             return;
@@ -259,7 +260,7 @@ class SyncScheduler {
     triggerAll(reason, trigger) {
         if (!this.running || this.dbClosed)
             return;
-        const enabledMappings = this.config.mappings.filter((m) => m.enabled);
+        const enabledMappings = this.config.mappings.filter((m) => (0, config_1.isMappingEffectiveEnabled)(m, this.config.mappings));
         console.log(`[Scheduler] 触发全部同步（${reason}），共 ${enabledMappings.length} 条`);
         const maxConcurrent = resolveMaxConcurrentMappings(this.config);
         // 按并发度批次触发

@@ -50,6 +50,7 @@ export declare class ManagementApi {
     /** PUT /mappings/:mappingId — 存在则部分更新，不存在则按请求体创建（upsert） */
     private handleUpsertMapping;
     private handleDeleteMapping;
+    private handleSetMappingEnabled;
     private handleResetMapping;
     /**
      * 原子修改 config.json 根对象字段。

@@ -21,6 +21,30 @@ export declare function loadConfig(configPath?: string): SyncConfig;
 export declare function loadConfigWithMeta(configPath?: string): LoadConfigResult;
 /** 从 JSON 对象解析 SyncConfig（供中心配置 merge 等内存场景） */
 export declare function parseSyncConfig(raw: unknown, filePath?: string): SyncConfig;
+/** @deprecated 保留类型兼容；localRoot 重复不再阻断加载 */
+export type ValidateConfigOptions = {
+    skipDuplicateLocalRoots?: boolean;
+};
+export interface LocalRootDuplicateGroup {
+    localRoot: string;
+    mappingIds: string[];
+}
+/** 从 config.json 读取 mappings（不做 localRoot 唯一性校验，供管理 API 展示/修复） */
+export declare function readMappingsFromConfigFile(configPath: string): SyncMapping[];
+export declare function normalizeLocalRootPath(localRoot: string): string;
+export declare function findDuplicateLocalRootGroups(mappings: SyncMapping[]): LocalRootDuplicateGroup[];
+/** @deprecated 仅用于诊断；配置加载与 API 写入不再抛此错误 */
+export declare function assertUniqueLocalRoots(mappings: SyncMapping[]): void;
+export declare function warnDuplicateLocalRoots(mappings: SyncMapping[], filePath?: string): void;
+/** 同一 localRoot 下仅 config 中先出现且 enabled 的 mapping 实际参与同步 */
+export declare function isMappingEffectiveEnabled(mapping: SyncMapping, allMappings: SyncMapping[]): boolean;
+/** 保存时：若 localRoot 冲突且请求为启用，降级为 disabled */
+export declare function downgradeMappingIfLocalRootConflict(mapping: SyncMapping, allMappings: SyncMapping[]): {
+    mapping: SyncMapping;
+    downgraded: boolean;
+    warning?: string;
+};
+export declare function isLocalRootDuplicateError(err: unknown): boolean;
 export declare function validateMapping(raw: unknown, idx: number, filePath: string): SyncMapping;
 /**
  * 为 POST /mappings 生成不与现有列表冲突的 mappingId。

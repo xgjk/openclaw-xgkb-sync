@@ -7,6 +7,8 @@
   let hasGlobalAppKey = false;
   let globalAppKeyMasked = '';
   let mappingsCache = [];
+  let duplicateLocalRootsCache = [];
+  let configConflict = false;
   let statusCache = null;
 
   // ==================== API ====================
@@ -369,7 +371,28 @@
 
   // ==================== Mappings ====================
 
+  function renderConfigConflictBanner() {
+    const banner = $('#configConflictBanner');
+    if (!banner) return;
+    if (!configConflict || duplicateLocalRootsCache.length === 0) {
+      banner.classList.add('hidden');
+      banner.innerHTML = '';
+      return;
+    }
+    const items = duplicateLocalRootsCache
+      .map(
+        (g) =>
+          `<li><code>${escapeHtml(g.localRoot)}</code> — ${g.mappingIds.map((id) => `<code>${escapeHtml(id)}</code>`).join('、')}</li>`,
+      )
+      .join('');
+    banner.classList.remove('hidden');
+    banner.innerHTML = `<strong>检测到重复的本地目录（localRoot）</strong>
+      <p>同一目录被多个映射占用时，仅<strong>列表中先出现且已启用</strong>的那条会参与同步。你可随时编辑、禁用或删除任意映射；新建或启用冲突项时会<strong>自动保存为禁用</strong>。</p>
+      <ul>${items}</ul>`;
+  }
+
   function renderMappings() {
+    renderConfigConflictBanner();
     const container = $('#mappingsBody');
     if (mappingsCache.length === 0) {
       container.innerHTML = '<p class="empty">暂无同步映射，点击「新增映射」创建</p>';
@@ -387,17 +410,22 @@
         if (syncing) syncBadge = '<span class="badge badge-sync">同步中</span>';
         else if (pending) syncBadge = '<span class="badge badge-sync">排队</span>';
 
-        return `<article class="mapping-card" data-id="${escapeHtml(m.mappingId)}">
+        return `<article class="mapping-card${m.localRootConflict ? ' mapping-card-conflict' : ''}" data-id="${escapeHtml(m.mappingId)}">
           <div class="mapping-card-head">
             <div class="mapping-title">
               <span class="cell-id">${escapeHtml(m.mappingId)}</span>
               <div class="mapping-badges">
                 <span class="badge ${m.enabled ? 'badge-on' : 'badge-off'}">${m.enabled ? '启用' : '禁用'}</span>
+                ${m.localRootConflict ? '<span class="badge badge-conflict" title="与其他映射共用同一 localRoot">localRoot 冲突</span>' : ''}
+                ${m.enabled && m.localRootConflict && m.syncEffective === false ? '<span class="badge badge-off" title="已启用但因冲突未参与同步">未参与同步</span>' : ''}
+                ${!m.activeInScheduler && m.activeInScheduler !== undefined ? '<span class="badge badge-off" title="尚未热重载生效">未加载</span>' : ''}
                 ${syncBadge || syncResultBadge(st)}
               </div>
             </div>
             <div class="actions">
-              <button type="button" class="btn btn-sm btn-secondary btn-sync-one" ${!m.enabled ? 'disabled' : ''}>同步</button>
+              <button type="button" class="btn btn-sm btn-primary btn-enable-mapping" ${m.enabled ? 'disabled' : ''} title="启用此映射">启用</button>
+              <button type="button" class="btn btn-sm btn-secondary btn-disable-mapping" ${!m.enabled ? 'disabled' : ''} title="禁用此映射">禁用</button>
+              <button type="button" class="btn btn-sm btn-secondary btn-sync-one" ${!m.enabled || m.syncEffective === false ? 'disabled' : ''}>同步</button>
               <button type="button" class="btn btn-sm btn-secondary btn-edit">编辑</button>
               <button type="button" class="btn btn-sm btn-warning btn-reset">清空DB</button>
               <button type="button" class="btn btn-sm btn-danger btn-delete">删除</button>
@@ -448,6 +476,12 @@
       })
       .join('');
 
+    container.querySelectorAll('.btn-enable-mapping').forEach((btn) => {
+      btn.addEventListener('click', () => setMappingEnabled(btn.closest('.mapping-card').dataset.id, true));
+    });
+    container.querySelectorAll('.btn-disable-mapping').forEach((btn) => {
+      btn.addEventListener('click', () => setMappingEnabled(btn.closest('.mapping-card').dataset.id, false));
+    });
     container.querySelectorAll('.btn-sync-one').forEach((btn) => {
       btn.addEventListener('click', () => syncOne(btn.closest('.mapping-card').dataset.id));
     });
@@ -469,6 +503,8 @@
     const data = await api('GET', '/mappings');
     hasGlobalAppKey = data.hasGlobalAppKey;
     mappingsCache = data.mappings || [];
+    configConflict = !!data.configConflict;
+    duplicateLocalRootsCache = data.duplicateLocalRoots || [];
     renderMappings();
     updateGlobalAppKeyHint();
   }
@@ -499,11 +535,31 @@
     toast('同步仍在进行，可在列表查看最新状态', 'info');
   }
 
+  async function setMappingEnabled(id, enabled) {
+    const action = enabled ? '启用' : '禁用';
+    try {
+      const path = enabled ? 'enable' : 'disable';
+      const data = await api('POST', `/mappings/${encodeURIComponent(id)}/${path}`);
+      const warnParts = [];
+      if (data.warnings?.length) warnParts.push(...data.warnings);
+      if (data.warning) warnParts.push(data.warning);
+      const warnSuffix = warnParts.length ? ' · ' + warnParts.join(' · ') : '';
+      toast(
+        (data.unchanged ? data.message : `${action}成功：${data.message}`) + warnSuffix,
+        data.reloadOk === false || warnParts.length ? 'info' : 'success',
+      );
+      await refreshAll();
+    } catch (e) {
+      toast(`${action}失败：${e.message}`, 'error');
+    }
+  }
+
   async function deleteMapping(id) {
     if (!confirm(`确定删除映射「${id}」？此操作不可撤销。`)) return;
     try {
       const data = await api('DELETE', `/mappings/${encodeURIComponent(id)}`);
-      toast(data.message, 'success');
+      toast(data.message, data.reloadOk === false ? 'info' : 'success');
+      if (data.warning) toast(data.warning, 'info');
       await refreshAll();
     } catch (e) {
       toast(e.message, 'error');
@@ -683,7 +739,11 @@
       } else {
         data = await api('PUT', `/mappings/${encodeURIComponent(mappingId)}`, body);
       }
-      toast(data.message + (data.warnings?.length ? ' · ' + data.warnings.join(' ') : ''), 'success');
+      const warnParts = [];
+      if (data.warnings?.length) warnParts.push(...data.warnings);
+      if (data.warning) warnParts.push(data.warning);
+      const warnSuffix = warnParts.length ? ' · ' + warnParts.join(' · ') : '';
+      toast(data.message + warnSuffix, data.reloadOk === false || warnParts.length ? 'info' : 'success');
       closeMappingModal();
       await refreshAll();
     } catch (err) {

@@ -187,6 +187,9 @@
 | `ok` | `boolean` | 是 | 恒为 `true` |
 | `total` | `number` | 是 | mapping 条数 |
 | `hasGlobalAppKey` | `boolean` | 是 | 根级全局 `appKey` 是否已配置且非空。**`false` 时，后续 `POST`/`PUT` 保存 mapping 必须在请求体中带非空 `appKey`**（见上文全局规则） |
+| `configConflict` | `boolean` | 是 | 是否存在重复 `localRoot` 冲突组 |
+| `duplicateLocalRoots` | `array` | 是 | 冲突分组列表，元素形如 `{ localRoot, mappingIds[] }` |
+| `reloadPending` | `boolean` | 是 | 磁盘 `config.json` 与内存 scheduler 映射集合是否存在差异 |
 | `mappings` | `array` | 是 | 每项为 `mappingSummary`（见下表） |
 
 ### `mappingSummary` 数组元素字段
@@ -210,6 +213,9 @@
 | `watchEnabledEffective` | `boolean` | 实际是否启用 watch（只读，列表响应） |
 | `effectivePushDebounceMs` | `number` | 实际 debounce（只读） |
 | `effectiveWatchUsePolling` | `boolean` | 实际是否轮询（只读） |
+| `localRootConflict` | `boolean` | 本条是否处于重复 `localRoot` 冲突组 |
+| `syncEffective` | `boolean` | 本条是否实际参与同步（同一 `localRoot` 仅首个启用项为 `true`） |
+| `activeInScheduler` | `boolean` | 当前内存 scheduler 中是否存在该 `mappingId` |
 
 ---
 
@@ -223,7 +229,7 @@
 | 方法 | `POST` |
 | `Content-Type` | 应为 `application/json` |
 | 成功码 | `201` |
-| 失败码 | `400`（校验/业务）、`500`（已写入但重载失败） |
+| 失败码 | `400`（校验/业务） |
 
 ### 请求体（JSON 对象）字段
 
@@ -281,7 +287,10 @@
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `ok` | `boolean` | `true` |
+| `reloadOk` | `boolean` | 热重载是否成功；失败时仍为成功响应，值为 `false` |
 | `message` | `string` | 人类可读说明 |
+| `warnings` | `array` \| 省略 | 例如 localRoot 冲突自动降级禁用提示 |
+| `warning` | `string` \| 省略 | 热重载失败时的人类可读提示 |
 | `mapping` | `object` | 同 `GET /mappings` 中的 `mappingSummary`，含最终生效的 `mappingId` |
 
 ### 失败响应要点
@@ -305,7 +314,7 @@
 | 方法 | `PUT` |
 | 请求体 | JSON 对象。更新时至少包含一个要修改的字段；**新建**时须含 `validateMapping` 要求的必填字段（至少 `localRoot` 等非空字符串，见 `POST /mappings` 字段表） |
 | 成功码 | `201`（新建）、`200`（更新或有/无实际变化） |
-| 失败码 | `400`、`500`（已写盘但重载失败） |
+| 失败码 | `400` |
 
 ### 请求体特殊规则
 
@@ -326,7 +335,10 @@
 |------|------|------|
 | `ok` | `boolean` | `true` |
 | `created` | `boolean` | `true` |
+| `reloadOk` | `boolean` | 热重载是否成功 |
 | `message` | `string` | 说明 |
+| `warnings` | `array` \| 省略 | localRoot 冲突自动禁用等提示 |
+| `warning` | `string` \| 省略 | 热重载失败提示 |
 | `mapping` | `object` | `mappingSummary` |
 
 ### 成功响应（`200`，更新且有变更）
@@ -335,9 +347,11 @@
 |------|------|------|
 | `ok` | `boolean` | `true` |
 | `created` | `boolean` | `false` |
+| `reloadOk` | `boolean` | 热重载是否成功（失败仍返回 200） |
 | `message` | `string` | 说明 |
 | `changed` | `array` | 实际发生变化的字段名列表 |
 | `warnings` | `array` \| 省略 | 若身份字段变更，提示下次全量对账 |
+| `warning` | `string` \| 省略 | 热重载失败提示 |
 | `mapping` | `object` | `mappingSummary` |
 
 ### 成功响应（`200`，更新但无变更）
@@ -361,20 +375,77 @@
 | 方法 | `DELETE` |
 | 请求体 | 无 |
 | 成功码 | `200` |
-| 失败码 | `404`（不存在）、`500`（已删但重载失败） |
+| 失败码 | `404`（不存在） |
 
 ### 成功响应（`200`）
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `ok` | `boolean` | `true` |
+| `reloadOk` | `boolean` | 热重载是否成功（失败仍返回 200） |
 | `message` | `string` | 说明 |
+| `warning` | `string` \| 省略 | 热重载失败提示 |
 
 ---
 
-## 7. `POST /sync`
+## 7. `POST /mappings/:mappingId/disable`
 
-**功能**：对当前所有 **`enabled` 为真** 的 mapping **异步**触发一次同步（不等待完成）。
+**功能**：将指定 mapping 设为禁用（`enabled=false`），写盘并热重载。
+
+| 项目 | 说明 |
+|------|------|
+| 路径 | `/mappings/{mappingId}/disable` |
+| 方法 | `POST` |
+| 请求体 | 无 |
+| 成功码 | `200` |
+| 失败码 | `404`（不存在） |
+
+### 成功响应（`200`）
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `ok` | `boolean` | `true` |
+| `reloadOk` | `boolean` | 热重载是否成功（失败仍返回 200） |
+| `unchanged` | `boolean` \| 省略 | 若本就禁用，则为 `true` |
+| `enabled` | `boolean` | 结果状态（应为 `false`） |
+| `message` | `string` | 说明 |
+| `warnings` | `array` \| 省略 | 额外提示 |
+| `warning` | `string` \| 省略 | 热重载失败提示 |
+| `mapping` | `object` | `mappingSummary` |
+
+---
+
+## 8. `POST /mappings/:mappingId/enable`
+
+**功能**：将指定 mapping 设为启用（`enabled=true`），写盘并热重载。若与其它 mapping 的 `localRoot` 冲突，会自动降级回禁用并在响应中给出 `warnings`。
+
+| 项目 | 说明 |
+|------|------|
+| 路径 | `/mappings/{mappingId}/enable` |
+| 方法 | `POST` |
+| 请求体 | 无 |
+| 成功码 | `200` |
+| 失败码 | `404`（不存在） |
+
+### 成功响应（`200`）
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `ok` | `boolean` | `true` |
+| `reloadOk` | `boolean` | 热重载是否成功（失败仍返回 200） |
+| `unchanged` | `boolean` \| 省略 | 若本就启用且无需变更，则为 `true` |
+| `enabled` | `boolean` | 结果状态（冲突降级时可能仍为 `false`） |
+| `message` | `string` | 说明 |
+| `warnings` | `array` \| 省略 | localRoot 冲突自动降级等提示 |
+| `warning` | `string` \| 省略 | 热重载失败提示 |
+| `mapping` | `object` | `mappingSummary` |
+
+---
+
+## 9. `POST /sync`
+
+**功能**：对当前所有**实际参与同步**的 mapping 异步触发一次同步（不等待完成）。  
+说明：若同一 `localRoot` 有多条启用 mapping，仅首个启用项会被触发（与 `syncEffective=true` 一致）。
 
 | 项目 | 说明 |
 |------|------|
@@ -393,7 +464,7 @@
 
 ---
 
-## 8. `POST /sync/:mappingId`
+## 10. `POST /sync/:mappingId`
 
 **功能**：对**单条** mapping 触发异步同步。
 
@@ -403,7 +474,7 @@
 | 方法 | `POST` |
 | 请求体 | 无 |
 | 成功码 | `200` |
-| 失败码 | `404`（无此 id）、`400`（`enabled=false`） |
+| 失败码 | `404`（无此 id）、`400`（禁用或 localRoot 冲突导致非实际生效项） |
 
 ### 成功响应（`200`）
 
@@ -420,7 +491,7 @@
 
 ---
 
-## 9. `POST /reload`
+## 11. `POST /reload`
 
 **功能**：从磁盘**重新读取** `config.json`，重建调度器；**不**重启 HTTP 监听端口。
 
@@ -443,7 +514,7 @@
 
 ---
 
-## 10. `GET /config`
+## 12. `GET /config`
 
 **功能**：读取当前全局配置摘要（**不含** `appKey` 明文）。
 
@@ -486,7 +557,7 @@
 
 ---
 
-## 11. `PUT /config`
+## 13. `PUT /config`
 
 **功能**：部分更新全局配置，写入 `config.json` 并热重载。
 
@@ -516,7 +587,7 @@
 
 ---
 
-## 12. 管理控制台（静态页面）
+## 14. 管理控制台（静态页面）
 
 | 项目 | 说明 |
 |------|------|
@@ -540,5 +611,5 @@
 1. **新增 mapping 前**：`GET /mappings` → 读 `hasGlobalAppKey`。若为 `false`，**必须在** `POST /mappings` 的 JSON 里写 **`appKey`: "<非空>"`**。
 2. **修改 mapping 前**：若打算删掉本条独立 `appKey`（改全局依赖），先确认根级已有全局 `appKey`，否则合并后会触发 **`MAPPING_APPKEY_REQUIRED_WHEN_NO_GLOBAL_APPKEY`**。
 3. **不要**依赖响应里的 `hasOwnAppKey` 推断全局是否有密钥；**仅以** `hasGlobalAppKey` **与**根配置文件为准。
-4. **`mappingId`**：`POST /mappings` 新建时可省略（服务端自动生成）；**`PUT /mappings/:id` 的 upsert、删除、单路同步** 须在 URL 中给出确定的 `mappingId`（不存在时 PUT 会创建该 id）。
+4. **`mappingId`**：`POST /mappings` 新建时可省略（服务端自动生成）；`PUT /mappings/:id` 的 upsert、删除、启用/禁用、单路同步须在 URL 中给出确定的 `mappingId`（不存在时 PUT 会创建该 id）。
 5. **远端根**：新建或修改时，若不知道知识库内的 `remoteRootFileId`，**请传 `remoteRootFolderPath`**（`/`-分隔逻辑路径）；勿猜测 fileId。组合行为见 [README.md](../README.md) 小节「remoteRootFileId 与 remoteRootFolderPath 组合」。

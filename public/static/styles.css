@@ -266,6 +266,37 @@ body {
   border-radius: 8px;
 }
 
+.config-conflict-banner {
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  border-radius: 8px;
+  border: 1px solid #f0c36d;
+  background: #fff8e6;
+  color: #7a5a00;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.config-conflict-banner.hidden { display: none; }
+
+.config-conflict-banner strong { display: block; margin-bottom: 6px; }
+
+.config-conflict-banner ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+
+.mapping-card-conflict {
+  border-color: #f0c36d;
+  box-shadow: inset 0 0 0 1px rgba(240, 195, 109, 0.35);
+}
+
+.badge-conflict {
+  background: #fff3cd;
+  color: #856404;
+  border: 1px solid #f0c36d;
+}
+
 .mapping-card {
   background: var(--bg);
   border: 1px solid var(--border);

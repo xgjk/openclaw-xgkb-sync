@@ -39,6 +39,14 @@ exports.writeConfigFile = writeConfigFile;
 exports.loadConfig = loadConfig;
 exports.loadConfigWithMeta = loadConfigWithMeta;
 exports.parseSyncConfig = parseSyncConfig;
+exports.readMappingsFromConfigFile = readMappingsFromConfigFile;
+exports.normalizeLocalRootPath = normalizeLocalRootPath;
+exports.findDuplicateLocalRootGroups = findDuplicateLocalRootGroups;
+exports.assertUniqueLocalRoots = assertUniqueLocalRoots;
+exports.warnDuplicateLocalRoots = warnDuplicateLocalRoots;
+exports.isMappingEffectiveEnabled = isMappingEffectiveEnabled;
+exports.downgradeMappingIfLocalRootConflict = downgradeMappingIfLocalRootConflict;
+exports.isLocalRootDuplicateError = isLocalRootDuplicateError;
 exports.validateMapping = validateMapping;
 exports.generateUniqueMappingId = generateUniqueMappingId;
 const fs = __importStar(require("fs"));
@@ -223,6 +231,7 @@ function loadConfigWithMeta(configPath = DEFAULT_CONFIG_PATH) {
         }
     }
     const config = validateConfig(raw, absPath);
+    warnDuplicateLocalRoots(config.mappings, absPath);
     if (bootstrapped) {
         writeConfigFile(absPath, configToRaw(config));
         console.log(`[Config] ${bootstrapReason}: ${absPath}`);
@@ -248,7 +257,77 @@ function resolveCentralManagerUrl(obj) {
     const trimmed = obj.centralManagerUrl.trim().replace(/\/+$/, '');
     return trimmed ? { centralManagerUrl: trimmed } : {};
 }
-function validateConfig(raw, filePath) {
+/** 从 config.json 读取 mappings（不做 localRoot 唯一性校验，供管理 API 展示/修复） */
+function readMappingsFromConfigFile(configPath) {
+    const absPath = path.resolve(configPath);
+    const raw = JSON.parse(fs.readFileSync(absPath, 'utf-8'));
+    const mappingsInput = Array.isArray(raw.mappings) ? raw.mappings : [];
+    return mappingsInput.map((m, idx) => validateMapping(m, idx, absPath));
+}
+function normalizeLocalRootPath(localRoot) {
+    return path.resolve(localRoot);
+}
+function findDuplicateLocalRootGroups(mappings) {
+    const byNorm = new Map();
+    for (const m of mappings) {
+        const norm = normalizeLocalRootPath(m.localRoot);
+        const existing = byNorm.get(norm);
+        if (existing) {
+            existing.mappingIds.push(m.mappingId);
+        }
+        else {
+            byNorm.set(norm, { localRoot: m.localRoot, mappingIds: [m.mappingId] });
+        }
+    }
+    return [...byNorm.values()].filter((g) => g.mappingIds.length > 1);
+}
+/** @deprecated 仅用于诊断；配置加载与 API 写入不再抛此错误 */
+function assertUniqueLocalRoots(mappings) {
+    const groups = findDuplicateLocalRootGroups(mappings);
+    if (groups.length === 0)
+        return;
+    const g = groups[0];
+    throw new Error(`配置错误: localRoot "${g.localRoot}" 被多个 mapping 使用（mappingId: ${g.mappingIds.join(' 和 ')}），可能引起回环`);
+}
+function warnDuplicateLocalRoots(mappings, filePath = '<config>') {
+    for (const g of findDuplicateLocalRootGroups(mappings)) {
+        console.warn(`[Config] localRoot 冲突 (${filePath}): "${g.localRoot}" 被 ${g.mappingIds.length} 个 mapping 共用 [${g.mappingIds.join(', ')}]；` +
+            '同一目录仅先出现的已启用项会参与同步，请在 Web 控制台禁用或删除多余项');
+    }
+}
+/** 同一 localRoot 下仅 config 中先出现且 enabled 的 mapping 实际参与同步 */
+function isMappingEffectiveEnabled(mapping, allMappings) {
+    if (!mapping.enabled)
+        return false;
+    const norm = normalizeLocalRootPath(mapping.localRoot);
+    const firstEnabled = allMappings.find((m) => m.enabled && normalizeLocalRootPath(m.localRoot) === norm);
+    return firstEnabled?.mappingId === mapping.mappingId;
+}
+/** 保存时：若 localRoot 冲突且请求为启用，降级为 disabled */
+function downgradeMappingIfLocalRootConflict(mapping, allMappings) {
+    if (!mapping.enabled) {
+        return { mapping, downgraded: false };
+    }
+    const norm = normalizeLocalRootPath(mapping.localRoot);
+    const conflictingEnabled = allMappings.filter((m) => m.mappingId !== mapping.mappingId
+        && m.enabled
+        && normalizeLocalRootPath(m.localRoot) === norm);
+    if (conflictingEnabled.length === 0) {
+        return { mapping, downgraded: false };
+    }
+    const others = conflictingEnabled.map((m) => m.mappingId);
+    return {
+        mapping: { ...mapping, enabled: false },
+        downgraded: true,
+        warning: others.length > 0
+            ? `localRoot 与映射 ${others.join('、')} 冲突，已自动设为禁用；请调整目录或处理冲突项后再启用`
+            : 'localRoot 存在冲突，已自动设为禁用',
+    };
+}
+function isLocalRootDuplicateError(err) {
+    return err instanceof Error && err.message.includes('被多个 mapping 使用');
+}
+function validateConfig(raw, filePath, options) {
     if (typeof raw !== 'object' || raw === null) {
         throw new Error(`配置文件内容必须是 JSON 对象: ${filePath}`);
     }
@@ -264,15 +343,7 @@ function validateConfig(raw, filePath) {
         throw new Error(`配置 "syncDirection" 必须是 "bidirectional" | "push" | "pull": ${filePath}`);
     }
     const mappings = mappingsInput.map((m, idx) => validateMapping(m, idx, filePath));
-    // 校验同一 localRoot 不映射到多个云端根
-    const localRootSet = new Map();
-    for (const m of mappings) {
-        const norm = path.resolve(m.localRoot);
-        if (localRootSet.has(norm)) {
-            throw new Error(`配置错误: localRoot "${m.localRoot}" 被多个 mapping 使用（mappingId: ${localRootSet.get(norm)} 和 ${m.mappingId}），可能引起回环`);
-        }
-        localRootSet.set(norm, m.mappingId);
-    }
+    void options;
     return {
         serverUrl,
         ...(globalAppKey !== undefined ? { appKey: globalAppKey } : {}),

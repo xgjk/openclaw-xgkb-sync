@@ -126,6 +126,8 @@ class ManagementApi {
             console.log(`  POST   /mappings          新增 mapping`);
             console.log(`  PUT    /mappings/:id       upsert mapping（存在则更新，不存在则创建）`);
             console.log(`  DELETE /mappings/:id       删除 mapping`);
+            console.log(`  POST   /mappings/:id/enable  启用 mapping`);
+            console.log(`  POST   /mappings/:id/disable 禁用 mapping`);
             console.log(`  POST   /mappings/:id/reset 重置同步状态（清空 DB）`);
             console.log(`  POST   /sync/:mappingId`);
             console.log(`  POST   /sync  （触发所有）`);
@@ -209,6 +211,15 @@ class ManagementApi {
         const resetMatch = urlPath.match(/^\/mappings\/([^/]+)\/reset$/);
         if (method === 'POST' && resetMatch) {
             return this.handleResetMapping(res, decodeURIComponent(resetMatch[1]));
+        }
+        // POST /mappings/:mappingId/enable | /disable  （切换启用状态，供 Web 与其它业务调用）
+        const enableMatch = urlPath.match(/^\/mappings\/([^/]+)\/enable$/);
+        if (method === 'POST' && enableMatch) {
+            return this.handleSetMappingEnabled(res, decodeURIComponent(enableMatch[1]), true);
+        }
+        const disableMatch = urlPath.match(/^\/mappings\/([^/]+)\/disable$/);
+        if (method === 'POST' && disableMatch) {
+            return this.handleSetMappingEnabled(res, decodeURIComponent(disableMatch[1]), false);
         }
         // PUT /mappings/:mappingId  （upsert：存在则更新，不存在则创建）
         const putMatch = urlPath.match(/^\/mappings\/(.+)$/);
@@ -326,7 +337,7 @@ class ManagementApi {
     handleSyncAll(res) {
         const scheduler = this.opts.getScheduler();
         const config = scheduler.getConfig();
-        const enabled = config.mappings.filter((m) => m.enabled);
+        const enabled = config.mappings.filter((m) => (0, config_1.isMappingEffectiveEnabled)(m, config.mappings));
         for (const m of enabled) {
             scheduler.triggerMapping(m.mappingId);
         }
@@ -347,10 +358,13 @@ class ManagementApi {
                 availableMappings: config.mappings.map((m) => m.mappingId),
             });
         }
-        if (!mapping.enabled) {
+        if (!(0, config_1.isMappingEffectiveEnabled)(mapping, config.mappings)) {
+            const reason = mapping.enabled
+                ? 'localRoot 与其他映射冲突，仅列表中先出现的已启用项可同步'
+                : 'mapping 已禁用（enabled=false）';
             return this.sendJson(res, 400, {
                 ok: false,
-                error: `mapping "${mappingId}" 已禁用（enabled=false）`,
+                error: `无法同步 mapping "${mappingId}"：${reason}`,
             });
         }
         scheduler.triggerMapping(mappingId);
@@ -588,13 +602,34 @@ class ManagementApi {
     }
     // ==================== Mapping CRUD ====================
     handleListMappings(res) {
-        const config = this.opts.getScheduler().getConfig();
+        let fileMappings;
+        try {
+            fileMappings = (0, config_1.readMappingsFromConfigFile)(this.opts.configPath);
+        }
+        catch (e) {
+            return this.sendJson(res, 500, {
+                ok: false,
+                error: `读取 config.json mappings 失败: ${e instanceof Error ? e.message : String(e)}`,
+            });
+        }
+        const schedulerConfig = this.opts.getScheduler().getConfig();
+        const duplicateGroups = (0, config_1.findDuplicateLocalRootGroups)(fileMappings);
+        const conflictIds = new Set(duplicateGroups.flatMap((g) => g.mappingIds));
+        const schedulerIds = new Set(schedulerConfig.mappings.map((m) => m.mappingId));
         this.sendJson(res, 200, {
             ok: true,
-            total: config.mappings.length,
-            /** 根级全局 appKey 是否已配置（非空）。为 false 时，新建/更新 mapping 必须在请求体中带非空 appKey，见 docs/MANAGEMENT_API.md */
-            hasGlobalAppKey: !!(config.appKey && config.appKey.trim()),
-            mappings: config.mappings.map((m) => this.mappingSummary(m, config)),
+            total: fileMappings.length,
+            hasGlobalAppKey: !!(schedulerConfig.appKey && schedulerConfig.appKey.trim()),
+            configConflict: duplicateGroups.length > 0,
+            duplicateLocalRoots: duplicateGroups,
+            reloadPending: fileMappings.some((m) => !schedulerIds.has(m.mappingId))
+                || schedulerConfig.mappings.some((m) => !fileMappings.some((f) => f.mappingId === m.mappingId)),
+            mappings: fileMappings.map((m) => ({
+                ...this.mappingSummary(m, schedulerConfig),
+                localRootConflict: conflictIds.has(m.mappingId),
+                syncEffective: (0, config_1.isMappingEffectiveEnabled)(m, fileMappings),
+                activeInScheduler: schedulerIds.has(m.mappingId),
+            })),
         });
     }
     async handleCreateMapping(req, res) {
@@ -609,7 +644,13 @@ class ManagementApi {
             return this.sendJson(res, 400, { ok: false, error: '请求体必须是 JSON 对象' });
         }
         const bodyObj = { ...body };
-        const existingIds = this.opts.getScheduler().getConfig().mappings.map((m) => m.mappingId);
+        let existingIds;
+        try {
+            existingIds = (0, config_1.readMappingsFromConfigFile)(this.opts.configPath).map((m) => m.mappingId);
+        }
+        catch {
+            existingIds = this.opts.getScheduler().getConfig().mappings.map((m) => m.mappingId);
+        }
         const mid = bodyObj.mappingId;
         if (typeof mid !== 'string' || !mid.trim()) {
             bodyObj.mappingId = (0, config_1.generateUniqueMappingId)(existingIds);
@@ -632,6 +673,19 @@ class ManagementApi {
             });
         }
         // 写入 config.json
+        let fileMappings;
+        try {
+            fileMappings = (0, config_1.readMappingsFromConfigFile)(this.opts.configPath);
+            if (fileMappings.some((m) => m.mappingId === mapping.mappingId)) {
+                throw new Error(`mappingId "${mapping.mappingId}" 已存在，如需修改请使用 PUT /mappings/${mapping.mappingId}`);
+            }
+        }
+        catch (e) {
+            return this.sendJson(res, 400, { ok: false, error: e instanceof Error ? e.message : String(e) });
+        }
+        const downgraded = (0, config_1.downgradeMappingIfLocalRootConflict)(mapping, [...fileMappings, mapping]);
+        mapping = downgraded.mapping;
+        const saveWarnings = downgraded.warning ? [downgraded.warning] : [];
         const writeResult = this.modifyConfigMappings((mappings) => {
             if (mappings.some((m) => m.mappingId === mapping.mappingId)) {
                 throw new Error(`mappingId "${mapping.mappingId}" 已存在，如需修改请使用 PUT /mappings/${mapping.mappingId}`);
@@ -644,12 +698,24 @@ class ManagementApi {
         // 热重载使新 mapping 立即生效
         const reloadResult = await this.invokeReload();
         if (!reloadResult.ok) {
-            return this.sendJson(res, 500, { ok: false, error: `mapping 已写入但重载失败: ${reloadResult.error}` });
+            console.warn(`[ManagementApi] mapping "${mapping.mappingId}" 已写入但热重载失败: ${reloadResult.error}`);
+            return this.sendJson(res, 201, {
+                ok: true,
+                reloadOk: false,
+                message: `mapping "${mapping.mappingId}" 已保存`,
+                warning: `热重载未完全生效: ${reloadResult.error}`,
+                warnings: saveWarnings,
+                mapping: this.mappingSummary(mapping),
+            });
         }
         console.log(`[ManagementApi] 新增 mapping: ${mapping.mappingId}`);
         this.sendJson(res, 201, {
             ok: true,
-            message: `mapping "${mapping.mappingId}" 已创建并生效`,
+            reloadOk: true,
+            message: downgraded.downgraded
+                ? `mapping "${mapping.mappingId}" 已保存（因 localRoot 冲突已自动禁用）`
+                : `mapping "${mapping.mappingId}" 已创建并生效`,
+            warnings: saveWarnings,
             mapping: this.mappingSummary(mapping),
         });
     }
@@ -678,8 +744,10 @@ class ManagementApi {
         let mapping;
         let existingMapping;
         let created = false;
-        const writeResult = this.modifyConfigMappings((mappings) => {
-            const idx = mappings.findIndex((m) => m.mappingId === mappingId);
+        let saveWarnings = [];
+        try {
+            const fileMappings = (0, config_1.readMappingsFromConfigFile)(this.opts.configPath);
+            const idx = fileMappings.findIndex((m) => m.mappingId === mappingId);
             const cfg = this.opts.getScheduler().getConfig();
             if (idx === -1) {
                 created = true;
@@ -691,16 +759,46 @@ class ManagementApi {
                     err.errorCode = cred.errorCode;
                     throw err;
                 }
-                return [...mappings, mapping];
+                const downgraded = (0, config_1.downgradeMappingIfLocalRootConflict)(mapping, [...fileMappings, mapping]);
+                mapping = downgraded.mapping;
+                if (downgraded.warning)
+                    saveWarnings = [downgraded.warning];
             }
-            existingMapping = mappings[idx];
-            const merged = { ...existingMapping, ...bodyObj, mappingId };
-            mapping = (0, config_1.validateMapping)(merged, 0, '<API 请求>');
-            const cred = (0, managementApiCredentials_1.getMappingCredentialsViolation)(cfg, mapping);
-            if (cred) {
-                const err = new Error(cred.error);
-                err.errorCode = cred.errorCode;
-                throw err;
+            else {
+                existingMapping = fileMappings[idx];
+                const merged = { ...existingMapping, ...bodyObj, mappingId };
+                mapping = (0, config_1.validateMapping)(merged, 0, '<API 请求>');
+                const cred = (0, managementApiCredentials_1.getMappingCredentialsViolation)(cfg, mapping);
+                if (cred) {
+                    const err = new Error(cred.error);
+                    err.errorCode = cred.errorCode;
+                    throw err;
+                }
+                const next = [...fileMappings];
+                next[idx] = mapping;
+                const downgraded = (0, config_1.downgradeMappingIfLocalRootConflict)(mapping, next);
+                mapping = downgraded.mapping;
+                if (downgraded.warning)
+                    saveWarnings = [downgraded.warning];
+            }
+        }
+        catch (e) {
+            const errorCode = e &&
+                typeof e === 'object' &&
+                'errorCode' in e &&
+                typeof e.errorCode === 'string'
+                ? e.errorCode
+                : undefined;
+            return this.sendJson(res, 400, {
+                ok: false,
+                error: e instanceof Error ? e.message : String(e),
+                ...(errorCode ? { errorCode } : {}),
+            });
+        }
+        const writeResult = this.modifyConfigMappings((mappings) => {
+            const idx = mappings.findIndex((m) => m.mappingId === mappingId);
+            if (idx === -1) {
+                return [...mappings, mapping];
             }
             const updated = [...mappings];
             updated[idx] = mapping;
@@ -716,13 +814,26 @@ class ManagementApi {
         if (created) {
             const reloadResult = await this.invokeReload();
             if (!reloadResult.ok) {
-                return this.sendJson(res, 500, { ok: false, error: `mapping 已写入但重载失败: ${reloadResult.error}` });
+                console.warn(`[ManagementApi] upsert 新建 mapping "${mappingId}" 已写入但热重载失败: ${reloadResult.error}`);
+                return this.sendJson(res, 201, {
+                    ok: true,
+                    created: true,
+                    reloadOk: false,
+                    message: `mapping "${mappingId}" 已保存`,
+                    warning: `热重载未完全生效: ${reloadResult.error}`,
+                    warnings: saveWarnings,
+                    mapping: this.mappingSummary(mapping),
+                });
             }
             console.log(`[ManagementApi] upsert 新建 mapping: ${mappingId}`);
             return this.sendJson(res, 201, {
                 ok: true,
                 created: true,
-                message: `mapping "${mappingId}" 已创建并生效`,
+                reloadOk: true,
+                message: saveWarnings.length
+                    ? `mapping "${mappingId}" 已保存（因 localRoot 冲突已自动禁用）`
+                    : `mapping "${mappingId}" 已创建并生效`,
+                warnings: saveWarnings,
                 mapping: this.mappingSummary(mapping),
             });
         }
@@ -742,19 +853,32 @@ class ManagementApi {
         }
         const reloadResult = await this.invokeReload();
         if (!reloadResult.ok) {
-            return this.sendJson(res, 500, { ok: false, error: `mapping 已写入但重载失败: ${reloadResult.error}` });
+            console.warn(`[ManagementApi] upsert 更新 mapping "${mappingId}" 已写入但热重载失败: ${reloadResult.error}`);
+            return this.sendJson(res, 200, {
+                ok: true,
+                created: false,
+                reloadOk: false,
+                message: `mapping "${mappingId}" 已保存`,
+                warning: `热重载未完全生效: ${reloadResult.error}`,
+                changed: changedFields,
+                warnings: saveWarnings,
+                mapping: this.mappingSummary(mapping),
+            });
+        }
+        const responseWarnings = [...saveWarnings];
+        if (changedIdentityFields.length > 0) {
+            responseWarnings.push(`身份字段 [${changedIdentityFields.join(', ')}] 已变更，同步状态已清除，下次同步将执行全量对账`);
         }
         console.log(`[ManagementApi] upsert 更新 mapping: ${mappingId}，变更字段: [${changedFields.join(', ')}]`);
         this.sendJson(res, 200, {
             ok: true,
             created: false,
-            message: `mapping "${mappingId}" 已更新并生效`,
+            reloadOk: true,
+            message: saveWarnings.length
+                ? `mapping "${mappingId}" 已保存（因 localRoot 冲突已自动禁用）`
+                : `mapping "${mappingId}" 已更新并生效`,
             changed: changedFields,
-            ...(changedIdentityFields.length > 0 && {
-                warnings: [
-                    `身份字段 [${changedIdentityFields.join(', ')}] 已变更，同步状态已清除，下次同步将执行全量对账`,
-                ],
-            }),
+            warnings: responseWarnings,
             mapping: this.mappingSummary(mapping),
         });
     }
@@ -771,10 +895,96 @@ class ManagementApi {
         }
         const reloadResult = await this.invokeReload();
         if (!reloadResult.ok) {
-            return this.sendJson(res, 500, { ok: false, error: `mapping 已删除但重载失败: ${reloadResult.error}` });
+            console.warn(`[ManagementApi] mapping "${mappingId}" 已从 config.json 删除，但热重载失败: ${reloadResult.error}`);
+            return this.sendJson(res, 200, {
+                ok: true,
+                reloadOk: false,
+                message: `mapping "${mappingId}" 已从配置文件删除`,
+                warning: `热重载未完全生效: ${reloadResult.error}。请继续删除其余冲突项；若仍异常可重启服务。`,
+            });
         }
         console.log(`[ManagementApi] 删除 mapping: ${mappingId}`);
-        this.sendJson(res, 200, { ok: true, message: `mapping "${mappingId}" 已删除` });
+        this.sendJson(res, 200, { ok: true, reloadOk: true, message: `mapping "${mappingId}" 已删除` });
+    }
+    async handleSetMappingEnabled(res, mappingId, enabled) {
+        let fileMappings;
+        try {
+            fileMappings = (0, config_1.readMappingsFromConfigFile)(this.opts.configPath);
+        }
+        catch (e) {
+            return this.sendJson(res, 500, {
+                ok: false,
+                error: `读取 config.json mappings 失败: ${e instanceof Error ? e.message : String(e)}`,
+            });
+        }
+        const idx = fileMappings.findIndex((m) => m.mappingId === mappingId);
+        if (idx === -1) {
+            return this.sendJson(res, 404, {
+                ok: false,
+                error: `未找到 mapping "${mappingId}"`,
+                availableMappings: fileMappings.map((m) => m.mappingId),
+            });
+        }
+        const existing = fileMappings[idx];
+        if (existing.enabled === enabled) {
+            return this.sendJson(res, 200, {
+                ok: true,
+                reloadOk: true,
+                unchanged: true,
+                enabled,
+                message: `mapping "${mappingId}" 已是${enabled ? '启用' : '禁用'}状态`,
+                mapping: this.mappingSummary(existing),
+            });
+        }
+        let mapping = { ...existing, enabled };
+        let saveWarnings = [];
+        if (enabled) {
+            const next = [...fileMappings];
+            next[idx] = mapping;
+            const downgraded = (0, config_1.downgradeMappingIfLocalRootConflict)(mapping, next);
+            mapping = downgraded.mapping;
+            if (downgraded.warning)
+                saveWarnings = [downgraded.warning];
+        }
+        const finalMapping = mapping;
+        const writeResult = this.modifyConfigMappings((mappings) => {
+            const i = mappings.findIndex((m) => m.mappingId === mappingId);
+            if (i === -1) {
+                throw new Error(`未找到 mapping "${mappingId}"`);
+            }
+            const updated = [...mappings];
+            updated[i] = finalMapping;
+            return updated;
+        });
+        if (!writeResult.ok) {
+            const status = writeResult.error.includes('未找到') ? 404 : 400;
+            return this.sendJson(res, status, { ok: false, error: writeResult.error });
+        }
+        const reloadResult = await this.invokeReload();
+        const actionLabel = mapping.enabled ? '启用' : '禁用';
+        if (!reloadResult.ok) {
+            console.warn(`[ManagementApi] mapping "${mappingId}" 已${actionLabel}但热重载失败: ${reloadResult.error}`);
+            return this.sendJson(res, 200, {
+                ok: true,
+                reloadOk: false,
+                enabled: mapping.enabled,
+                message: `mapping "${mappingId}" 已${actionLabel}`,
+                warning: `热重载未完全生效: ${reloadResult.error}`,
+                warnings: saveWarnings,
+                mapping: this.mappingSummary(mapping),
+            });
+        }
+        console.log(`[ManagementApi] mapping "${mappingId}" 已${actionLabel}`);
+        this.sendJson(res, 200, {
+            ok: true,
+            reloadOk: true,
+            enabled: mapping.enabled,
+            message: saveWarnings.length
+                ? `mapping "${mappingId}" 已保存（因 localRoot 冲突未能启用）`
+                : `mapping "${mappingId}" 已${actionLabel}`,
+            warnings: saveWarnings,
+            mapping: this.mappingSummary(mapping),
+        });
     }
     handleResetMapping(res, mappingId) {
         const scheduler = this.opts.getScheduler();
