@@ -17,6 +17,43 @@
 
 ---
 
+## 私有仓库认证（必看）
+
+若仓库已改为 private，`git clone` / `git pull` / 自动升级脚本里的 `git fetch` 都需要先通过 GitHub 认证。
+
+### 推荐方案 A：SSH + Deploy Key（服务器最稳）
+
+1. 在部署机生成 SSH key（建议专用）：
+   ```bash
+   ssh-keygen -t ed25519 -C "openclaw-upgrade"
+   ```
+2. 复制公钥内容（`~/.ssh/id_ed25519.pub`），到 GitHub 仓库：
+   - `Settings` → `Deploy keys` → `Add deploy key`
+   - 勾选 **Read access**（只读即可）
+3. 将仓库远端改为 SSH：
+   ```bash
+   git remote set-url origin git@github.com:xgjk/openclaw-xgkb-sync.git
+   ```
+4. 验证：
+   ```bash
+   git fetch --tags origin
+   ```
+
+### 方案 B：HTTPS + Personal Access Token（PAT）
+
+1. 在 GitHub 生成 Fine-grained PAT（仓库权限至少 `Contents: Read-only`）。
+2. 执行 `git pull` 时：
+   - Username 输入 GitHub 用户名
+   - Password 输入 PAT（不是账号密码）
+3. 建议保存凭据（macOS）：
+   ```bash
+   git config --global credential.helper osxkeychain
+   ```
+
+> 自动升级脚本本身无需改动；关键是部署机上的 Git 认证要先打通。
+
+---
+
 ## 二、首次安装（约 3 分钟）
 
 安装阶段**无需**填写 AppKey、本地路径或任何 mapping。克隆、安装依赖、启动即可；所有业务配置在 **Web 管理控制台** 中完成。
@@ -24,14 +61,20 @@
 ### 1. 克隆仓库
 
 ```bash
+# 公共仓库可直接 HTTPS；私有仓库请先完成上面的认证配置
 git clone https://github.com/xgjk/openclaw-xgkb-sync.git
+# 若使用 SSH，可改为：
+# git clone git@github.com:xgjk/openclaw-xgkb-sync.git
 cd openclaw-xgkb-sync
 ```
 
 Windows PowerShell 示例：
 
 ```powershell
+# 公共仓库可直接 HTTPS；私有仓库请先完成上面的认证配置
 git clone https://github.com/xgjk/openclaw-xgkb-sync.git
+# 若使用 SSH，可改为：
+# git clone git@github.com:xgjk/openclaw-xgkb-sync.git
 cd openclaw-xgkb-sync
 ```
 
@@ -159,6 +202,7 @@ cd openclaw-xgkb-sync
 # 3. 拉取最新代码
 git pull origin main
 # 若默认分支为 master，改为：git pull origin master
+# 若提示 Username/Password，说明私有仓库认证尚未配置（见本文「私有仓库认证」）
 
 # 4. 安装可能新增的依赖
 npm install
@@ -206,6 +250,8 @@ git stash pop                             # 若有 stash
 ```powershell
 # 首次安装（无需事先编辑 config.json）
 git clone https://github.com/xgjk/openclaw-xgkb-sync.git
+# 若私有仓库且已配置 SSH，可改为：
+# git clone git@github.com:xgjk/openclaw-xgkb-sync.git
 cd openclaw-xgkb-sync
 npm install
 npm run build

@@ -888,11 +888,20 @@ export class ManagementApi {
         });
       }
 
-      console.log(`[ManagementApi] upsert 新建 mapping: ${mappingId}`);
+      let syncTriggered = false;
+      if (mapping.enabled && isMappingEffectiveEnabled(mapping, reloadResult.config.mappings)) {
+        this.opts.getScheduler().triggerMapping(mappingId);
+        syncTriggered = true;
+        console.log(`[ManagementApi] upsert 新建 mapping "${mappingId}"，已触发首次同步`);
+      } else {
+        console.log(`[ManagementApi] upsert 新建 mapping: ${mappingId}`);
+      }
+
       return this.sendJson(res, 201, {
         ok: true,
         created: true,
         reloadOk: true,
+        syncTriggered,
         message: saveWarnings.length
           ? `mapping "${mappingId}" 已保存（因 localRoot 冲突已自动禁用）`
           : `mapping "${mappingId}" 已创建并生效`,

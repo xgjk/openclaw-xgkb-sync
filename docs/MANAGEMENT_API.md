@@ -306,7 +306,7 @@
 **功能**：**Upsert**（存在则更新，不存在则创建）。URL 中的 `mappingId` 为唯一键。
 
 - **已存在**：与磁盘上现有记录**部分合并**（未传字段保留原值）→ 校验 → 若有实际变更则写 `config.json` 并热重载。
-- **不存在**：将 URL 中的 `mappingId` 与请求体合并为**新建**条目（语义等同带固定 id 的 `POST /mappings`）→ 校验 → 写盘并热重载。
+- **不存在**：将 URL 中的 `mappingId` 与请求体合并为**新建**条目（语义等同带固定 id 的 `POST /mappings`）→ 校验 → 写盘并热重载；若新建后 `enabled=true` 且该条为同 `localRoot` 的实际生效项（`syncEffective=true`），服务会立即异步触发一次 `scheduler.triggerMapping(mappingId)`（仅此 mapping）。
 
 | 项目 | 说明 |
 |------|------|
@@ -336,6 +336,7 @@
 | `ok` | `boolean` | `true` |
 | `created` | `boolean` | `true` |
 | `reloadOk` | `boolean` | 热重载是否成功 |
+| `syncTriggered` | `boolean` | 是否已在新建成功后异步触发该 mapping 的首次同步 |
 | `message` | `string` | 说明 |
 | `warnings` | `array` \| 省略 | localRoot 冲突自动禁用等提示 |
 | `warning` | `string` \| 省略 | 热重载失败提示 |
