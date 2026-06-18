@@ -25,6 +25,7 @@ import {
   resolveWatchEnabled,
   resolveWatchUsePolling,
 } from './watchHelpers';
+import { ensureMappingLocalRoot } from './ensureLocalRoot';
 import { resolveSyncScopeOptions } from './pathSyncScope';
 
 let schedulerInstanceSeq = 0;
@@ -288,6 +289,11 @@ export class SyncScheduler {
   private startWatchers(mappings: SyncMapping[]): void {
     for (const mapping of mappings) {
       if (!resolveWatchEnabled(mapping, this.config)) continue;
+
+      const ensured = ensureMappingLocalRoot(mapping.localRoot);
+      if (!ensured.ok) {
+        console.warn(`[FileWatcher][${mapping.mappingId}] ${ensured.error}`);
+      }
 
       const scope = resolveSyncScopeOptions(mapping, this.config);
 

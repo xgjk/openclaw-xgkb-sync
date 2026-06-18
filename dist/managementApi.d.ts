@@ -66,6 +66,8 @@ export declare class ManagementApi {
     private readBody;
     /** 隐藏 appKey 敏感字段的 mapping 摘要 */
     private mappingSummary;
+    /** 新建或变更 localRoot 时确保目录存在；失败则写 400 并返回 false */
+    private ensureLocalRootOrRespond;
     /** 非敏感全局配置摘要（不含 appKey 明文） */
     private globalConfigSummary;
     private serveStaticFile;

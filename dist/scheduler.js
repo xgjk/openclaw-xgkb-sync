@@ -12,6 +12,7 @@ const syncStateDb_1 = require("./syncStateDb");
 const config_1 = require("./config");
 const constants_1 = require("./constants");
 const watchHelpers_1 = require("./watchHelpers");
+const ensureLocalRoot_1 = require("./ensureLocalRoot");
 const pathSyncScope_1 = require("./pathSyncScope");
 let schedulerInstanceSeq = 0;
 function resolveMaxConcurrentMappings(config) {
@@ -219,6 +220,10 @@ class SyncScheduler {
         for (const mapping of mappings) {
             if (!(0, watchHelpers_1.resolveWatchEnabled)(mapping, this.config))
                 continue;
+            const ensured = (0, ensureLocalRoot_1.ensureMappingLocalRoot)(mapping.localRoot);
+            if (!ensured.ok) {
+                console.warn(`[FileWatcher][${mapping.mappingId}] ${ensured.error}`);
+            }
             const scope = (0, pathSyncScope_1.resolveSyncScopeOptions)(mapping, this.config);
             const watcher = new fileWatcher_1.FileWatcher({
                 mappingId: mapping.mappingId,

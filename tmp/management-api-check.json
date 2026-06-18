@@ -1,0 +1,55 @@
+{
+  "serverUrl": "https://example.invalid/open-api/",
+  "syncDirection": "bidirectional",
+  "autoSyncIntervalSec": 0,
+  "fullReconcileIntervalSec": 3600,
+  "stateDbPath": "./tmp/test-state.db",
+  "maxConcurrentMappingsMode": "auto",
+  "maxConcurrentMappings": 2,
+  "maxRequestsPerMinute": 180,
+  "rateLimitBurst": 8,
+  "rateLimitCooldownSec": 60,
+  "downloadConcurrency": 5,
+  "uploadConcurrency": 3,
+  "startupJitterMaxSec": 20,
+  "managementPort": 19090,
+  "managementHost": "127.0.0.1",
+  "watchEnabled": false,
+  "pushDebounceMs": 1500,
+  "watchUsePolling": false,
+  "syncDotFiles": false,
+  "mappings": [
+    {
+      "mappingId": "map-a",
+      "enabled": false,
+      "localRoot": "D:/tmp/same-root",
+      "remoteRootFolderPath": "kb/a",
+      "filePatterns": [
+        "**/*.md"
+      ],
+      "excludePatterns": [
+        "**/_conflict_*",
+        "**/.tmp/**"
+      ],
+      "enableFileIndex": false
+    },
+    {
+      "mappingId": "map-b",
+      "enabled": true,
+      "localRoot": "D:/tmp/same-root",
+      "remoteRootFolderPath": "kb/b",
+      "filePatterns": [
+        "**/*.md"
+      ],
+      "excludePatterns": [
+        "**/_conflict_*",
+        "**/.tmp/**"
+      ],
+      "enableFileIndex": false
+    }
+  ],
+  "appKey": "test-global-app-key",
+  "centralManagerUrl": "https://cwork-api-test.xgjktech.com.cn/sync-manage",
+  "centralHeartbeatIntervalSec": 45,
+  "autoUpgradeEnabled": true
+}

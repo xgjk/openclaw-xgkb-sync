@@ -43,6 +43,7 @@ const pathSyncScope_1 = require("./pathSyncScope");
 const managementApiCredentials_1 = require("./managementApiCredentials");
 const watchHelpers_1 = require("./watchHelpers");
 const version_1 = require("./version");
+const ensureLocalRoot_1 = require("./ensureLocalRoot");
 const PUBLIC_DIR = path.resolve(__dirname, '../public');
 /** 仅用于界面展示的脱敏 AppKey，避免返回明文。 */
 function maskSecret(value) {
@@ -686,6 +687,8 @@ class ManagementApi {
         const downgraded = (0, config_1.downgradeMappingIfLocalRootConflict)(mapping, [...fileMappings, mapping]);
         mapping = downgraded.mapping;
         const saveWarnings = downgraded.warning ? [downgraded.warning] : [];
+        if (!this.ensureLocalRootOrRespond(res, mapping))
+            return;
         const writeResult = this.modifyConfigMappings((mappings) => {
             if (mappings.some((m) => m.mappingId === mapping.mappingId)) {
                 throw new Error(`mappingId "${mapping.mappingId}" 已存在，如需修改请使用 PUT /mappings/${mapping.mappingId}`);
@@ -794,6 +797,11 @@ class ManagementApi {
                 error: e instanceof Error ? e.message : String(e),
                 ...(errorCode ? { errorCode } : {}),
             });
+        }
+        const localRootChanged = !created && existingMapping != null && existingMapping.localRoot !== mapping.localRoot;
+        if (created || localRootChanged) {
+            if (!this.ensureLocalRootOrRespond(res, mapping))
+                return;
         }
         const writeResult = this.modifyConfigMappings((mappings) => {
             const idx = mappings.findIndex((m) => m.mappingId === mappingId);
@@ -1118,6 +1126,16 @@ class ManagementApi {
         };
     }
     // ==================== 工具方法 ====================
+    /** 新建或变更 localRoot 时确保目录存在；失败则写 400 并返回 false */
+    ensureLocalRootOrRespond(res, mapping) {
+        const result = (0, ensureLocalRoot_1.ensureMappingLocalRoot)(mapping.localRoot);
+        if (!result.ok) {
+            this.sendJson(res, 400, { ok: false, error: result.error });
+            return false;
+        }
+        console.log(`[ManagementApi][${mapping.mappingId}] localRoot 已就绪: ${result.path}`);
+        return true;
+    }
     /** 非敏感全局配置摘要（不含 appKey 明文） */
     globalConfigSummary(config, identity) {
         const id = identity ?? this.opts.getNodeIdentity();

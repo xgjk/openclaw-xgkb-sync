@@ -221,7 +221,7 @@
 
 ## 4. `POST /mappings`
 
-**功能**：**新增**一条 mapping：校验 → 写入磁盘 `config.json` → **热重载**使配置立即生效。
+**功能**：**新增**一条 mapping：校验 → **`mkdir -p` 确保 `localRoot` 存在** → 写入磁盘 `config.json` → **热重载**使配置立即生效。
 
 | 项目 | 说明 |
 |------|------|
@@ -238,7 +238,7 @@
 | 字段 | 必填 | 默认值 / 生成规则 | 说明 |
 |------|------|-------------------|------|
 | `mappingId` | **否** | 若省略、为 `null`、非字符串、或 trim 后为空，则服务端生成 **`map-` + 16 字节随机十六进制**，且与现有所有 `mappingId` 不冲突 | 唯一标识 |
-| `localRoot` | **是** | 无 | 本机磁盘上的**绝对路径**（同步根目录）。写法示例见下节 **「localRoot 与 remoteRootFolderPath 示例」** |
+| `localRoot` | **是** | 无 | 本机磁盘上的**绝对路径**（同步根目录）。**新建时**服务端会 `mkdir -p` 确保该目录存在，以便热重载后文件监听可立即启动。写法示例见下节 **「localRoot 与 remoteRootFolderPath 示例」** |
 | `enabled` | 否 | `true` | 是否启用 |
 | `appKey` | **条件必填** | 无 | **玄关开放平台**为个人/应用签发的 **Open API `appKey`**（鉴权密钥）。当 `hasGlobalAppKey === false` 时本条 **必填且非空**。与根级 `appKey`、限速等说明以 [README.md](../README.md) 为准，请在该文档中定位 **「## 配置参考」** → **「### 全局字段」**、**「### 每条 Mapping 字段」** |
 | `projectId` | 否 | 无 | 知识库空间 ID；不填则由 Agent 按接口拉取个人空间。说明见 [README.md](../README.md) 同节 **「### 每条 Mapping 字段」** |
@@ -306,7 +306,7 @@
 **功能**：**Upsert**（存在则更新，不存在则创建）。URL 中的 `mappingId` 为唯一键。
 
 - **已存在**：与磁盘上现有记录**部分合并**（未传字段保留原值）→ 校验 → 若有实际变更则写 `config.json` 并热重载。
-- **不存在**：将 URL 中的 `mappingId` 与请求体合并为**新建**条目（语义等同带固定 id 的 `POST /mappings`）→ 校验 → 写盘并热重载；若新建后 `enabled=true` 且该条为同 `localRoot` 的实际生效项（`syncEffective=true`），服务会立即异步触发一次 `scheduler.triggerMapping(mappingId)`（仅此 mapping）。
+- **不存在**：将 URL 中的 `mappingId` 与请求体合并为**新建**条目（语义等同带固定 id 的 `POST /mappings`）→ 校验 → **`mkdir -p` 确保 `localRoot` 在磁盘上存在** → 写盘并热重载；若新建后 `enabled=true` 且该条为同 `localRoot` 的实际生效项（`syncEffective=true`），服务会立即异步触发一次 `scheduler.triggerMapping(mappingId)`（仅此 mapping）。
 
 | 项目 | 说明 |
 |------|------|
