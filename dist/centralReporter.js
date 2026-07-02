@@ -42,6 +42,7 @@ const centralConfigMerge_1 = require("./centralConfigMerge");
 const scheduler_1 = require("./scheduler");
 const constants_1 = require("./constants");
 const versionCompare_1 = require("./versionCompare");
+const watchHelpers_1 = require("./watchHelpers");
 /** 是否启用自动升级（默认开启，仅显式 false 关闭） */
 function isAutoUpgradeEnabled(config) {
     return config.autoUpgradeEnabled !== false;
@@ -91,8 +92,13 @@ class CentralReporter {
         const baseUrl = config.centralManagerUrl?.trim();
         if (!baseUrl || this.stopped)
             return;
+        const mapping = config.mappings.find((m) => m.mappingId === result.mappingId);
+        const syncDirection = mapping
+            ? (0, watchHelpers_1.resolveMappingSyncDirection)(mapping, config.syncDirection)
+            : config.syncDirection;
         const body = {
             mappingId: result.mappingId,
+            syncDirection,
             triggerReason: result.triggerReason,
             startTime: result.startTime,
             endTime: result.endTime,
@@ -156,15 +162,19 @@ class CentralReporter {
         }
     }
     buildMappingStats(scheduler) {
+        const config = this.opts.getConfig();
         const runStatus = scheduler.getStatus();
         const out = {};
-        for (const [mappingId, state] of Object.entries(runStatus)) {
-            const lastState = state.lastState;
+        for (const mapping of config.mappings) {
+            const mappingId = mapping.mappingId;
+            const state = runStatus[mappingId];
+            const lastState = state?.lastState;
             const stats = lastState?.lastStats;
             out[mappingId] = {
                 mappingId,
+                syncDirection: (0, watchHelpers_1.resolveMappingSyncDirection)(mapping, config.syncDirection),
                 lastSyncAt: lastState?.lastSuccessAt ?? null,
-                lastTriggerReason: state.lastTriggerReason ?? null,
+                lastTriggerReason: state?.lastTriggerReason ?? null,
                 uploaded: stats?.uploaded ?? 0,
                 downloaded: stats?.downloaded ?? 0,
                 deleted: stats?.deleted ?? 0,

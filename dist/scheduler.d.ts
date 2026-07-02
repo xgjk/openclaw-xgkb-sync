@@ -1,4 +1,9 @@
 import { SyncConfig, MappingSyncRunResult, SyncTriggerReason } from './types';
+export interface SyncSchedulerOptions {
+    onMappingSyncFinished?: (result: MappingSyncRunResult) => void;
+    /** localRoot 被删且曾有同步历史：写 config 禁用并触发热重载 */
+    onMissingLocalRootDisable?: (mappingId: string, detail: string) => Promise<void>;
+}
 export declare function resolveMaxConcurrentMappings(config: SyncConfig): number;
 /**
  * 多 Mapping 同步调度器
@@ -26,9 +31,11 @@ export declare class SyncScheduler {
     private running;
     private dbClosed;
     private readonly onMappingSyncFinished?;
-    constructor(config: SyncConfig, opts?: {
-        onMappingSyncFinished?: (result: MappingSyncRunResult) => void;
-    });
+    private readonly onMissingLocalRootDisable?;
+    /** localRoot 缺失后即时挂起，阻止 timer/watch 继续触发（热重载前） */
+    private readonly suspendedMappingIds;
+    private readonly missingRootDisableInFlight;
+    constructor(config: SyncConfig, opts?: SyncSchedulerOptions);
     /**
      * 按 appKey 获取或创建对应的限速器。
      * 同一 appKey 的所有请求共享一个令牌桶，不同 appKey 互不干扰。
@@ -62,6 +69,11 @@ export declare class SyncScheduler {
     private triggerAll;
     private scheduleMapping;
     private runMappingSync;
+    /**
+     * localRoot 从有到无：即时挂起（停 watch、清排队），随后写 config 禁用 mapping。
+     */
+    private suspendMappingForMissingLocalRoot;
+    private disableMappingForMissingLocalRoot;
     private doSync;
     /** 获取当前生效的配置（供 ManagementApi 读取） */
     getConfig(): SyncConfig;
@@ -76,6 +88,7 @@ export declare class SyncScheduler {
     getStatus(): Record<string, {
         isSyncing: boolean;
         pendingSync: boolean;
+        syncSuspended: boolean;
         lastTriggerReason?: SyncTriggerReason;
         lastWatchTriggerAt?: number;
         watchActive: boolean;

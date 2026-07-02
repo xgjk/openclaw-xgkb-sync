@@ -11,6 +11,89 @@
   let configConflict = false;
   let statusCache = null;
 
+  const pendingActions = new Set();
+  let busyDepth = 0;
+  let busyTimer = null;
+  let busyStartedAt = 0;
+  let busyBaseMessage = '处理中…';
+
+  // ==================== Busy / 防重复提交 ====================
+
+  function setGlobalBusy(active, message) {
+    const overlay = $('#globalBusy');
+    const textEl = $('#globalBusyText');
+    const app = $('.app');
+    if (!overlay) return;
+
+    if (active) {
+      busyDepth++;
+      if (busyDepth === 1) {
+        busyBaseMessage = message || '处理中…';
+        busyStartedAt = Date.now();
+        overlay.classList.remove('hidden');
+        overlay.setAttribute('aria-busy', 'true');
+        app?.classList.add('is-busy');
+        if (textEl) textEl.textContent = busyBaseMessage;
+        if (busyTimer) clearInterval(busyTimer);
+        busyTimer = setInterval(() => {
+          const sec = Math.floor((Date.now() - busyStartedAt) / 1000);
+          if (textEl && sec > 0) {
+            textEl.textContent = `${busyBaseMessage}（已 ${sec} 秒）`;
+          }
+        }, 1000);
+      } else if (message) {
+        busyBaseMessage = message;
+        if (textEl) textEl.textContent = message;
+      }
+      return;
+    }
+
+    busyDepth = Math.max(0, busyDepth - 1);
+    if (busyDepth === 0) {
+      overlay.classList.add('hidden');
+      overlay.setAttribute('aria-busy', 'false');
+      app?.classList.remove('is-busy');
+      if (busyTimer) {
+        clearInterval(busyTimer);
+        busyTimer = null;
+      }
+    }
+  }
+
+  function setButtonLoading(btn, loading, loadingText) {
+    if (!btn) return;
+    if (btn.dataset.originalText == null) btn.dataset.originalText = btn.textContent;
+    btn.disabled = !!loading;
+    btn.classList.toggle('is-loading', !!loading);
+    btn.textContent = loading ? (loadingText || btn.dataset.originalText) : btn.dataset.originalText;
+  }
+
+  /**
+   * 同一 actionKey 在飞行中只执行一次；变更类操作默认显示全屏忙碌层。
+   */
+  async function runAction(actionKey, fn, options = {}) {
+    const {
+      busyMessage = '处理中…',
+      blockUi = true,
+      duplicateToast = '操作正在进行中，请勿重复点击',
+    } = options;
+
+    if (pendingActions.has(actionKey)) {
+      if (duplicateToast) toast(duplicateToast, 'info');
+      return undefined;
+    }
+
+    pendingActions.add(actionKey);
+    if (blockUi) setGlobalBusy(true, busyMessage);
+
+    try {
+      return await fn();
+    } finally {
+      pendingActions.delete(actionKey);
+      if (blockUi) setGlobalBusy(false);
+    }
+  }
+
   // ==================== API ====================
 
   async function api(method, path, body) {
@@ -477,22 +560,26 @@
       .join('');
 
     container.querySelectorAll('.btn-enable-mapping').forEach((btn) => {
-      btn.addEventListener('click', () => setMappingEnabled(btn.closest('.mapping-card').dataset.id, true));
+      btn.addEventListener('click', () =>
+        setMappingEnabled(btn.closest('.mapping-card').dataset.id, true, btn),
+      );
     });
     container.querySelectorAll('.btn-disable-mapping').forEach((btn) => {
-      btn.addEventListener('click', () => setMappingEnabled(btn.closest('.mapping-card').dataset.id, false));
+      btn.addEventListener('click', () =>
+        setMappingEnabled(btn.closest('.mapping-card').dataset.id, false, btn),
+      );
     });
     container.querySelectorAll('.btn-sync-one').forEach((btn) => {
-      btn.addEventListener('click', () => syncOne(btn.closest('.mapping-card').dataset.id));
+      btn.addEventListener('click', () => syncOne(btn.closest('.mapping-card').dataset.id, btn));
     });
     container.querySelectorAll('.btn-edit').forEach((btn) => {
       btn.addEventListener('click', () => openMappingModal(btn.closest('.mapping-card').dataset.id));
     });
     container.querySelectorAll('.btn-reset').forEach((btn) => {
-      btn.addEventListener('click', () => resetMapping(btn.closest('.mapping-card').dataset.id));
+      btn.addEventListener('click', () => resetMapping(btn.closest('.mapping-card').dataset.id, btn));
     });
     container.querySelectorAll('.btn-delete').forEach((btn) => {
-      btn.addEventListener('click', () => deleteMapping(btn.closest('.mapping-card').dataset.id));
+      btn.addEventListener('click', () => deleteMapping(btn.closest('.mapping-card').dataset.id, btn));
     });
     container.querySelectorAll('.btn-copy-local').forEach((btn) => {
       btn.addEventListener('click', () => copyText(btn.dataset.copy || '', '本地目录'));
@@ -509,15 +596,24 @@
     updateGlobalAppKeyHint();
   }
 
-  async function syncOne(id) {
-    try {
-      const data = await api('POST', `/sync/${encodeURIComponent(id)}`);
-      await refreshStatus();
-      toast(`${data.message}，正在同步...`, 'info');
-      await watchMappingSync(id);
-    } catch (e) {
-      toast(e.message, 'error');
-    }
+  async function syncOne(id, triggerBtn) {
+    await runAction(
+      `sync-one:${id}`,
+      async () => {
+        setButtonLoading(triggerBtn, true, '触发中…');
+        try {
+          const data = await api('POST', `/sync/${encodeURIComponent(id)}`);
+          await refreshStatus();
+          toast(`${data.message}，正在同步...`, 'info');
+          await watchMappingSync(id);
+        } catch (e) {
+          toast(e.message, 'error');
+        } finally {
+          setButtonLoading(triggerBtn, false);
+        }
+      },
+      { busyMessage: '正在触发同步…', blockUi: false },
+    );
   }
 
   async function watchMappingSync(id) {
@@ -535,46 +631,73 @@
     toast('同步仍在进行，可在列表查看最新状态', 'info');
   }
 
-  async function setMappingEnabled(id, enabled) {
+  async function setMappingEnabled(id, enabled, triggerBtn) {
     const action = enabled ? '启用' : '禁用';
-    try {
-      const path = enabled ? 'enable' : 'disable';
-      const data = await api('POST', `/mappings/${encodeURIComponent(id)}/${path}`);
-      const warnParts = [];
-      if (data.warnings?.length) warnParts.push(...data.warnings);
-      if (data.warning) warnParts.push(data.warning);
-      const warnSuffix = warnParts.length ? ' · ' + warnParts.join(' · ') : '';
-      toast(
-        (data.unchanged ? data.message : `${action}成功：${data.message}`) + warnSuffix,
-        data.reloadOk === false || warnParts.length ? 'info' : 'success',
-      );
-      await refreshAll();
-    } catch (e) {
-      toast(`${action}失败：${e.message}`, 'error');
-    }
+    const path = enabled ? 'enable' : 'disable';
+    await runAction(
+      `mapping-${path}:${id}`,
+      async () => {
+        setButtonLoading(triggerBtn, true, `${action}中…`);
+        try {
+          const data = await api('POST', `/mappings/${encodeURIComponent(id)}/${path}`);
+          const warnParts = [];
+          if (data.warnings?.length) warnParts.push(...data.warnings);
+          if (data.warning) warnParts.push(data.warning);
+          const warnSuffix = warnParts.length ? ' · ' + warnParts.join(' · ') : '';
+          toast(
+            (data.unchanged ? data.message : `${action}成功：${data.message}`) + warnSuffix,
+            data.reloadOk === false || warnParts.length ? 'info' : 'success',
+          );
+          await refreshAll();
+        } catch (e) {
+          toast(`${action}失败：${e.message}`, 'error');
+        } finally {
+          setButtonLoading(triggerBtn, false);
+        }
+      },
+      { busyMessage: `正在${action}映射并重载配置…` },
+    );
   }
 
-  async function deleteMapping(id) {
+  async function deleteMapping(id, triggerBtn) {
     if (!confirm(`确定删除映射「${id}」？此操作不可撤销。`)) return;
-    try {
-      const data = await api('DELETE', `/mappings/${encodeURIComponent(id)}`);
-      toast(data.message, data.reloadOk === false ? 'info' : 'success');
-      if (data.warning) toast(data.warning, 'info');
-      await refreshAll();
-    } catch (e) {
-      toast(e.message, 'error');
-    }
+    await runAction(
+      `mapping-delete:${id}`,
+      async () => {
+        setButtonLoading(triggerBtn, true, '删除中…');
+        try {
+          const data = await api('DELETE', `/mappings/${encodeURIComponent(id)}`);
+          toast(data.message, data.reloadOk === false ? 'info' : 'success');
+          if (data.warning) toast(data.warning, 'info');
+          await refreshAll();
+        } catch (e) {
+          toast(e.message, 'error');
+        } finally {
+          setButtonLoading(triggerBtn, false);
+        }
+      },
+      { busyMessage: '正在删除映射并重载配置…' },
+    );
   }
 
-  async function resetMapping(id) {
+  async function resetMapping(id, triggerBtn) {
     if (!confirm(`确定清空映射「${id}」的同步状态（DB 记录）？\n下次同步将全量重新对账。`)) return;
-    try {
-      const data = await api('POST', `/mappings/${encodeURIComponent(id)}/reset`);
-      toast(data.message, 'success');
-      await refreshAll();
-    } catch (e) {
-      toast(e.message, 'error');
-    }
+    await runAction(
+      `mapping-reset:${id}`,
+      async () => {
+        setButtonLoading(triggerBtn, true, '清空中…');
+        try {
+          const data = await api('POST', `/mappings/${encodeURIComponent(id)}/reset`);
+          toast(data.message, 'success');
+          await refreshAll();
+        } catch (e) {
+          toast(e.message, 'error');
+        } finally {
+          setButtonLoading(triggerBtn, false);
+        }
+      },
+      { busyMessage: '正在清空同步状态…', blockUi: false },
+    );
   }
 
   // ==================== Mapping modal ====================
@@ -645,9 +768,19 @@
     modal.close();
   }
 
-  $('#btnAddMapping').addEventListener('click', () => openMappingModal(null));
+  $('#btnAddMapping').addEventListener('click', () => {
+    if (pendingActions.has('mapping-save')) return;
+    openMappingModal(null);
+  });
   $('#btnCloseModal').addEventListener('click', closeMappingModal);
   $('#btnCancelModal').addEventListener('click', closeMappingModal);
+
+  modal.addEventListener('cancel', (e) => {
+    if (pendingActions.has('mapping-save')) {
+      e.preventDefault();
+      toast('正在保存，请稍候…', 'info');
+    }
+  });
 
   // 映射 appKey：聚焦时切 password 模式便于输入新值；失焦若未改动则还原脱敏文本显示
   const mappingAppKeyField = $('input[name="appKey"]', mappingForm);
@@ -675,6 +808,9 @@
     const fd = new FormData(mappingForm);
     const mode = fd.get('mode');
     const mappingId = (fd.get('mappingId') || '').toString().trim();
+    const submitBtn = $('#btnSaveMapping');
+    const cancelBtn = $('#btnCancelModal');
+    const closeBtn = $('#btnCloseModal');
 
     const body = {
       enabled: fd.get('enabled') === 'on',
@@ -731,24 +867,43 @@
       return;
     }
 
-    try {
-      let data;
-      if (mode === 'create') {
-        if (mappingId) body.mappingId = mappingId;
-        data = await api('POST', '/mappings', body);
-      } else {
-        data = await api('PUT', `/mappings/${encodeURIComponent(mappingId)}`, body);
-      }
-      const warnParts = [];
-      if (data.warnings?.length) warnParts.push(...data.warnings);
-      if (data.warning) warnParts.push(data.warning);
-      const warnSuffix = warnParts.length ? ' · ' + warnParts.join(' · ') : '';
-      toast(data.message + warnSuffix, data.reloadOk === false || warnParts.length ? 'info' : 'success');
-      closeMappingModal();
-      await refreshAll();
-    } catch (err) {
-      toast(err.message, 'error');
-    }
+    const busyMessage =
+      mode === 'create' ? '正在创建映射并重载配置…' : '正在保存映射并重载配置…';
+
+    await runAction(
+      'mapping-save',
+      async () => {
+        setButtonLoading(submitBtn, true, '保存中…');
+        if (cancelBtn) cancelBtn.disabled = true;
+        if (closeBtn) closeBtn.disabled = true;
+        try {
+          let data;
+          if (mode === 'create') {
+            if (mappingId) body.mappingId = mappingId;
+            data = await api('POST', '/mappings', body);
+          } else {
+            data = await api('PUT', `/mappings/${encodeURIComponent(mappingId)}`, body);
+          }
+          const warnParts = [];
+          if (data.warnings?.length) warnParts.push(...data.warnings);
+          if (data.warning) warnParts.push(data.warning);
+          const warnSuffix = warnParts.length ? ' · ' + warnParts.join(' · ') : '';
+          toast(
+            data.message + warnSuffix,
+            data.reloadOk === false || warnParts.length ? 'info' : 'success',
+          );
+          closeMappingModal();
+          await refreshAll();
+        } catch (err) {
+          toast(err.message, 'error');
+        } finally {
+          setButtonLoading(submitBtn, false);
+          if (cancelBtn) cancelBtn.disabled = false;
+          if (closeBtn) closeBtn.disabled = false;
+        }
+      },
+      { busyMessage },
+    );
   });
 
   // ==================== Global config ====================
@@ -820,42 +975,52 @@
   }
 
   $('#btnSaveGlobal').addEventListener('click', async () => {
-    const form = $('#globalForm');
-    const body = {};
-    const fields = [
-      'serverUrl', 'syncDirection', 'autoSyncIntervalSec', 'maxConcurrentMappingsMode', 'maxConcurrentMappings',
-      'fullReconcileIntervalSec', 'maxRequestsPerMinute', 'stateDbPath', 'downloadConcurrency', 'uploadConcurrency',
-      'managementPort', 'managementHost', 'pushDebounceMs',
-      'centralManagerUrl', 'centralHeartbeatIntervalSec', 'autoUpgradeScript', 'nodeId', 'nodeAdvertiseIp',
-    ];
-    for (const name of fields) {
-      const el = form.elements.namedItem(name);
-      if (!el) continue;
-      if (el.type === 'number') {
-        body[name] = Number(el.value);
-      } else {
-        body[name] = el.value.trim();
-      }
-    }
-    body.watchEnabled = form.elements.namedItem('watchEnabled')?.checked ?? true;
-    body.watchUsePolling = form.elements.namedItem('watchUsePolling')?.checked ?? false;
-    body.autoUpgradeEnabled = form.elements.namedItem('autoUpgradeEnabled')?.checked ?? true;
-    const appKeyInput = form.elements.namedItem('appKey');
-    const appKey = appKeyInput.value.trim();
-    const maskedValue = appKeyInput.dataset.maskedValue || '';
-    const appKeyChanged = appKey && appKey !== maskedValue;
-    if (appKeyChanged) body.appKey = appKey;
+    const saveBtn = $('#btnSaveGlobal');
+    await runAction(
+      'global-save',
+      async () => {
+        setButtonLoading(saveBtn, true, '保存中…');
+        try {
+          const form = $('#globalForm');
+          const body = {};
+          const fields = [
+            'serverUrl', 'syncDirection', 'autoSyncIntervalSec', 'maxConcurrentMappingsMode', 'maxConcurrentMappings',
+            'fullReconcileIntervalSec', 'maxRequestsPerMinute', 'stateDbPath', 'downloadConcurrency', 'uploadConcurrency',
+            'managementPort', 'managementHost', 'pushDebounceMs',
+            'centralManagerUrl', 'centralHeartbeatIntervalSec', 'autoUpgradeScript', 'nodeId', 'nodeAdvertiseIp',
+          ];
+          for (const name of fields) {
+            const el = form.elements.namedItem(name);
+            if (!el) continue;
+            if (el.type === 'number') {
+              body[name] = Number(el.value);
+            } else {
+              body[name] = el.value.trim();
+            }
+          }
+          body.watchEnabled = form.elements.namedItem('watchEnabled')?.checked ?? true;
+          body.watchUsePolling = form.elements.namedItem('watchUsePolling')?.checked ?? false;
+          body.autoUpgradeEnabled = form.elements.namedItem('autoUpgradeEnabled')?.checked ?? true;
+          const appKeyInput = form.elements.namedItem('appKey');
+          const appKey = appKeyInput.value.trim();
+          const maskedValue = appKeyInput.dataset.maskedValue || '';
+          const appKeyChanged = appKey && appKey !== maskedValue;
+          if (appKeyChanged) body.appKey = appKey;
 
-    try {
-      const data = await api('PUT', '/config', body);
-      const appKeySavedText = appKeyChanged ? '全局 AppKey 已保存，页面将显示脱敏值。' : data.message;
-      toast(appKeySavedText + (data.warnings?.length ? ' · ' + data.warnings[0] : ''), 'success');
-      if (data.warnings?.length) toast(data.warnings.join(' '), 'info');
-      hasGlobalAppKey = data.hasGlobalAppKey ?? hasGlobalAppKey;
-      await loadGlobalConfig();
-    } catch (e) {
-      toast(e.message, 'error');
-    }
+          const data = await api('PUT', '/config', body);
+          const appKeySavedText = appKeyChanged ? '全局 AppKey 已保存，页面将显示脱敏值。' : data.message;
+          toast(appKeySavedText + (data.warnings?.length ? ' · ' + data.warnings[0] : ''), 'success');
+          if (data.warnings?.length) toast(data.warnings.join(' '), 'info');
+          hasGlobalAppKey = data.hasGlobalAppKey ?? hasGlobalAppKey;
+          await loadGlobalConfig();
+        } catch (e) {
+          toast(e.message, 'error');
+        } finally {
+          setButtonLoading(saveBtn, false);
+        }
+      },
+      { busyMessage: '正在保存全局配置并重载…' },
+    );
   });
 
   // ==================== Status ====================
@@ -940,32 +1105,58 @@
   // ==================== Toolbar actions ====================
 
   $('#btnRefresh').addEventListener('click', async () => {
-    try {
-      await refreshAll();
-      toast('已刷新', 'success');
-    } catch (e) {
-      toast(e.message, 'error');
-    }
+    await runAction(
+      'refresh-all',
+      async () => {
+        try {
+          await refreshAll();
+          toast('已刷新', 'success');
+        } catch (e) {
+          toast(e.message, 'error');
+        }
+      },
+      { busyMessage: '正在刷新…', blockUi: false, duplicateToast: '正在刷新，请稍候…' },
+    );
   });
 
   $('#btnReload').addEventListener('click', async () => {
-    try {
-      const data = await api('POST', '/reload');
-      toast(data.message, 'success');
-      await refreshAll();
-    } catch (e) {
-      toast(e.message, 'error');
-    }
+    const reloadBtn = $('#btnReload');
+    await runAction(
+      'reload',
+      async () => {
+        setButtonLoading(reloadBtn, true, '重载中…');
+        try {
+          const data = await api('POST', '/reload');
+          toast(data.message, 'success');
+          await refreshAll();
+        } catch (e) {
+          toast(e.message, 'error');
+        } finally {
+          setButtonLoading(reloadBtn, false);
+        }
+      },
+      { busyMessage: '正在重载配置…' },
+    );
   });
 
   $('#btnSyncAll').addEventListener('click', async () => {
-    try {
-      const data = await api('POST', '/sync');
-      toast(data.message, 'success');
-      setTimeout(refreshStatus, 1000);
-    } catch (e) {
-      toast(e.message, 'error');
-    }
+    const syncBtn = $('#btnSyncAll');
+    await runAction(
+      'sync-all',
+      async () => {
+        setButtonLoading(syncBtn, true, '触发中…');
+        try {
+          const data = await api('POST', '/sync');
+          toast(data.message, 'success');
+          setTimeout(refreshStatus, 1000);
+        } catch (e) {
+          toast(e.message, 'error');
+        } finally {
+          setButtonLoading(syncBtn, false);
+        }
+      },
+      { busyMessage: '正在触发全部同步…', blockUi: false },
+    );
   });
 
   // ==================== Init ====================

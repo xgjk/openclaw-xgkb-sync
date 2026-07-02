@@ -2,18 +2,23 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.needsPush = needsPush;
 exports.needsPull = needsPull;
+exports.resolveMappingSyncDirection = resolveMappingSyncDirection;
 exports.resolveWatchEnabled = resolveWatchEnabled;
 exports.resolvePushDebounceMs = resolvePushDebounceMs;
 exports.resolveWatchUsePolling = resolveWatchUsePolling;
 exports.formatSyncTriggerReason = formatSyncTriggerReason;
 const constants_1 = require("./constants");
 function needsPush(mapping, globalDirection) {
-    const dir = mapping.syncDirection ?? globalDirection;
+    const dir = resolveMappingSyncDirection(mapping, globalDirection);
     return dir === 'push' || dir === 'bidirectional';
 }
 function needsPull(mapping, globalDirection) {
-    const dir = mapping.syncDirection ?? globalDirection;
+    const dir = resolveMappingSyncDirection(mapping, globalDirection);
     return dir === 'pull' || dir === 'bidirectional';
+}
+/** mapping 实际生效的同步方向（未单独配置时继承全局） */
+function resolveMappingSyncDirection(mapping, globalDirection) {
+    return mapping.syncDirection ?? globalDirection;
 }
 function resolveWatchEnabled(mapping, config) {
     if (!needsPush(mapping, config.syncDirection))

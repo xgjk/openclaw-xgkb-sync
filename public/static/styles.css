@@ -193,6 +193,74 @@ body {
 
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
+.btn.is-loading {
+  position: relative;
+  pointer-events: none;
+}
+
+.app.is-busy .mapping-grid,
+.app.is-busy .toolbar,
+.app.is-busy .tabs,
+.app.is-busy #panel-global form,
+.app.is-busy .panel-head button {
+  pointer-events: none;
+}
+
+.global-busy {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(15, 20, 25, 0.72);
+  backdrop-filter: blur(2px);
+}
+
+.global-busy.hidden {
+  display: none;
+}
+
+.global-busy-card {
+  max-width: 360px;
+  padding: 24px 28px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  text-align: center;
+}
+
+.global-busy-spinner {
+  width: 36px;
+  height: 36px;
+  margin: 0 auto 14px;
+  border: 3px solid var(--border);
+  border-top-color: var(--primary);
+  border-radius: 50%;
+  animation: global-busy-spin 0.8s linear infinite;
+}
+
+.global-busy-text {
+  font-size: 0.9375rem;
+  font-weight: 600;
+}
+
+.global-busy-hint {
+  margin-top: 8px;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+
+@keyframes global-busy-spin {
+  to { transform: rotate(360deg); }
+}
+
+dialog.modal::backdrop {
+  background: rgba(0, 0, 0, 0.55);
+}
+
 .btn-primary {
   background: var(--primary);
   color: #fff;

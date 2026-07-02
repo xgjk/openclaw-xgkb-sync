@@ -31,6 +31,17 @@ export interface LocalRootDuplicateGroup {
 }
 /** 从 config.json 读取 mappings（不做 localRoot 唯一性校验，供管理 API 展示/修复） */
 export declare function readMappingsFromConfigFile(configPath: string): SyncMapping[];
+/**
+ * 将指定 mapping 的 enabled 写入 config.json（原子写盘）。
+ * 供管理 API 与运行时保护（localRoot 被删自动禁用）共用。
+ */
+export declare function setMappingEnabledInConfigFile(configPath: string, mappingId: string, enabled: boolean): {
+    ok: true;
+    changed: boolean;
+} | {
+    ok: false;
+    error: string;
+};
 export declare function normalizeLocalRootPath(localRoot: string): string;
 export declare function findDuplicateLocalRootGroups(mappings: SyncMapping[]): LocalRootDuplicateGroup[];
 /** @deprecated 仅用于诊断；配置加载与 API 写入不再抛此错误 */

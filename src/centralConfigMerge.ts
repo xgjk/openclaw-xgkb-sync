@@ -1,5 +1,6 @@
 import { configToRaw, parseSyncConfig, validateMapping, writeConfigFile } from './config';
 import { SyncConfig, SyncMapping } from './types';
+import { resolveMappingSyncDirection } from './watchHelpers';
 
 const MAPPING_IDENTITY_FIELDS: (keyof SyncMapping)[] = [
   'localRoot',
@@ -112,5 +113,13 @@ export function applyCentralConfigPatch(opts: ApplyCentralConfigOptions): SyncCo
 
 /** 心跳上报用的 reportedConfig（完整 config.json 内容，含 appKey 明文） */
 export function buildReportedConfig(config: SyncConfig): Record<string, unknown> {
-  return configToRaw(config);
+  const raw = configToRaw(config);
+  const globalDir = config.syncDirection;
+  if (Array.isArray(raw.mappings)) {
+    raw.mappings = (raw.mappings as SyncMapping[]).map((m) => ({
+      ...m,
+      syncDirection: resolveMappingSyncDirection(m, globalDir),
+    }));
+  }
+  return raw;
 }

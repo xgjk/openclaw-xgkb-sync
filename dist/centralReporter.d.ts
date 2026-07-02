@@ -1,8 +1,9 @@
 import { SyncScheduler } from './scheduler';
-import { MappingSyncRunResult } from './types';
-import { SyncConfig } from './types';
+import { MappingSyncRunResult, SyncConfig } from './types';
 export interface CentralMappingStatPayload {
     mappingId: string;
+    /** 实际生效的同步方向（含继承全局） */
+    syncDirection: SyncConfig['syncDirection'];
     lastSyncAt?: number | null;
     lastTriggerReason?: string | null;
     uploaded?: number;

@@ -29,6 +29,7 @@ export declare class SyncStateDb {
     getFileState(mappingId: string, localPath: string): FileState | undefined;
     getFileStateByRemoteId(mappingId: string, remoteFileId: string): FileState | undefined;
     getAllFileStates(mappingId: string): FileState[];
+    countFileStates(mappingId: string): number;
     upsertFileState(state: FileState): void;
     /**
      * 通过 inode 标识查找文件状态。

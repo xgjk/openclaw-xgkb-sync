@@ -9,7 +9,7 @@ export function needsPush(
   mapping: SyncMapping,
   globalDirection: SyncConfig['syncDirection'],
 ): boolean {
-  const dir = mapping.syncDirection ?? globalDirection;
+  const dir = resolveMappingSyncDirection(mapping, globalDirection);
   return dir === 'push' || dir === 'bidirectional';
 }
 
@@ -17,8 +17,16 @@ export function needsPull(
   mapping: SyncMapping,
   globalDirection: SyncConfig['syncDirection'],
 ): boolean {
-  const dir = mapping.syncDirection ?? globalDirection;
+  const dir = resolveMappingSyncDirection(mapping, globalDirection);
   return dir === 'pull' || dir === 'bidirectional';
+}
+
+/** mapping 实际生效的同步方向（未单独配置时继承全局） */
+export function resolveMappingSyncDirection(
+  mapping: SyncMapping,
+  globalDirection: SyncConfig['syncDirection'],
+): SyncConfig['syncDirection'] {
+  return mapping.syncDirection ?? globalDirection;
 }
 
 export function resolveWatchEnabled(mapping: SyncMapping, config: SyncConfig): boolean {

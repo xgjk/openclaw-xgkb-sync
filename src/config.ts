@@ -260,6 +260,63 @@ export function readMappingsFromConfigFile(configPath: string): SyncMapping[] {
   return mappingsInput.map((m, idx) => validateMapping(m, idx, absPath));
 }
 
+/**
+ * 将指定 mapping 的 enabled 写入 config.json（原子写盘）。
+ * 供管理 API 与运行时保护（localRoot 被删自动禁用）共用。
+ */
+export function setMappingEnabledInConfigFile(
+  configPath: string,
+  mappingId: string,
+  enabled: boolean,
+): { ok: true; changed: boolean } | { ok: false; error: string } {
+  const absPath = path.resolve(configPath);
+  let raw: Record<string, unknown>;
+  try {
+    raw = JSON.parse(fs.readFileSync(absPath, 'utf-8')) as Record<string, unknown>;
+  } catch (e) {
+    return {
+      ok: false,
+      error: `读取 config.json 失败: ${e instanceof Error ? e.message : String(e)}`,
+    };
+  }
+
+  const mappingsInput = Array.isArray(raw.mappings) ? [...raw.mappings] : [];
+  const idx = mappingsInput.findIndex(
+    (m) =>
+      typeof m === 'object' &&
+      m !== null &&
+      !Array.isArray(m) &&
+      (m as { mappingId?: string }).mappingId === mappingId,
+  );
+  if (idx === -1) {
+    return { ok: false, error: `未找到 mapping "${mappingId}"` };
+  }
+
+  const entry = mappingsInput[idx];
+  if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+    return { ok: false, error: `mapping "${mappingId}" 配置项格式无效` };
+  }
+
+  const record = entry as Record<string, unknown>;
+  if (record.enabled === enabled) {
+    return { ok: true, changed: false };
+  }
+
+  mappingsInput[idx] = { ...record, enabled };
+  raw.mappings = mappingsInput;
+
+  try {
+    writeConfigFile(absPath, raw);
+  } catch (e) {
+    return {
+      ok: false,
+      error: `写入 config.json 失败: ${e instanceof Error ? e.message : String(e)}`,
+    };
+  }
+
+  return { ok: true, changed: true };
+}
+
 export function normalizeLocalRootPath(localRoot: string): string {
   return path.resolve(localRoot);
 }

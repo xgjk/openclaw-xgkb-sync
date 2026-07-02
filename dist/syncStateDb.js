@@ -212,6 +212,10 @@ class SyncStateDb {
         const rows = this.db.all('SELECT * FROM sync_file_state WHERE mapping_id = ?', [mappingId]);
         return rows.map(rowToFileState);
     }
+    countFileStates(mappingId) {
+        const rows = this.db.all('SELECT COUNT(*) AS c FROM sync_file_state WHERE mapping_id = ?', [mappingId]);
+        return rows[0]?.c ?? 0;
+    }
     upsertFileState(state) {
         this.db.run(`INSERT OR REPLACE INTO sync_file_state
          (mapping_id, local_path, remote_file_id, remote_folder_id,

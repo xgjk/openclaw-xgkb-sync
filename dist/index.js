@@ -42,22 +42,11 @@ const managementApi_1 = require("./managementApi");
 const nodeIdentity_1 = require("./nodeIdentity");
 const centralReporter_1 = require("./centralReporter");
 const version_1 = require("./version");
-/** 默认日志目录（相对进程工作目录，一般为项目根） */
-const DEFAULT_LOG_DIR = 'logs';
-function formatLogDate(d = new Date()) {
-    const y = d.getFullYear();
-    const m = String(d.getMonth() + 1).padStart(2, '0');
-    const day = String(d.getDate()).padStart(2, '0');
-    return `${y}-${m}-${day}`;
-}
-/** 未指定 --log-file / 环境变量时，按日写入 logs/openclaw-sync-YYYY-MM-DD.log */
-function defaultLogFilePath() {
-    return path.resolve(DEFAULT_LOG_DIR, `openclaw-sync-${formatLogDate()}.log`);
-}
 function parseArgs() {
     const args = process.argv.slice(2);
     let configPath = './config.json';
     let logFile;
+    let logDir;
     let noLogFile = false;
     for (let i = 0; i < args.length; i++) {
         if ((args[i] === '--config' || args[i] === '-c') && args[i + 1]) {
@@ -66,27 +55,35 @@ function parseArgs() {
         else if (args[i] === '--log-file' && args[i + 1]) {
             logFile = args[++i];
         }
+        else if (args[i] === '--log-dir' && args[i + 1]) {
+            logDir = args[++i];
+        }
         else if (args[i] === '--no-log-file') {
             noLogFile = true;
         }
     }
-    return { configPath, logFile, noLogFile };
+    return { configPath, logFile, logDir, noLogFile };
 }
-function resolveLogFilePath(opts) {
+function resolveLogTeeOptions(opts) {
     if (opts.noLogFile)
         return undefined;
-    const fromEnv = process.env.OPENCLAW_SYNC_LOG_FILE?.trim();
+    const fromEnvFile = process.env.OPENCLAW_SYNC_LOG_FILE?.trim();
+    const fromEnvDir = process.env.OPENCLAW_SYNC_LOG_DIR?.trim();
     if (opts.logFileArg)
-        return path.resolve(opts.logFileArg);
-    if (fromEnv)
-        return path.resolve(fromEnv);
-    return defaultLogFilePath();
+        return { logFile: path.resolve(opts.logFileArg) };
+    if (fromEnvFile)
+        return { logFile: path.resolve(fromEnvFile) };
+    if (opts.logDirArg)
+        return { logDir: path.resolve(opts.logDirArg) };
+    if (fromEnvDir)
+        return { logDir: path.resolve(fromEnvDir) };
+    return { logDir: path.resolve(constants_1.DEFAULT_LOG_DIR) };
 }
 async function main() {
-    const { configPath, logFile: logFileArg, noLogFile } = parseArgs();
-    const logFilePath = resolveLogFilePath({ logFileArg, noLogFile });
-    if (logFilePath) {
-        (0, consoleTee_1.installConsoleTee)(logFilePath);
+    const { configPath, logFile: logFileArg, logDir: logDirArg, noLogFile } = parseArgs();
+    const logTeeOptions = resolveLogTeeOptions({ logFileArg, logDirArg, noLogFile });
+    if (logTeeOptions) {
+        (0, consoleTee_1.installConsoleTee)(logTeeOptions);
     }
     const absConfigPath = path.resolve(configPath);
     console.log(`[OpenClaw Sync] 启动中...`);
@@ -133,10 +130,16 @@ async function main() {
     }
     // 用可变引用包装 scheduler，reload 时替换其中的实例
     let centralReporter = null;
+    let handleMissingLocalRootDisable;
     function createScheduler(cfg) {
         return new scheduler_1.SyncScheduler(cfg, {
             onMappingSyncFinished: (result) => {
                 centralReporter?.reportExecutionLog(result);
+            },
+            onMissingLocalRootDisable: async (mappingId, detail) => {
+                if (handleMissingLocalRootDisable) {
+                    await handleMissingLocalRootDisable(mappingId, detail);
+                }
             },
         });
     }
@@ -175,6 +178,22 @@ async function main() {
             reloadInFlight = null;
         }
     }
+    handleMissingLocalRootDisable = async (mappingId, detail) => {
+        console.error(`[OpenClaw Sync] localRoot 缺失，自动禁用 mapping "${mappingId}": ${detail}`);
+        const writeResult = (0, config_1.setMappingEnabledInConfigFile)(absConfigPath, mappingId, false);
+        if (!writeResult.ok) {
+            throw new Error(writeResult.error);
+        }
+        if (!writeResult.changed) {
+            console.log(`[OpenClaw Sync] mapping "${mappingId}" 已是禁用状态，跳过热重载`);
+            return;
+        }
+        const reloadResult = await doReload();
+        if (!reloadResult.ok) {
+            throw new Error(`禁用后热重载失败: ${reloadResult.error}`);
+        }
+        console.log(`[OpenClaw Sync] mapping "${mappingId}" 已禁用并完成热重载`);
+    };
     // 管理 API（HTTP 服务，port=0 时自动禁用）
     const managementApi = new managementApi_1.ManagementApi({
         port: config.managementPort ?? 9090,

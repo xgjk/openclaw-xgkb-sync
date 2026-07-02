@@ -26,6 +26,7 @@ import {
   resolveWatchUsePolling,
 } from './watchHelpers';
 import { ensureMappingLocalRoot } from './ensureLocalRoot';
+import { inspectLocalRoot, hasMappingSyncHistory } from './localRootGuard';
 import { resolveSyncScopeOptions } from './pathSyncScope';
 
 let schedulerInstanceSeq = 0;
@@ -45,6 +46,14 @@ interface DoSyncResult {
   pullTouchPaths: string[];
   stats?: SyncStats;
   errorMsg?: string;
+  /** localRoot 从有到无：已挂起，待写 config 禁用 mapping */
+  shouldDisableMapping?: boolean;
+}
+
+export interface SyncSchedulerOptions {
+  onMappingSyncFinished?: (result: MappingSyncRunResult) => void;
+  /** localRoot 被删且曾有同步历史：写 config 禁用并触发热重载 */
+  onMissingLocalRootDisable?: (mappingId: string, detail: string) => Promise<void>;
 }
 
 export function resolveMaxConcurrentMappings(config: SyncConfig): number {
@@ -93,13 +102,18 @@ export class SyncScheduler {
   private running = false;
   private dbClosed = false;
   private readonly onMappingSyncFinished?: (result: MappingSyncRunResult) => void;
+  private readonly onMissingLocalRootDisable?: (
+    mappingId: string,
+    detail: string,
+  ) => Promise<void>;
+  /** localRoot 缺失后即时挂起，阻止 timer/watch 继续触发（热重载前） */
+  private readonly suspendedMappingIds = new Set<string>();
+  private readonly missingRootDisableInFlight = new Set<string>();
 
-  constructor(
-    config: SyncConfig,
-    opts?: { onMappingSyncFinished?: (result: MappingSyncRunResult) => void },
-  ) {
+  constructor(config: SyncConfig, opts?: SyncSchedulerOptions) {
     this.config = config;
     this.onMappingSyncFinished = opts?.onMappingSyncFinished;
+    this.onMissingLocalRootDisable = opts?.onMissingLocalRootDisable;
     this.maxGlobalRunningSyncs = resolveMaxConcurrentMappings(config);
     const dbPath = config.stateDbPath ?? DEFAULT_DB_PATH;
     this.db = new SyncStateDb(dbPath);
@@ -374,6 +388,13 @@ export class SyncScheduler {
   ): void {
     if (!this.running || this.dbClosed) return;
 
+    if (this.suspendedMappingIds.has(mapping.mappingId)) {
+      console.log(
+        `[Scheduler][${mapping.mappingId}] 已挂起（localRoot 缺失），跳过同步 (${formatSyncTriggerReason(reason)})`,
+      );
+      return;
+    }
+
     let state = this.runStates.get(mapping.mappingId);
     if (!state) {
       state = { isSyncing: false, pendingSync: false };
@@ -429,10 +450,15 @@ export class SyncScheduler {
 
     const startTime = Date.now();
     let syncResult: DoSyncResult = { pullTouchPaths: [] };
+    let shouldDisableMapping = false;
     try {
       syncResult = await this.doSync(mapping, reason);
+      shouldDisableMapping = syncResult.shouldDisableMapping === true;
     } finally {
-      watcher?.resumeAfterSync(syncResult.pullTouchPaths);
+      if (!shouldDisableMapping) {
+        watcher?.resumeAfterSync(syncResult.pullTouchPaths);
+      }
+
       state.isSyncing = false;
       this.activeSyncCount--;
       this.globalRunningSyncs--;
@@ -458,8 +484,14 @@ export class SyncScheduler {
         errorMsg,
       });
 
-      // 若同步期间有新触发，再执行一轮
-      if (this.running && !this.dbClosed && state.pendingSync) {
+      // 若同步期间有新触发，再执行一轮（localRoot 缺失挂起时不再排队）
+      if (
+        this.running &&
+        !this.dbClosed &&
+        state.pendingSync &&
+        !shouldDisableMapping &&
+        !this.suspendedMappingIds.has(mapping.mappingId)
+      ) {
         const pendingReason = state.pendingReason ?? 'manual';
         state.pendingSync = false;
         state.pendingReason = undefined;
@@ -467,10 +499,63 @@ export class SyncScheduler {
           `[Scheduler][${mapping.mappingId}] 执行待挂起的同步 (${formatSyncTriggerReason(pendingReason)})`,
         );
         this.scheduleDelayed(() => this.scheduleMapping(mapping, pendingReason), 0);
-      } else if (state.pendingSync) {
+      } else if (state.pendingSync || shouldDisableMapping) {
         state.pendingSync = false;
         state.pendingReason = undefined;
       }
+    }
+
+    if (shouldDisableMapping) {
+      await this.disableMappingForMissingLocalRoot(
+        mapping.mappingId,
+        syncResult.errorMsg ?? 'localRoot 缺失',
+      );
+    }
+  }
+
+  /**
+   * localRoot 从有到无：即时挂起（停 watch、清排队），随后写 config 禁用 mapping。
+   */
+  private suspendMappingForMissingLocalRoot(mappingId: string): void {
+    if (this.suspendedMappingIds.has(mappingId)) return;
+    this.suspendedMappingIds.add(mappingId);
+
+    const state = this.runStates.get(mappingId);
+    if (state) {
+      state.pendingSync = false;
+      state.pendingReason = undefined;
+    }
+
+    const watcher = this.watchers.get(mappingId);
+    if (watcher) {
+      void watcher.stop();
+      this.watchers.delete(mappingId);
+    }
+
+    console.warn(`[Scheduler][${mappingId}] 已挂起同步（localRoot 缺失）`);
+  }
+
+  private async disableMappingForMissingLocalRoot(
+    mappingId: string,
+    detail: string,
+  ): Promise<void> {
+    if (!this.onMissingLocalRootDisable) {
+      console.warn(
+        `[Scheduler][${mappingId}] localRoot 缺失但未配置 onMissingLocalRootDisable，仅保持挂起`,
+      );
+      return;
+    }
+    if (this.missingRootDisableInFlight.has(mappingId)) return;
+    this.missingRootDisableInFlight.add(mappingId);
+    try {
+      await this.onMissingLocalRootDisable(mappingId, detail);
+    } catch (e) {
+      console.error(
+        `[Scheduler][${mappingId}] 自动禁用 mapping 失败:`,
+        e instanceof Error ? e.message : String(e),
+      );
+    } finally {
+      this.missingRootDisableInFlight.delete(mappingId);
     }
   }
 
@@ -485,8 +570,36 @@ export class SyncScheduler {
     console.log(`  localRoot: ${mapping.localRoot}`);
     console.log(`  projectId: ${mapping.projectId}  remoteRootFileId: ${mapping.remoteRootFileId}`);
 
-    // 读取上次同步状态（含水位 + 已缓存的远端 ID，一次查询复用）
     const mappingState = this.db.getMappingState(mapping.mappingId);
+    const fileRecordCount = this.db.countFileStates(mapping.mappingId);
+
+    const rootCheck = inspectLocalRoot(mapping.localRoot);
+    if (!rootCheck.ok) {
+      if (
+        rootCheck.reason === 'missing' &&
+        hasMappingSyncHistory(mappingState, fileRecordCount)
+      ) {
+        this.suspendMappingForMissingLocalRoot(mapping.mappingId);
+        const msg =
+          `${rootCheck.detail}；localRoot 从有到无，已挂起同步并将自动禁用 mapping`;
+        console.error(`[Scheduler][${mapping.mappingId}] ${msg}`);
+        this.db.upsertMappingState({
+          mappingId: mapping.mappingId,
+          lastError: msg,
+        });
+        return { pullTouchPaths: [], errorMsg: msg, shouldDisableMapping: true };
+      }
+
+      const msg = `${rootCheck.detail}（已跳过本轮同步，避免误删远端知识库）`;
+      console.error(`[Scheduler][${mapping.mappingId}] ${msg}`);
+      this.db.upsertMappingState({
+        mappingId: mapping.mappingId,
+        lastError: msg,
+      });
+      return { pullTouchPaths: [], errorMsg: msg };
+    }
+
+    // 读取上次同步状态（含水位 + 已缓存的远端 ID，一次查询复用）
     const lastSyncSince =
       mappingState?.lastSyncSince != null ? mappingState.lastSyncSince : undefined;
 
@@ -577,13 +690,17 @@ export class SyncScheduler {
 
     // 仅在无系统性失败时推进水位
     if (stats.failed === 0 && stats.newSince) {
+      const guardWarning =
+        (stats.blockedRemoteDeletes ?? 0) > 0
+          ? `远端删除保护: 本地工作区异常，已阻断 ${stats.blockedRemoteDeletes} 项远端删除并改为拉取，请确认 localRoot 是否正常`
+          : null;
       this.db.upsertMappingState({
         mappingId: mapping.mappingId,
         lastSyncSince: stats.newSince,
         lastServerTime: stats.newSince,
         lastSuccessAt: Date.now(),
         ...(stats.fullScan ? { lastFullScanAt: Date.now() } : {}),
-        lastError: null,
+        lastError: guardWarning,
         lastStats: stats,
       });
       console.log(
@@ -650,6 +767,7 @@ export class SyncScheduler {
     {
       isSyncing: boolean;
       pendingSync: boolean;
+      syncSuspended: boolean;
       lastTriggerReason?: SyncTriggerReason;
       lastWatchTriggerAt?: number;
       watchActive: boolean;
@@ -661,6 +779,7 @@ export class SyncScheduler {
       {
         isSyncing: boolean;
         pendingSync: boolean;
+        syncSuspended: boolean;
         lastTriggerReason?: SyncTriggerReason;
         lastWatchTriggerAt?: number;
         watchActive: boolean;
@@ -671,6 +790,7 @@ export class SyncScheduler {
       result[mappingId] = {
         isSyncing: runState.isSyncing,
         pendingSync: runState.pendingSync,
+        syncSuspended: this.suspendedMappingIds.has(mappingId),
         lastTriggerReason: runState.lastTriggerReason,
         lastWatchTriggerAt: runState.lastWatchTriggerAt,
         watchActive: this.watchers.get(mappingId)?.isActive() ?? false,

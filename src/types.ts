@@ -678,4 +678,6 @@ export interface SyncStats {
   renamed?: number;
   /** 本轮执行的远端移动操作数（moveFile） */
   moved?: number;
+  /** 因本地工作区异常而被阻断并改为拉取的远端删除计划数 */
+  blockedRemoteDeletes?: number;
 }

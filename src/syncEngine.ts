@@ -33,6 +33,10 @@ import { pathsShadowedByAncestorFiles, sanitizePathSegment, canonicalizeRelative
 import { moveToTrash, cleanupTrash } from './trashBin';
 import { FileIndexService } from './fileIndexService';
 import { isRemotePathInSyncScope, type SyncScopeOptions } from './pathSyncScope';
+import {
+  evaluateRemoteDeleteGuard,
+  isLocalWorkspaceAnomaly,
+} from './localRootGuard';
 
 type ProgressCallback = (msg: string) => void;
 
@@ -85,6 +89,9 @@ export class SyncEngine {
   private readonly uploadConcurrency: number;
   /** pull/bidirectional 本轮 sync 写入本地的路径，供 FileWatcher resume 后 echo 过滤 */
   private pullLocalTouchPaths = new Set<string>();
+  /** 本地工作区异常时阻断远端删除（含 prune 空目录） */
+  private remoteDeleteGuardActive = false;
+  private remoteDeleteGuardReason = '';
 
   constructor(
     localFs: LocalFsAdapter,
@@ -191,6 +198,16 @@ export class SyncEngine {
     let recordMap = new Map<string, FileState>(
       this.db.getAllFileStates(this.mapping.mappingId).map((r) => [r.localPath, r]),
     );
+
+    if (isLocalWorkspaceAnomaly(localFiles.length, recordMap.size)) {
+      this.remoteDeleteGuardActive = true;
+      this.remoteDeleteGuardReason =
+        localFiles.length === 0
+          ? `本地目录为空，状态库仍有 ${recordMap.size} 条记录，已启用远端删除保护`
+          : `本地文件数异常偏少（${localFiles.length}/${recordMap.size}），已启用远端删除保护`;
+      prog(`⚠ ${this.remoteDeleteGuardReason}`);
+      console.warn(`[SyncEngine][${this.mapping.mappingId}] ${this.remoteDeleteGuardReason}`);
+    }
 
     // ── Phase 1：inode 对账（rename/move 检测）──────────────────────────────
     // 只在 push / bidirectional 方向下执行（pull 不修改远端）
@@ -349,6 +366,26 @@ export class SyncEngine {
       plans.push({ path, local, remote, record, op });
     }
 
+    const plannedDeleteRemote = plans.filter((p) => p.op === 'delete-remote').length;
+    const deleteGuard = evaluateRemoteDeleteGuard({
+      localFileCount: localFiles.length,
+      knownRecordCount: recordMap.size,
+      plannedDeleteRemoteCount: plannedDeleteRemote,
+    });
+    if (deleteGuard.active) {
+      this.remoteDeleteGuardActive = true;
+      this.remoteDeleteGuardReason = deleteGuard.reason;
+      let converted = 0;
+      for (const plan of plans) {
+        if (plan.op !== 'delete-remote') continue;
+        plan.op = deleteGuard.recoveryOp;
+        converted++;
+      }
+      this.stats.blockedRemoteDeletes = converted;
+      prog(`⚠ ${deleteGuard.reason}`);
+      console.warn(`[SyncEngine][${this.mapping.mappingId}] ${deleteGuard.reason}`);
+    }
+
     // 分类计划：删除 / 下载 / 上传
     const deletePlans = plans.filter((p) => p.op === 'delete-local' || p.op === 'delete-remote');
     const downloadPlans = plans.filter(
@@ -437,6 +474,10 @@ export class SyncEngine {
   ): Promise<void> {
     const syncDir = this.mapping.syncDirection ?? 'bidirectional';
     if (syncDir === 'pull') return;
+    if (this.remoteDeleteGuardActive) {
+      prog(`远端空目录清理已跳过（${this.remoteDeleteGuardReason || '远端删除保护生效'}）`);
+      return;
+    }
 
     const localDirEntries = cachedLocalDirs ?? await this.localFs.listDirectories();
     const localDirPaths = new Set(localDirEntries.map((d) => d.path));
@@ -1627,6 +1668,11 @@ export class SyncEngine {
   }
 
   private async doDeleteRemote(path: string, record: FileState): Promise<void> {
+    if (this.remoteDeleteGuardActive) {
+      this.stats.skipped++;
+      this.progress(`⊘ 远端删除已阻断 ${path}`);
+      return;
+    }
     const result = await this.remoteFs.deleteFile(record.remoteFileId!);
     if (!result.ok) throw new Error(result.error);
     this.db.deleteFileState(this.mapping.mappingId, path);

@@ -3,13 +3,15 @@ import { maybeScheduleAutoUpgrade } from './autoUpgrade';
 import { buildReportedConfig } from './centralConfigMerge';
 import { resolveMaxConcurrentMappings } from './scheduler';
 import { SyncScheduler } from './scheduler';
-import { MappingSyncRunResult } from './types';
-import { SyncConfig } from './types';
+import { MappingSyncRunResult, SyncConfig } from './types';
 import { DEFAULT_CENTRAL_HEARTBEAT_INTERVAL_SEC } from './constants';
 import { isNewerVersion } from './versionCompare';
+import { resolveMappingSyncDirection } from './watchHelpers';
 
 export interface CentralMappingStatPayload {
   mappingId: string;
+  /** 实际生效的同步方向（含继承全局） */
+  syncDirection: SyncConfig['syncDirection'];
   lastSyncAt?: number | null;
   lastTriggerReason?: string | null;
   uploaded?: number;
@@ -102,8 +104,14 @@ export class CentralReporter {
     const baseUrl = config.centralManagerUrl?.trim();
     if (!baseUrl || this.stopped) return;
 
+    const mapping = config.mappings.find((m) => m.mappingId === result.mappingId);
+    const syncDirection = mapping
+      ? resolveMappingSyncDirection(mapping, config.syncDirection)
+      : config.syncDirection;
+
     const body = {
       mappingId: result.mappingId,
+      syncDirection,
       triggerReason: result.triggerReason,
       startTime: result.startTime,
       endTime: result.endTime,
@@ -186,11 +194,14 @@ export class CentralReporter {
   private buildMappingStats(
     scheduler: SyncScheduler,
   ): Record<string, CentralMappingStatPayload> {
+    const config = this.opts.getConfig();
     const runStatus = scheduler.getStatus();
     const out: Record<string, CentralMappingStatPayload> = {};
 
-    for (const [mappingId, state] of Object.entries(runStatus)) {
-      const lastState = state.lastState as {
+    for (const mapping of config.mappings) {
+      const mappingId = mapping.mappingId;
+      const state = runStatus[mappingId];
+      const lastState = state?.lastState as {
         lastSuccessAt?: number | null;
         lastStats?: {
           uploaded?: number;
@@ -204,8 +215,9 @@ export class CentralReporter {
       const stats = lastState?.lastStats;
       out[mappingId] = {
         mappingId,
+        syncDirection: resolveMappingSyncDirection(mapping, config.syncDirection),
         lastSyncAt: lastState?.lastSuccessAt ?? null,
-        lastTriggerReason: state.lastTriggerReason ?? null,
+        lastTriggerReason: state?.lastTriggerReason ?? null,
         uploaded: stats?.uploaded ?? 0,
         downloaded: stats?.downloaded ?? 0,
         deleted: stats?.deleted ?? 0,

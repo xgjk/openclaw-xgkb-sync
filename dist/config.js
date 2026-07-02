@@ -40,6 +40,7 @@ exports.loadConfig = loadConfig;
 exports.loadConfigWithMeta = loadConfigWithMeta;
 exports.parseSyncConfig = parseSyncConfig;
 exports.readMappingsFromConfigFile = readMappingsFromConfigFile;
+exports.setMappingEnabledInConfigFile = setMappingEnabledInConfigFile;
 exports.normalizeLocalRootPath = normalizeLocalRootPath;
 exports.findDuplicateLocalRootGroups = findDuplicateLocalRootGroups;
 exports.assertUniqueLocalRoots = assertUniqueLocalRoots;
@@ -263,6 +264,51 @@ function readMappingsFromConfigFile(configPath) {
     const raw = JSON.parse(fs.readFileSync(absPath, 'utf-8'));
     const mappingsInput = Array.isArray(raw.mappings) ? raw.mappings : [];
     return mappingsInput.map((m, idx) => validateMapping(m, idx, absPath));
+}
+/**
+ * 将指定 mapping 的 enabled 写入 config.json（原子写盘）。
+ * 供管理 API 与运行时保护（localRoot 被删自动禁用）共用。
+ */
+function setMappingEnabledInConfigFile(configPath, mappingId, enabled) {
+    const absPath = path.resolve(configPath);
+    let raw;
+    try {
+        raw = JSON.parse(fs.readFileSync(absPath, 'utf-8'));
+    }
+    catch (e) {
+        return {
+            ok: false,
+            error: `读取 config.json 失败: ${e instanceof Error ? e.message : String(e)}`,
+        };
+    }
+    const mappingsInput = Array.isArray(raw.mappings) ? [...raw.mappings] : [];
+    const idx = mappingsInput.findIndex((m) => typeof m === 'object' &&
+        m !== null &&
+        !Array.isArray(m) &&
+        m.mappingId === mappingId);
+    if (idx === -1) {
+        return { ok: false, error: `未找到 mapping "${mappingId}"` };
+    }
+    const entry = mappingsInput[idx];
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+        return { ok: false, error: `mapping "${mappingId}" 配置项格式无效` };
+    }
+    const record = entry;
+    if (record.enabled === enabled) {
+        return { ok: true, changed: false };
+    }
+    mappingsInput[idx] = { ...record, enabled };
+    raw.mappings = mappingsInput;
+    try {
+        writeConfigFile(absPath, raw);
+    }
+    catch (e) {
+        return {
+            ok: false,
+            error: `写入 config.json 失败: ${e instanceof Error ? e.message : String(e)}`,
+        };
+    }
+    return { ok: true, changed: true };
 }
 function normalizeLocalRootPath(localRoot) {
     return path.resolve(localRoot);

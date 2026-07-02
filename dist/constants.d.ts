@@ -123,6 +123,12 @@ export declare const DEFAULT_SYNC_DOT_FILES = false;
 export declare const RECOMMENDED_DOT_DIR_EXCLUDE_PATTERNS: readonly ["**/.git/**", "**/.obsidian/**", "**/.vscode/**", "**/.idea/**", "**/.cache/**", "**/.tmp/**"];
 /** 默认状态库文件路径 */
 export declare const DEFAULT_DB_PATH = "./openclaw-sync-state.db";
+/** 默认日志目录（相对进程工作目录） */
+export declare const DEFAULT_LOG_DIR = "logs";
+/** 默认日志文件名前缀（实际为 `{baseName}-YYYY-MM-DD.log`） */
+export declare const DEFAULT_LOG_BASE_NAME = "openclaw-sync";
+/** 单个日志文件大小上限（字节），超出后同日递增段号 `.1`、`.2`… */
+export declare const MAX_LOG_FILE_BYTES: number;
 /** 默认知识库 Open API 根地址（生产环境） */
 export declare const DEFAULT_SERVER_URL = "https://sg-al-cwork-web.mediportal.com.cn/open-api/";
 /** 默认自动同步间隔（秒） */
@@ -161,6 +167,12 @@ export declare const WATCH_AWAIT_WRITE_STABILITY_MS = 300;
 export declare const WATCH_AWAIT_WRITE_POLL_MS = 100;
 /** pull 写入结束后 ignoreSet 额外保留时间（毫秒），防止 resume 后 chokidar 迟到的 echo */
 export declare const WATCH_PULL_IGNORE_TAIL_MS = 200;
+/** 状态库至少有多少条文件记录时，才启用「本地骤降」远端删除保护 */
+export declare const LOCAL_ROOT_GUARD_MIN_KNOWN_FILES = 20;
+/** 单轮计划中 delete-remote 达到此数量且本地骤降时，触发保护并改为拉取 */
+export declare const MASS_DELETE_REMOTE_BLOCK_COUNT = 10;
+/** 本地文件数相对状态库记录降幅超过此比例时，视为工作区异常（与 BLOCK_COUNT 联用） */
+export declare const MASS_DELETE_LOCAL_DROP_RATIO = 0.8;
 /**
  * 清理知识库返回的正文（去除分页页脚等）。
  * raw 为 null/undefined 时返回空字符串。

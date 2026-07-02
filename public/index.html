@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>OpenClaw 同步管理</title>
-  <link rel="stylesheet" href="/static/styles.css?v=central-manage-ui-1" />
+  <link rel="stylesheet" href="/static/styles.css?v=ui-busy-1" />
 </head>
 <body>
   <div class="app">
@@ -31,6 +31,13 @@
     </div>
 
     <div class="toast-container" id="toastContainer"></div>
+    <div class="global-busy hidden" id="globalBusy" aria-live="polite" aria-busy="false">
+      <div class="global-busy-card">
+        <div class="global-busy-spinner" aria-hidden="true"></div>
+        <p class="global-busy-text" id="globalBusyText">处理中…</p>
+        <p class="global-busy-hint">保存映射或切换启用状态会重载配置，同步进行中时可能需要等待数十秒</p>
+      </div>
+    </div>
 
     <nav class="tabs">
       <button type="button" class="tab active" data-tab="mappings">同步映射</button>
@@ -340,11 +347,11 @@
       </div>
       <div class="modal-footer">
         <button type="button" class="btn btn-secondary" id="btnCancelModal">取消</button>
-        <button type="submit" class="btn btn-primary">保存</button>
+        <button type="submit" class="btn btn-primary" id="btnSaveMapping">保存</button>
       </div>
     </form>
   </dialog>
 
-  <script src="/static/app.js?v=central-manage-ui-1"></script>
+  <script src="/static/app.js?v=ui-busy-1"></script>
 </body>
 </html>

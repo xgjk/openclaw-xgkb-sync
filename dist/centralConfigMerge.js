@@ -4,6 +4,7 @@ exports.mergeCentralConfigPatch = mergeCentralConfigPatch;
 exports.applyCentralConfigPatch = applyCentralConfigPatch;
 exports.buildReportedConfig = buildReportedConfig;
 const config_1 = require("./config");
+const watchHelpers_1 = require("./watchHelpers");
 const MAPPING_IDENTITY_FIELDS = [
     'localRoot',
     'remoteRootFolderPath',
@@ -76,6 +77,14 @@ function applyCentralConfigPatch(opts) {
 }
 /** 心跳上报用的 reportedConfig（完整 config.json 内容，含 appKey 明文） */
 function buildReportedConfig(config) {
-    return (0, config_1.configToRaw)(config);
+    const raw = (0, config_1.configToRaw)(config);
+    const globalDir = config.syncDirection;
+    if (Array.isArray(raw.mappings)) {
+        raw.mappings = raw.mappings.map((m) => ({
+            ...m,
+            syncDirection: (0, watchHelpers_1.resolveMappingSyncDirection)(m, globalDir),
+        }));
+    }
+    return raw;
 }
 //# sourceMappingURL=centralConfigMerge.js.map

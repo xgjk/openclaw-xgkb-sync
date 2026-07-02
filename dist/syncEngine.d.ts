@@ -24,6 +24,9 @@ export declare class SyncEngine {
     private readonly uploadConcurrency;
     /** pull/bidirectional 本轮 sync 写入本地的路径，供 FileWatcher resume 后 echo 过滤 */
     private pullLocalTouchPaths;
+    /** 本地工作区异常时阻断远端删除（含 prune 空目录） */
+    private remoteDeleteGuardActive;
+    private remoteDeleteGuardReason;
     constructor(localFs: LocalFsAdapter, remoteFs: RemoteFsAdapter, db: SyncStateDb, mapping: SyncMapping, opts?: {
         downloadConcurrency?: number;
         uploadConcurrency?: number;

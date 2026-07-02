@@ -1,7 +1,7 @@
 import * as path from 'path';
 import { installConsoleTee } from './consoleTee';
-import { DEFAULT_MANAGEMENT_HOST, DEFAULT_MANAGEMENT_PORT } from './constants';
-import { loadConfigWithMeta } from './config';
+import { DEFAULT_MANAGEMENT_HOST, DEFAULT_MANAGEMENT_PORT, DEFAULT_LOG_DIR } from './constants';
+import { loadConfigWithMeta, setMappingEnabledInConfigFile } from './config';
 import { SyncScheduler } from './scheduler';
 import { ManagementApi, ReloadResult } from './managementApi';
 import { describeNodeIdentity, NodeIdentityError } from './nodeIdentity';
@@ -9,25 +9,11 @@ import { CentralReporter, resolveProjectRoot } from './centralReporter';
 import { APP_VERSION } from './version';
 import { SyncConfig } from './types';
 
-/** 默认日志目录（相对进程工作目录，一般为项目根） */
-const DEFAULT_LOG_DIR = 'logs';
-
-function formatLogDate(d = new Date()): string {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
-}
-
-/** 未指定 --log-file / 环境变量时，按日写入 logs/openclaw-sync-YYYY-MM-DD.log */
-function defaultLogFilePath(): string {
-  return path.resolve(DEFAULT_LOG_DIR, `openclaw-sync-${formatLogDate()}.log`);
-}
-
-function parseArgs(): { configPath: string; logFile?: string; noLogFile?: boolean } {
+function parseArgs(): { configPath: string; logFile?: string; logDir?: string; noLogFile?: boolean } {
   const args = process.argv.slice(2);
   let configPath = './config.json';
   let logFile: string | undefined;
+  let logDir: string | undefined;
   let noLogFile = false;
 
   for (let i = 0; i < args.length; i++) {
@@ -35,30 +21,36 @@ function parseArgs(): { configPath: string; logFile?: string; noLogFile?: boolea
       configPath = args[++i];
     } else if (args[i] === '--log-file' && args[i + 1]) {
       logFile = args[++i];
+    } else if (args[i] === '--log-dir' && args[i + 1]) {
+      logDir = args[++i];
     } else if (args[i] === '--no-log-file') {
       noLogFile = true;
     }
   }
 
-  return { configPath, logFile, noLogFile };
+  return { configPath, logFile, logDir, noLogFile };
 }
 
-function resolveLogFilePath(opts: {
+function resolveLogTeeOptions(opts: {
   logFileArg?: string;
+  logDirArg?: string;
   noLogFile?: boolean;
-}): string | undefined {
+}): Parameters<typeof installConsoleTee>[0] | undefined {
   if (opts.noLogFile) return undefined;
-  const fromEnv = process.env.OPENCLAW_SYNC_LOG_FILE?.trim();
-  if (opts.logFileArg) return path.resolve(opts.logFileArg);
-  if (fromEnv) return path.resolve(fromEnv);
-  return defaultLogFilePath();
+  const fromEnvFile = process.env.OPENCLAW_SYNC_LOG_FILE?.trim();
+  const fromEnvDir = process.env.OPENCLAW_SYNC_LOG_DIR?.trim();
+  if (opts.logFileArg) return { logFile: path.resolve(opts.logFileArg) };
+  if (fromEnvFile) return { logFile: path.resolve(fromEnvFile) };
+  if (opts.logDirArg) return { logDir: path.resolve(opts.logDirArg) };
+  if (fromEnvDir) return { logDir: path.resolve(fromEnvDir) };
+  return { logDir: path.resolve(DEFAULT_LOG_DIR) };
 }
 
 async function main() {
-  const { configPath, logFile: logFileArg, noLogFile } = parseArgs();
-  const logFilePath = resolveLogFilePath({ logFileArg, noLogFile });
-  if (logFilePath) {
-    installConsoleTee(logFilePath);
+  const { configPath, logFile: logFileArg, logDir: logDirArg, noLogFile } = parseArgs();
+  const logTeeOptions = resolveLogTeeOptions({ logFileArg, logDirArg, noLogFile });
+  if (logTeeOptions) {
+    installConsoleTee(logTeeOptions);
   }
 
   const absConfigPath = path.resolve(configPath);
@@ -117,11 +109,19 @@ async function main() {
 
   // 用可变引用包装 scheduler，reload 时替换其中的实例
   let centralReporter: CentralReporter | null = null;
+  let handleMissingLocalRootDisable:
+    | ((mappingId: string, detail: string) => Promise<void>)
+    | undefined;
 
   function createScheduler(cfg: SyncConfig): SyncScheduler {
     return new SyncScheduler(cfg, {
       onMappingSyncFinished: (result) => {
         centralReporter?.reportExecutionLog(result);
+      },
+      onMissingLocalRootDisable: async (mappingId, detail) => {
+        if (handleMissingLocalRootDisable) {
+          await handleMissingLocalRootDisable(mappingId, detail);
+        }
       },
     });
   }
@@ -163,6 +163,25 @@ async function main() {
       reloadInFlight = null;
     }
   }
+
+  handleMissingLocalRootDisable = async (mappingId: string, detail: string) => {
+    console.error(
+      `[OpenClaw Sync] localRoot 缺失，自动禁用 mapping "${mappingId}": ${detail}`,
+    );
+    const writeResult = setMappingEnabledInConfigFile(absConfigPath, mappingId, false);
+    if (!writeResult.ok) {
+      throw new Error(writeResult.error);
+    }
+    if (!writeResult.changed) {
+      console.log(`[OpenClaw Sync] mapping "${mappingId}" 已是禁用状态，跳过热重载`);
+      return;
+    }
+    const reloadResult = await doReload();
+    if (!reloadResult.ok) {
+      throw new Error(`禁用后热重载失败: ${reloadResult.error}`);
+    }
+    console.log(`[OpenClaw Sync] mapping "${mappingId}" 已禁用并完成热重载`);
+  };
 
   // 管理 API（HTTP 服务，port=0 时自动禁用）
   const managementApi = new ManagementApi({

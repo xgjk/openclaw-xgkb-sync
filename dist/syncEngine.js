@@ -41,6 +41,7 @@ const pathSanitize_1 = require("./pathSanitize");
 const trashBin_1 = require("./trashBin");
 const fileIndexService_1 = require("./fileIndexService");
 const pathSyncScope_1 = require("./pathSyncScope");
+const localRootGuard_1 = require("./localRootGuard");
 /**
  * 核心同步引擎（OpenClaw 版）
  * 与 Obsidian 版的主要差异：
@@ -62,6 +63,9 @@ class SyncEngine {
     uploadConcurrency;
     /** pull/bidirectional 本轮 sync 写入本地的路径，供 FileWatcher resume 后 echo 过滤 */
     pullLocalTouchPaths = new Set();
+    /** 本地工作区异常时阻断远端删除（含 prune 空目录） */
+    remoteDeleteGuardActive = false;
+    remoteDeleteGuardReason = '';
     constructor(localFs, remoteFs, db, mapping, opts) {
         this.localFs = localFs;
         this.remoteFs = remoteFs;
@@ -142,6 +146,15 @@ class SyncEngine {
         let localMap = new Map(localFiles.map((f) => [f.path, f]));
         // 一次性批量加载所有文件状态，供决策循环 O(1) 查找，避免 N 次独立 SQLite 查询
         let recordMap = new Map(this.db.getAllFileStates(this.mapping.mappingId).map((r) => [r.localPath, r]));
+        if ((0, localRootGuard_1.isLocalWorkspaceAnomaly)(localFiles.length, recordMap.size)) {
+            this.remoteDeleteGuardActive = true;
+            this.remoteDeleteGuardReason =
+                localFiles.length === 0
+                    ? `本地目录为空，状态库仍有 ${recordMap.size} 条记录，已启用远端删除保护`
+                    : `本地文件数异常偏少（${localFiles.length}/${recordMap.size}），已启用远端删除保护`;
+            prog(`⚠ ${this.remoteDeleteGuardReason}`);
+            console.warn(`[SyncEngine][${this.mapping.mappingId}] ${this.remoteDeleteGuardReason}`);
+        }
         // ── Phase 1：inode 对账（rename/move 检测）──────────────────────────────
         // 只在 push / bidirectional 方向下执行（pull 不修改远端）
         const syncDir = this.mapping.syncDirection ?? 'bidirectional';
@@ -258,6 +271,26 @@ class SyncEngine {
             const op = this.decide(path, local, remote, record);
             plans.push({ path, local, remote, record, op });
         }
+        const plannedDeleteRemote = plans.filter((p) => p.op === 'delete-remote').length;
+        const deleteGuard = (0, localRootGuard_1.evaluateRemoteDeleteGuard)({
+            localFileCount: localFiles.length,
+            knownRecordCount: recordMap.size,
+            plannedDeleteRemoteCount: plannedDeleteRemote,
+        });
+        if (deleteGuard.active) {
+            this.remoteDeleteGuardActive = true;
+            this.remoteDeleteGuardReason = deleteGuard.reason;
+            let converted = 0;
+            for (const plan of plans) {
+                if (plan.op !== 'delete-remote')
+                    continue;
+                plan.op = deleteGuard.recoveryOp;
+                converted++;
+            }
+            this.stats.blockedRemoteDeletes = converted;
+            prog(`⚠ ${deleteGuard.reason}`);
+            console.warn(`[SyncEngine][${this.mapping.mappingId}] ${deleteGuard.reason}`);
+        }
         // 分类计划：删除 / 下载 / 上传
         const deletePlans = plans.filter((p) => p.op === 'delete-local' || p.op === 'delete-remote');
         const downloadPlans = plans.filter((p) => p.op === 'download-new' || p.op === 'download-update');
@@ -334,6 +367,10 @@ class SyncEngine {
         const syncDir = this.mapping.syncDirection ?? 'bidirectional';
         if (syncDir === 'pull')
             return;
+        if (this.remoteDeleteGuardActive) {
+            prog(`远端空目录清理已跳过（${this.remoteDeleteGuardReason || '远端删除保护生效'}）`);
+            return;
+        }
         const localDirEntries = cachedLocalDirs ?? await this.localFs.listDirectories();
         const localDirPaths = new Set(localDirEntries.map((d) => d.path));
         // 补全/更新已有 folder 记录的 inode（确保下次 rename 检测有数据可用）
@@ -1365,6 +1402,11 @@ class SyncEngine {
         void record;
     }
     async doDeleteRemote(path, record) {
+        if (this.remoteDeleteGuardActive) {
+            this.stats.skipped++;
+            this.progress(`⊘ 远端删除已阻断 ${path}`);
+            return;
+        }
         const result = await this.remoteFs.deleteFile(record.remoteFileId);
         if (!result.ok)
             throw new Error(result.error);

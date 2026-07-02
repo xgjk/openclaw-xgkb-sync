@@ -248,6 +248,14 @@ export class SyncStateDb {
     return rows.map(rowToFileState);
   }
 
+  countFileStates(mappingId: string): number {
+    const rows = this.db.all(
+      'SELECT COUNT(*) AS c FROM sync_file_state WHERE mapping_id = ?',
+      [mappingId],
+    ) as unknown as Array<{ c: number }>;
+    return rows[0]?.c ?? 0;
+  }
+
   upsertFileState(state: FileState): void {
     this.db.run(
       `INSERT OR REPLACE INTO sync_file_state
