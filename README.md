@@ -472,7 +472,7 @@ curl -X POST http://10.0.0.5:9090/sync
 
 ## 生产部署建议
 
-部署形态（Linux / macOS / Windows 裸机、Docker Compose、开机自启与升级）见 **[docs/INSTALL_AND_UPDATE.md § 部署形态速查](./docs/INSTALL_AND_UPDATE.md#七部署形态速查linux--macos--windows--docker)**。Docker 快速启动：`docker compose up -d --build`。
+部署形态（Linux / macOS / Windows 开机自启与升级）见 **[deploy/README.md](./deploy/README.md)** 与 **[docs/INSTALL_AND_UPDATE.md § 六](./docs/INSTALL_AND_UPDATE.md#六开机自启与升级linux--macos--windows)**。Docker 为可选项，见安装文档 § 七。
 
 程序仅向 **stdout/stderr** 打日志，不配置时不会自动生成日志文件。
 

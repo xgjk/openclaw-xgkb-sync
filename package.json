@@ -1,6 +1,6 @@
 {
   "name": "openclaw-xgkb-sync",
-  "version": "1.1.6",
+  "version": "1.1.7",
   "description": "OpenClaw 节点与玄关知识库文件双向同步 Agent",
   "main": "dist/index.js",
   "scripts": {

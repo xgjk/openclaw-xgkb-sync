@@ -24,6 +24,7 @@ services:
       # - /path/on/host/.openclaw/workspace:/workspace:rw
     working_dir: /app
     environment:
+      # production 仅影响运行时；entrypoint 内 npm install 会显式 --include=dev 以安装 typescript
       NODE_ENV: production
       OPENCLAW_DEPLOYMENT: docker
       OPENCLAW_SYNC_CONFIG: /app/config.json

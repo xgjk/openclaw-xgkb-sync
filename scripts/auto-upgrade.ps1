@@ -8,6 +8,9 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $Root
 
+$ServiceName = "openclaw-xgkb-sync"
+$TaskName = "OpenClawXgkbSync"
+
 $LogDir = Join-Path $Root "logs"
 if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir | Out-Null }
 $LogFile = Join-Path $LogDir "auto-upgrade.log"
@@ -76,19 +79,64 @@ function Start-SyncDetached([string]$NodeBin, [int]$Port) {
   }
 }
 
+function Get-RuntimeMode {
+  $pm2 = Get-Command pm2 -ErrorAction SilentlyContinue
+  if ($pm2) {
+    $desc = pm2 describe $ServiceName 2>$null
+    if ($LASTEXITCODE -eq 0) { return "pm2" }
+  }
+  $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+  if ($task) { return "scheduled-task" }
+  return "port"
+}
+
+function Stop-ServiceRuntime([int]$Port) {
+  switch ($script:RuntimeMode) {
+    "pm2" {
+      pm2 stop $ServiceName 2>$null
+      Start-Sleep -Seconds 2
+    }
+    "scheduled-task" {
+      Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+      Stop-SyncByPort $Port
+    }
+    default {
+      Stop-SyncByPort $Port
+    }
+  }
+}
+
+function Start-ServiceRuntime([string]$NodeBin, [int]$Port) {
+  switch ($script:RuntimeMode) {
+    "pm2" {
+      pm2 restart $ServiceName
+      if ($LASTEXITCODE -ne 0) {
+        pm2 start dist/index.js --name $ServiceName -- --config config.json
+      }
+    }
+    "scheduled-task" {
+      Start-ScheduledTask -TaskName $TaskName
+      Start-Sleep -Seconds 4
+      $listening = netstat -ano | Select-String ":$Port\s+.*LISTENING"
+      if (-not $listening) {
+        throw "scheduled task started but port $Port not listening"
+      }
+    }
+    default {
+      Start-SyncDetached $NodeBin $Port
+    }
+  }
+}
+
 try {
   Log "======== upgrade start current=$CurrentVersion target=$TargetVersion root=$Root ========"
   $nodeBin = Resolve-NodeBin
   Log "using node: $nodeBin"
   $mgmtPort = Get-ManagementPort $nodeBin
 
-  $pm2Cmd = Get-Command pm2 -ErrorAction SilentlyContinue
-  if ($pm2Cmd) {
-    pm2 stop openclaw-xgkb-sync 2>$null
-    Start-Sleep -Seconds 2
-  } else {
-    Stop-SyncByPort $mgmtPort
-  }
+  $script:RuntimeMode = Get-RuntimeMode
+  Log "detected runtime: $RuntimeMode"
+  Stop-ServiceRuntime $mgmtPort
 
   git fetch --tags origin
   $tag = "v$TargetVersion"
@@ -101,20 +149,12 @@ try {
     if ($LASTEXITCODE -ne 0) { git pull origin master }
   }
 
-  npm install
+  npm install --include=dev
   if ($LASTEXITCODE -ne 0) { throw "npm install failed" }
   npm run build
   if ($LASTEXITCODE -ne 0) { throw "npm run build failed" }
 
-  $pm2 = Get-Command pm2 -ErrorAction SilentlyContinue
-  if ($pm2) {
-    pm2 restart openclaw-xgkb-sync
-    if ($LASTEXITCODE -ne 0) {
-      pm2 start dist/index.js --name openclaw-xgkb-sync -- --config config.json
-    }
-  } else {
-    Start-SyncDetached $nodeBin $mgmtPort
-  }
+  Start-ServiceRuntime $nodeBin $mgmtPort
 
   Log "======== upgrade finished ========"
 } catch {

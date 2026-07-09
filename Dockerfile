@@ -5,10 +5,8 @@ RUN apk add --no-cache git bash lsof wget
 
 WORKDIR /app
 
-COPY scripts/docker-entrypoint.sh /usr/local/bin/openclaw-sync-entrypoint.sh
-RUN chmod +x /usr/local/bin/openclaw-sync-entrypoint.sh
-
 EXPOSE 9090
 
-ENTRYPOINT ["/usr/local/bin/openclaw-sync-entrypoint.sh"]
+# 入口脚本从挂载的 /app/scripts 读取，git pull 后 restart 即可生效（无需每次重建镜像）
+ENTRYPOINT ["/bin/bash", "/app/scripts/docker-entrypoint.sh"]
 CMD ["start"]

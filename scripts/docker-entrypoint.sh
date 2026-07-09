@@ -8,8 +8,9 @@ CONFIG="${OPENCLAW_SYNC_CONFIG:-/app/config.json}"
 
 install_and_build() {
   if [[ "${OPENCLAW_SYNC_SKIP_NPM_INSTALL:-}" != "1" ]]; then
-    echo "[docker-entrypoint] npm install..."
-    npm install --silent
+    echo "[docker-entrypoint] npm install (含 devDependencies，build 需要 typescript)..."
+    # compose 中 NODE_ENV=production 会使默认 npm install 跳过 devDependencies，导致 tsc 不存在
+    npm install --silent --include=dev
   fi
   echo "[docker-entrypoint] npm run build..."
   npm run build

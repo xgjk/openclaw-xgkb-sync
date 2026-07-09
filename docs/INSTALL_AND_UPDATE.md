@@ -87,7 +87,7 @@ npm install
 
 ### 3. 编译并启动
 
-**生产运行（推荐）：**
+**生产运行（推荐）：** 完成 Web 配置后，执行平台安装脚本实现**开机自启**（见 [deploy/README.md](../deploy/README.md)）。
 
 ```bash
 npm run build
@@ -270,49 +270,90 @@ npm start
 
 ---
 
-## 六、后台常驻（可选）
+## 六、开机自启与升级（Linux / macOS / Windows）
 
-本仓库未内置 systemd/PM2 配置，可按环境自选。完整对比见下节 **「部署形态速查」**。
+推荐在首次 `npm run build` 并完成 Web 控制台基础配置后，执行 **一条** 平台安装命令。完整步骤见 **[docs/DEPLOY_OPS_SOP.md](./DEPLOY_OPS_SOP.md)**（运维上线 SOP）与 [deploy/README.md](../deploy/README.md)。
 
-**PM2 示例：**
+| 平台 | 一键安装（注册自启 + 启动服务） |
+|------|--------------------------------|
+| **Linux** | `bash deploy/linux/install.sh` |
+| **macOS** | `bash deploy/macos/install.sh` |
+| **Windows** | `powershell -ExecutionPolicy Bypass -File deploy\windows\install-autostart.ps1` |
+
+安装脚本会：`npm install --include=dev` → `build` → 注册 systemd / LaunchAgent / 计划任务 → 健康检查。
+
+### 开机自启机制
+
+| 平台 | 机制 | 说明 |
+|------|------|------|
+| Linux | **systemd 用户服务** | `~/.config/systemd/user/openclaw-xgkb-sync.service`；`loginctl enable-linger` 支持未登录自启 |
+| macOS | **LaunchAgent** | `~/Library/LaunchAgents/com.openclaw.xgkb-sync.plist`；登录后自启，`KeepAlive` 崩溃拉起 |
+| Windows | **任务计划程序** | 任务名 `OpenClawXgkbSync`，**用户登录时**启动 |
+
+### 手动升级
+
+```bash
+cd openclaw-xgkb-sync
+git pull origin main
+npm install --include=dev
+npm run build
+```
+
+然后按平台重启：
+
+```bash
+# Linux
+systemctl --user restart openclaw-xgkb-sync
+
+# macOS
+launchctl kickstart -k gui/$(id -u)/com.openclaw.xgkb-sync
+
+# Windows PowerShell
+Stop-ScheduledTask -TaskName OpenClawXgkbSync; Start-ScheduledTask -TaskName OpenClawXgkbSync
+```
+
+`config.json` 与 `openclaw-sync-state.db` 不会被 `git pull` 覆盖。
+
+### 自动升级（中心心跳）
+
+在 `config.json` 保持 `autoUpgradeEnabled: true`（默认）时，节点发现新版本且**同步空闲**后，会 detached 执行：
+
+- Linux / macOS：`scripts/auto-upgrade.sh`
+- Windows：`scripts/auto-upgrade.ps1`
+
+脚本会识别 **pm2 → systemd（用户/系统）→ launchd → Windows 计划任务**，否则按管理端口停进程并后台拉起。日志：`logs/auto-upgrade.log`。
+
+前提：git clone 安装、私有仓库认证已打通、Nacos `openclaw.sync.latest-version` 已更新。详见 [central-manager-node-identity-and-auto-upgrade.md](./central-manager-node-identity-and-auto-upgrade.md)。
+
+### 可选：PM2（三平台通用）
 
 ```bash
 npm run build
 pm2 start dist/index.js --name openclaw-xgkb-sync -- --config config.json
 pm2 save
+pm2 startup   # 按提示执行生成的命令
 ```
 
-更新时：
+自动升级脚本会优先 `pm2 restart openclaw-xgkb-sync`。
+
+### 日志落盘
+
+启动后默认写入 `logs/openclaw-sync-YYYY-MM-DD.log`；安装脚本另将服务 stdout 写入 `logs/service.log`（或 macOS `~/Library/Logs/`）。
 
 ```bash
-git pull && npm install && npm run build
-pm2 restart openclaw-xgkb-sync
-```
-
-**日志落盘（默认已开启）：**
-
-启动后自动写入项目下 `logs/openclaw-sync-YYYY-MM-DD.log`（与控制台同时输出，便于排查 KB 接口参数）。
-
-```bash
-# 自定义路径
 node dist/index.js --config config.json --log-file ./logs/my-test.log
-
-# 仅控制台、不写文件
-node dist/index.js --no-log-file
+node dist/index.js --no-log-file   # 仅控制台
 ```
-
-环境变量：`OPENCLAW_SYNC_LOG_FILE=./logs/custom.log`（优先级高于默认路径，低于 `--log-file`）
 
 ---
 
-## 七、部署形态速查（Linux / macOS / Windows / Docker）
+## 七、Docker 部署（可选）
 
-| 形态 | 开机自启 | 推荐升级方式 | 自动升级（心跳） |
-|------|----------|--------------|------------------|
-| **Linux 裸机** | systemd 或 PM2 | `git pull` + `npm install` + `npm run build` + 重启进程 | 默认 `scripts/auto-upgrade.sh` + pm2/systemd |
-| **macOS 裸机** | launchd 或 PM2 | 同上 | 默认 `scripts/auto-upgrade.sh` |
-| **Windows 裸机** | 任务计划程序或 PM2 | `git pull` + `npm install` + `npm run build` + 重启 | 默认 `scripts/auto-upgrade.ps1` |
-| **Docker Compose** | `restart: unless-stopped` + 宿主机 Docker 开机自启 | 宿主机 `git pull` + `docker compose up -d --build` | `OPENCLAW_DEPLOYMENT=docker` 时默认 `scripts/auto-upgrade.docker.sh` |
+若暂不使用 Docker，可跳过本节。需要容器化时见 `docker-compose.yml` 与下文简要说明。
+
+| 形态 | 开机自启 | 推荐升级方式 | 自动升级 |
+|------|----------|--------------|----------|
+| **Docker Compose** | `restart: unless-stopped` + Docker 开机自启 | `git pull` + `docker compose up -d --build` | `scripts/auto-upgrade.docker.sh` |
 
 ### Docker Compose 部署
 
@@ -447,6 +488,7 @@ docker compose down
 | Docker 内 nodeId 启动失败 | 在 `config.json` 配置 `nodeAdvertiseIp` 为宿主机内网 IP |
 | Docker 升级后仍是旧版本 | 确认宿主机 `git pull` 成功，再执行 `docker compose up -d --build` |
 | Docker 同步目录无文件 | 检查 `localRoot` 是否为**容器内**路径，且 compose 已挂载宿主机工作区 |
+| Docker 启动 `tsc: not found` | `NODE_ENV=production` 导致未装 devDependencies；使用 1.1.7+ 入口脚本，或执行 `docker compose down` 后删掉 `openclaw_sync_node_modules` 卷再 `up --build` |
 | 改了 `config.json` 未生效 | 控制台「重载配置」或 `POST /reload`（`managementPort` / `managementHost` 除外，需重启） |
 | Pull 端无 `.openclaw-sync-map.json` | Push 端是否开启 `enableFileIndex` 且 sync 成功；Pull 端是否开启且方向为 `pull`/`bidirectional` |
 | 索引 publish 失败 | 日志搜 `[FileIndex]`；主 sync 成功不影响水位，下轮 hash 未更新会自动重试 |
@@ -460,5 +502,7 @@ docker compose down
 - [README.md](../README.md) — 功能说明与配置参考（含 [映射索引](#映射索引文件-enablefileindex)）
 - [sync-logic-reference-for-obsidian.md](./sync-logic-reference-for-obsidian.md) — Obsidian 插件对照；§11 映射索引消费约定
 - [MANAGEMENT_API.md](./MANAGEMENT_API.md) — HTTP API（脚本/自动化）
+- [DEPLOY_OPS_SOP.md](./DEPLOY_OPS_SOP.md) — **运维节点上线 SOP**（开机自启、验收、升级）
+- [deploy/README.md](../deploy/README.md) — 各平台一键安装脚本
 - [config.example.json](../config.example.json) — 配置字段说明（模板，安装时可不复制）
 - [temp/方案一-映射文件独立同步-评估与执行计划.md](./temp/方案一-映射文件独立同步-评估与执行计划.md) — 索引方案设计与选型对比

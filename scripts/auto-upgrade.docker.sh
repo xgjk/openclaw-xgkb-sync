@@ -79,7 +79,7 @@ else
   git pull origin main || git pull origin master
 fi
 
-npm install
+npm install --include=dev
 npm run build
 
 if stop_sync_by_port "$MGMT_PORT"; then

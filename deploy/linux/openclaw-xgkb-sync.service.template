@@ -1,0 +1,15 @@
+[Unit]
+Description=OpenClaw XGKB Sync Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@ROOT@
+ExecStart=@NODE@ @ROOT@/dist/index.js --config @ROOT@/config.json
+Restart=on-failure
+RestartSec=10
+Environment=OPENCLAW_SYNC_LOG_FILE=@ROOT@/logs/service.log
+
+[Install]
+WantedBy=default.target

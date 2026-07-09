@@ -8,6 +8,11 @@ CURRENT="${2:-}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+SERVICE_NAME="openclaw-xgkb-sync"
+LAUNCHD_LABEL="com.openclaw.xgkb-sync"
+LAUNCHD_PLIST="$HOME/Library/LaunchAgents/${LAUNCHD_LABEL}.plist"
+WIN_TASK_NAME="OpenClawXgkbSync"
+
 mkdir -p logs
 LOG_FILE="$ROOT/logs/auto-upgrade.log"
 RESTART_LOG="$ROOT/logs/auto-upgrade-restart.log"
@@ -86,21 +91,87 @@ start_sync_detached() {
   fi
 }
 
+detect_runtime() {
+  RUNTIME="port"
+  local user_unit="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/${SERVICE_NAME}.service"
+  if command -v pm2 >/dev/null 2>&1 && pm2 describe "$SERVICE_NAME" >/dev/null 2>&1; then
+    RUNTIME="pm2"
+  elif [[ -f "$user_unit" ]]; then
+    RUNTIME="systemd-user"
+  elif [[ -f "/etc/systemd/system/${SERVICE_NAME}.service" ]]; then
+    RUNTIME="systemd-system"
+  elif [[ -f "$LAUNCHD_PLIST" ]]; then
+    RUNTIME="launchd"
+  fi
+  log "detected runtime: $RUNTIME"
+}
+
+stop_service() {
+  local port="$1"
+  case "$RUNTIME" in
+    pm2)
+      pm2 stop "$SERVICE_NAME" >/dev/null 2>&1 || true
+      sleep 2
+      ;;
+    systemd-user)
+      systemctl --user stop "$SERVICE_NAME"
+      sleep 2
+      ;;
+    systemd-system)
+      sudo systemctl stop "$SERVICE_NAME"
+      sleep 2
+      ;;
+    launchd)
+      local domain="gui/$(id -u)"
+      launchctl bootout "$domain" "$LAUNCHD_PLIST" 2>/dev/null || launchctl unload "$LAUNCHD_PLIST" 2>/dev/null || true
+      sleep 2
+      stop_sync_by_port "$port"
+      ;;
+    *)
+      stop_sync_by_port "$port"
+      ;;
+  esac
+}
+
+start_service() {
+  local node_bin="$1"
+  local port="$2"
+  case "$RUNTIME" in
+    pm2)
+      pm2 restart "$SERVICE_NAME" || pm2 start dist/index.js --name "$SERVICE_NAME" -- --config config.json
+      ;;
+    systemd-user)
+      systemctl --user restart "$SERVICE_NAME"
+      ;;
+    systemd-system)
+      sudo systemctl restart "$SERVICE_NAME"
+      ;;
+    launchd)
+      local domain="gui/$(id -u)"
+      if launchctl bootstrap "$domain" "$LAUNCHD_PLIST" 2>/dev/null; then
+        :
+      else
+        launchctl load "$LAUNCHD_PLIST"
+      fi
+      sleep 3
+      if ! lsof -ti:"$port" >/dev/null 2>&1; then
+        launchctl kickstart -k "$domain/$LAUNCHD_LABEL" 2>/dev/null || true
+      fi
+      ;;
+    *)
+      start_sync_detached "$node_bin" "$port"
+      ;;
+  esac
+}
+
 log "======== upgrade start current=${CURRENT} target=${TARGET} root=${ROOT} ========"
 
 NODE_BIN="$(resolve_node_bin)" || { log "node not found; set OPENCLAW_SYNC_NODE or fix PATH"; exit 1; }
 setup_path_for_node "$NODE_BIN"
 MGMT_PORT="$(read_management_port "$NODE_BIN")"
 
-if command -v pm2 >/dev/null 2>&1; then
-  pm2 stop openclaw-xgkb-sync >/dev/null 2>&1 || true
-  sleep 2
-elif systemctl is-active --quiet openclaw-xgkb-sync 2>/dev/null; then
-  sudo systemctl stop openclaw-xgkb-sync
-  sleep 2
-else
-  stop_sync_by_port "$MGMT_PORT"
-fi
+detect_runtime
+stop_service "$MGMT_PORT"
 
 git fetch --tags origin
 if git rev-parse "v${TARGET}" >/dev/null 2>&1; then
@@ -111,15 +182,9 @@ else
   git pull origin main || git pull origin master
 fi
 
-npm install
+npm install --include=dev
 npm run build
 
-if command -v pm2 >/dev/null 2>&1; then
-  pm2 restart openclaw-xgkb-sync || pm2 start dist/index.js --name openclaw-xgkb-sync -- --config config.json
-elif systemctl is-active --quiet openclaw-xgkb-sync 2>/dev/null; then
-  sudo systemctl restart openclaw-xgkb-sync
-else
-  start_sync_detached "$NODE_BIN" "$MGMT_PORT"
-fi
+start_service "$NODE_BIN" "$MGMT_PORT"
 
 log "======== upgrade finished ========"
