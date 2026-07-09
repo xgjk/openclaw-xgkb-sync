@@ -107,6 +107,7 @@
 | Windows | `scripts/auto-upgrade.ps1` | `powershell -ExecutionPolicy Bypass -File …` |
 | macOS / Mac mini / Linux | `scripts/auto-upgrade.sh` | `/bin/bash scripts/auto-upgrade.sh …` |
 | 无 pm2/systemd | 同上 | 按 `config.json` 的 `managementPort` 停旧进程，再 **`node dist/index.js`** 后台启动（不用 `npm start`，避免 Mac PATH 丢失） |
+| **Docker Compose** | `scripts/auto-upgrade.docker.sh` | 容器内 git 拉取 + build 后停监听进程，由 `restart: unless-stopped` 拉起；见 [INSTALL_AND_UPDATE.md § Docker](./INSTALL_AND_UPDATE.md#七部署形态速查linux--macos--windows--docker) |
 | 排查 | `logs/auto-upgrade.log`（升级脚本全程） / `logs/auto-upgrade-restart.log`（新进程 stdout） |
 
 ### 2.4 安全闸门

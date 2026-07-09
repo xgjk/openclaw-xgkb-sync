@@ -1,0 +1,46 @@
+# openclaw-xgkb-sync — Docker Compose 部署
+# 用法见 docs/INSTALL_AND_UPDATE.md § Docker 部署
+#
+# 首次：docker compose up -d --build
+# 升级：git pull && docker compose up -d --build
+# 日志：docker compose logs -f
+
+services:
+  openclaw-xgkb-sync:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: openclaw-xgkb-sync:local
+    container_name: openclaw-xgkb-sync
+    restart: unless-stopped
+    ports:
+      - "${OPENCLAW_SYNC_PORT:-9090}:9090"
+    volumes:
+      # 项目根：config.json、SQLite、logs、git 元数据均落在宿主机当前目录
+      - .:/app
+      # 避免宿主机空 node_modules 覆盖容器内依赖
+      - openclaw_sync_node_modules:/app/node_modules
+      # 同步目录须挂载进容器，localRoot 请配置为容器内路径（见文档示例）
+      # - /path/on/host/.openclaw/workspace:/workspace:rw
+    working_dir: /app
+    environment:
+      NODE_ENV: production
+      OPENCLAW_DEPLOYMENT: docker
+      OPENCLAW_SYNC_CONFIG: /app/config.json
+      # Docker 内自动探测 nodeId 常失败，建议在 config.json 配置 nodeAdvertiseIp
+      # OPENCLAW_SYNC_SKIP_NPM_INSTALL: "1"  # 仅调试：跳过每次启动的 npm install
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "-qO-",
+          "http://127.0.0.1:9090/health",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+volumes:
+  openclaw_sync_node_modules:

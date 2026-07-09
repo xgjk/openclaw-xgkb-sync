@@ -10,9 +10,10 @@
 
 | 项目 | 要求 |
 |------|------|
-| Node.js | **>= 18**（`node -v` 检查） |
+| Node.js | **>= 18**（`node -v` 检查）；Docker 部署由镜像提供 Node 24 |
 | npm | 随 Node 自带 |
 | Git | 用于克隆与更新 |
+| Docker（可选） | Docker Compose v2，用于容器化部署 |
 | 网络 | 能访问知识库 Open API 地址 |
 
 ---
@@ -271,7 +272,7 @@ npm start
 
 ## 六、后台常驻（可选）
 
-本仓库未内置 systemd/PM2 配置，可按环境自选：
+本仓库未内置 systemd/PM2 配置，可按环境自选。完整对比见下节 **「部署形态速查」**。
 
 **PM2 示例：**
 
@@ -304,7 +305,135 @@ node dist/index.js --no-log-file
 
 ---
 
-## 七、常见问题
+## 七、部署形态速查（Linux / macOS / Windows / Docker）
+
+| 形态 | 开机自启 | 推荐升级方式 | 自动升级（心跳） |
+|------|----------|--------------|------------------|
+| **Linux 裸机** | systemd 或 PM2 | `git pull` + `npm install` + `npm run build` + 重启进程 | 默认 `scripts/auto-upgrade.sh` + pm2/systemd |
+| **macOS 裸机** | launchd 或 PM2 | 同上 | 默认 `scripts/auto-upgrade.sh` |
+| **Windows 裸机** | 任务计划程序或 PM2 | `git pull` + `npm install` + `npm run build` + 重启 | 默认 `scripts/auto-upgrade.ps1` |
+| **Docker Compose** | `restart: unless-stopped` + 宿主机 Docker 开机自启 | 宿主机 `git pull` + `docker compose up -d --build` | `OPENCLAW_DEPLOYMENT=docker` 时默认 `scripts/auto-upgrade.docker.sh` |
+
+### Docker Compose 部署
+
+适用于将 sync 服务与 OpenClaw 同机或独立服务器容器化。仓库根目录已提供 `docker-compose.yml` 与 `Dockerfile`。
+
+#### 1. 前提
+
+- 已安装 [Docker](https://docs.docker.com/get-docker/) 与 Docker Compose v2
+- 宿主机已 `git clone` 本仓库（私有仓库先完成本文 **「私有仓库认证」**）
+- **同步目录必须挂载进容器**：mapping 的 `localRoot` 填**容器内路径**，不能填仅存在于宿主机的路径
+
+#### 2. 首次启动
+
+```bash
+cd openclaw-xgkb-sync
+docker compose up -d --build
+docker compose logs -f   # 等待出现 ManagementApi 监听 9090
+curl http://127.0.0.1:9090/health
+```
+
+浏览器打开 `http://127.0.0.1:9090/`，在 Web 控制台配置 AppKey 与 mapping（与裸机安装相同）。
+
+#### 3. 挂载工作区示例
+
+编辑 `docker-compose.yml`，取消注释并改成你的宿主机路径：
+
+```yaml
+volumes:
+  - .:/app
+  - openclaw_sync_node_modules:/app/node_modules
+  - /home/user/.openclaw/workspace:/workspace:rw   # Linux / macOS 示例
+  # Windows Docker Desktop 示例：
+  # - C:/Users/you/.openclaw/workspace:/workspace:rw
+```
+
+mapping 中 `localRoot` 示例：`/workspace/project/202606/xxx`（容器内路径）。
+
+若 OpenClaw 在宿主机、sync 在容器，Channel 插件 upsert 的绝对路径须与容器挂载一致。
+
+#### 4. Docker 内 nodeId
+
+容器内自动探测 IP 常失败或选到 docker 网桥。请在 `config.json` 配置宿主机内网 IP：
+
+```json
+{
+  "nodeAdvertiseIp": "192.168.1.100",
+  "managementPort": 9090
+}
+```
+
+#### 5. 开机自启
+
+| 层级 | 做法 |
+|------|------|
+| 容器 | `docker-compose.yml` 已设 `restart: unless-stopped` |
+| Docker 引擎 | Linux：启用 `docker.service`；macOS/Windows：Docker Desktop → Settings → 勾选开机启动 |
+| 可选（Linux 宿主机） | 用 systemd 在开机时 `docker compose up -d`（工作目录为项目根） |
+
+**Linux systemd 示例**（在宿主机创建 `/etc/systemd/system/openclaw-xgkb-sync.service`）：
+
+```ini
+[Unit]
+Description=openclaw-xgkb-sync (Docker Compose)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/openclaw-xgkb-sync
+ExecStart=/usr/bin/docker compose up -d
+ExecStop=/usr/bin/docker compose down
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now openclaw-xgkb-sync
+```
+
+#### 6. 升级
+
+**手动（推荐验证）：**
+
+```bash
+cd openclaw-xgkb-sync
+# 若容器在运行可先 down，也可直接 up --build（会重建并滚动重启）
+git pull origin main
+docker compose up -d --build
+curl http://127.0.0.1:9090/health
+```
+
+`config.json`、SQLite、`logs/` 在挂载的宿主机目录，**不会被覆盖**。
+
+**自动（接入中心心跳且 `autoUpgradeEnabled: true`）：**
+
+- Compose 已注入 `OPENCLAW_DEPLOYMENT=docker`，进程会自动选用 `scripts/auto-upgrade.docker.sh`
+- 脚本在容器内：`git fetch/checkout` → `npm install` → `npm run build` → 结束监听进程 → Docker `restart` 策略拉起新进程
+- 也可显式配置：`"autoUpgradeScript": "./scripts/auto-upgrade.docker.sh"`
+- 日志：`logs/auto-upgrade.log`
+
+#### 7. Docker 卷与文件监听
+
+- 同步目录在 **bind mount** 上时，若 watch 漏事件，可在 mapping 或全局设 `watchUsePolling: true`（见 README）
+- 匿名卷 `openclaw_sync_node_modules` 避免宿主机空 `node_modules` 覆盖容器依赖
+
+#### 8. 常用命令
+
+```bash
+docker compose ps
+docker compose logs -f openclaw-xgkb-sync
+docker compose restart openclaw-xgkb-sync
+docker compose down
+```
+
+---
+
+## 八、常见问题
 
 | 现象 | 处理 |
 |------|------|
@@ -315,6 +444,9 @@ node dist/index.js --no-log-file
 | `POST /mappings` 报 AppKey 必填 | 全局与各 mapping 均无 AppKey 时无法创建 mapping；至少填一处 |
 | 更新后行为异常 | 查看 `logs/` 下 `[KbApi] request#` 日志；必要时点击「重载配置」 |
 | 端口 9090 被占用 | 在「全局配置」改 `managementPort` 后**重启进程**（该字段需重启才生效） |
+| Docker 内 nodeId 启动失败 | 在 `config.json` 配置 `nodeAdvertiseIp` 为宿主机内网 IP |
+| Docker 升级后仍是旧版本 | 确认宿主机 `git pull` 成功，再执行 `docker compose up -d --build` |
+| Docker 同步目录无文件 | 检查 `localRoot` 是否为**容器内**路径，且 compose 已挂载宿主机工作区 |
 | 改了 `config.json` 未生效 | 控制台「重载配置」或 `POST /reload`（`managementPort` / `managementHost` 除外，需重启） |
 | Pull 端无 `.openclaw-sync-map.json` | Push 端是否开启 `enableFileIndex` 且 sync 成功；Pull 端是否开启且方向为 `pull`/`bidirectional` |
 | 索引 publish 失败 | 日志搜 `[FileIndex]`；主 sync 成功不影响水位，下轮 hash 未更新会自动重试 |
@@ -323,7 +455,7 @@ node dist/index.js --no-log-file
 
 ---
 
-## 八、相关文档
+## 九、相关文档
 
 - [README.md](../README.md) — 功能说明与配置参考（含 [映射索引](#映射索引文件-enablefileindex)）
 - [sync-logic-reference-for-obsidian.md](./sync-logic-reference-for-obsidian.md) — Obsidian 插件对照；§11 映射索引消费约定

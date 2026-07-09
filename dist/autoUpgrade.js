@@ -133,6 +133,11 @@ function resolveUpgradeScript(projectRoot, configured) {
     if (configured?.trim()) {
         return path.isAbsolute(configured) ? configured : path.resolve(projectRoot, configured);
     }
+    if (process.env.OPENCLAW_DEPLOYMENT === 'docker') {
+        const dockerScript = path.resolve(projectRoot, 'scripts', 'auto-upgrade.docker.sh');
+        if (fs.existsSync(dockerScript))
+            return dockerScript;
+    }
     const ext = process.platform === 'win32' ? 'ps1' : 'sh';
     return path.resolve(projectRoot, 'scripts', `auto-upgrade.${ext}`);
 }
