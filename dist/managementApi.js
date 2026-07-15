@@ -129,6 +129,7 @@ class ManagementApi {
             console.log(`  DELETE /mappings/:id       删除 mapping`);
             console.log(`  POST   /mappings/:id/enable  启用 mapping`);
             console.log(`  POST   /mappings/:id/disable 禁用 mapping`);
+            console.log(`  POST   /mappings/disable-by-local-prefix  按 localRoot 前缀批量禁用`);
             console.log(`  POST   /mappings/:id/reset 重置同步状态（清空 DB）`);
             console.log(`  POST   /sync/:mappingId`);
             console.log(`  POST   /sync  （触发所有）`);
@@ -207,6 +208,10 @@ class ManagementApi {
         // POST /mappings  （新增）
         if (method === 'POST' && urlPath === '/mappings') {
             return this.handleCreateMapping(req, res);
+        }
+        // POST /mappings/disable-by-local-prefix  （按 localRoot 前缀批量禁用）
+        if (method === 'POST' && urlPath === '/mappings/disable-by-local-prefix') {
+            return this.handleDisableByLocalPrefix(req, res);
         }
         // POST /mappings/:mappingId/reset  （重置同步状态：清空文件/文件夹记录+水位）
         const resetMatch = urlPath.match(/^\/mappings\/([^/]+)\/reset$/);
@@ -922,6 +927,108 @@ class ManagementApi {
         }
         console.log(`[ManagementApi] 删除 mapping: ${mappingId}`);
         this.sendJson(res, 200, { ok: true, reloadOk: true, message: `mapping "${mappingId}" 已删除` });
+    }
+    /**
+     * POST /mappings/disable-by-local-prefix
+     * 将 localRoot 位于给定前缀下的所有 mapping 设为 enabled=false。
+     */
+    async handleDisableByLocalPrefix(req, res) {
+        let body;
+        try {
+            body = await this.readBody(req);
+        }
+        catch (e) {
+            return this.sendJson(res, 400, {
+                ok: false,
+                error: `请求体解析失败: ${e instanceof Error ? e.message : String(e)}`,
+            });
+        }
+        if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+            return this.sendJson(res, 400, { ok: false, error: '请求体必须是 JSON 对象' });
+        }
+        const rawPrefix = body.localPathPrefix;
+        if (typeof rawPrefix !== 'string' || !rawPrefix.trim()) {
+            return this.sendJson(res, 400, {
+                ok: false,
+                error: 'localPathPrefix 必须是非空字符串',
+            });
+        }
+        const localPathPrefix = rawPrefix.trim();
+        const resolvedPrefix = (0, config_1.normalizeLocalRootPath)(localPathPrefix);
+        let fileMappings;
+        try {
+            fileMappings = (0, config_1.readMappingsFromConfigFile)(this.opts.configPath);
+        }
+        catch (e) {
+            return this.sendJson(res, 500, {
+                ok: false,
+                error: `读取 config.json mappings 失败: ${e instanceof Error ? e.message : String(e)}`,
+            });
+        }
+        const matched = fileMappings.filter((m) => (0, config_1.isLocalRootUnderPrefix)(m.localRoot, localPathPrefix));
+        const alreadyDisabled = matched.filter((m) => !m.enabled).map((m) => m.mappingId);
+        const toDisable = matched.filter((m) => m.enabled).map((m) => m.mappingId);
+        if (matched.length === 0) {
+            return this.sendJson(res, 200, {
+                ok: true,
+                reloadOk: true,
+                unchanged: true,
+                localPathPrefix,
+                resolvedPrefix,
+                matched: 0,
+                disabled: [],
+                alreadyDisabled: [],
+                message: `未找到 localRoot 位于前缀 "${resolvedPrefix}" 下的 mapping`,
+            });
+        }
+        if (toDisable.length === 0) {
+            return this.sendJson(res, 200, {
+                ok: true,
+                reloadOk: true,
+                unchanged: true,
+                localPathPrefix,
+                resolvedPrefix,
+                matched: matched.length,
+                disabled: [],
+                alreadyDisabled,
+                message: `匹配到 ${matched.length} 条 mapping，均已是禁用状态`,
+            });
+        }
+        const disableSet = new Set(toDisable);
+        const writeResult = this.modifyConfigMappings((mappings) => mappings.map((m) => (disableSet.has(m.mappingId) ? { ...m, enabled: false } : m)));
+        if (!writeResult.ok) {
+            return this.sendJson(res, 400, {
+                ok: false,
+                error: writeResult.error,
+                ...(writeResult.errorCode ? { errorCode: writeResult.errorCode } : {}),
+            });
+        }
+        const reloadResult = await this.invokeReload();
+        if (!reloadResult.ok) {
+            console.warn(`[ManagementApi] 前缀禁用已写入 config.json，但热重载失败: ${reloadResult.error}`);
+            return this.sendJson(res, 200, {
+                ok: true,
+                reloadOk: false,
+                localPathPrefix,
+                resolvedPrefix,
+                matched: matched.length,
+                disabled: toDisable,
+                alreadyDisabled,
+                message: `已禁用 ${toDisable.length} 条 mapping`,
+                warning: `热重载未完全生效: ${reloadResult.error}`,
+            });
+        }
+        console.log(`[ManagementApi] 按前缀禁用 localRoot under "${resolvedPrefix}": disabled=[${toDisable.join(', ')}]`);
+        this.sendJson(res, 200, {
+            ok: true,
+            reloadOk: true,
+            localPathPrefix,
+            resolvedPrefix,
+            matched: matched.length,
+            disabled: toDisable,
+            alreadyDisabled,
+            message: `已禁用 ${toDisable.length} 条 mapping（匹配 ${matched.length}，其中已禁用 ${alreadyDisabled.length}）`,
+        });
     }
     async handleSetMappingEnabled(res, mappingId, enabled) {
         let fileMappings;

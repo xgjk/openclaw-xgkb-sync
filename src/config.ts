@@ -321,6 +321,25 @@ export function normalizeLocalRootPath(localRoot: string): string {
   return path.resolve(localRoot);
 }
 
+/**
+ * localRoot 是否位于给定前缀下（或正好等于前缀）。
+ * Windows 下路径比较忽略大小写；不会把 `/foo` 误匹配成 `/foobar`。
+ */
+export function isLocalRootUnderPrefix(localRoot: string, pathPrefix: string): boolean {
+  const root = normalizeLocalRootPath(localRoot);
+  const prefix = normalizeLocalRootPath(pathPrefix);
+  if (process.platform === 'win32') {
+    const rootLc = root.toLowerCase();
+    const prefixLc = prefix.toLowerCase();
+    if (rootLc === prefixLc) return true;
+    const sep = path.sep;
+    return rootLc.startsWith(prefixLc.endsWith(sep) ? prefixLc : prefixLc + sep);
+  }
+  if (root === prefix) return true;
+  const sep = path.sep;
+  return root.startsWith(prefix.endsWith(sep) ? prefix : prefix + sep);
+}
+
 export function findDuplicateLocalRootGroups(mappings: SyncMapping[]): LocalRootDuplicateGroup[] {
   const byNorm = new Map<string, LocalRootDuplicateGroup>();
   for (const m of mappings) {

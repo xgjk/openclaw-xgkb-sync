@@ -43,6 +43,11 @@ export declare function setMappingEnabledInConfigFile(configPath: string, mappin
     error: string;
 };
 export declare function normalizeLocalRootPath(localRoot: string): string;
+/**
+ * localRoot 是否位于给定前缀下（或正好等于前缀）。
+ * Windows 下路径比较忽略大小写；不会把 `/foo` 误匹配成 `/foobar`。
+ */
+export declare function isLocalRootUnderPrefix(localRoot: string, pathPrefix: string): boolean;
 export declare function findDuplicateLocalRootGroups(mappings: SyncMapping[]): LocalRootDuplicateGroup[];
 /** @deprecated 仅用于诊断；配置加载与 API 写入不再抛此错误 */
 export declare function assertUniqueLocalRoots(mappings: SyncMapping[]): void;

@@ -389,7 +389,58 @@
 
 ---
 
-## 7. `POST /mappings/:mappingId/disable`
+## 7. `POST /mappings/disable-by-local-prefix`
+
+**功能**：将 `localRoot` 位于给定路径前缀下的**全部** mapping 设为禁用（`enabled=false`），写盘并热重载。用于回收某 Agent 工作区下的所有映射（例如该 Agent 下线）。
+
+匹配规则（`path.resolve` 规范化后）：
+
+- `localRoot === prefix`，或
+- `localRoot` 以 `prefix + 路径分隔符` 开头（避免 `/foo` 误匹配 `/foobar`）
+- Windows 下路径比较**忽略大小写**
+
+| 项目 | 说明 |
+|------|------|
+| 路径 | `/mappings/disable-by-local-prefix` |
+| 方法 | `POST` |
+| 请求体 | JSON 对象，见下表 |
+| 成功码 | `200`（无匹配也返回 200，`matched: 0`） |
+| 失败码 | `400`（参数错误）、`500`（读配置失败） |
+
+### 请求体
+
+| 字段 | 必填 | 说明 |
+|------|------|------|
+| `localPathPrefix` | **是** | 本机绝对路径前缀，如 `/Users/admin/.openclaw-gpts/workspace-test-jianxiaofeng` |
+
+### 请求示例
+
+```bash
+curl -X POST http://127.0.0.1:9090/mappings/disable-by-local-prefix \
+  -H "Content-Type: application/json" \
+  -d '{ "localPathPrefix": "/Users/admin/.openclaw-gpts/workspace-test-jianxiaofeng" }'
+```
+
+### 成功响应（`200`）
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `ok` | `boolean` | `true` |
+| `reloadOk` | `boolean` | 热重载是否成功（写盘成功但重载失败仍为 200） |
+| `unchanged` | `boolean` \| 省略 | 无匹配、或匹配项均已禁用时为 `true` |
+| `localPathPrefix` | `string` | 请求原文（trim 后） |
+| `resolvedPrefix` | `string` | `path.resolve` 后的前缀 |
+| `matched` | `number` | 匹配到的 mapping 条数 |
+| `disabled` | `array` | 本次新设为禁用的 `mappingId` 列表 |
+| `alreadyDisabled` | `array` | 已匹配但本来就是禁用的 `mappingId` 列表 |
+| `message` | `string` | 说明 |
+| `warning` | `string` \| 省略 | 热重载失败提示 |
+
+> **注意**：本接口只改 `enabled`，**不删除** mapping 配置，也不清 SQLite 同步水位；需要彻底移除请再调 `DELETE /mappings/:id`。
+
+---
+
+## 8. `POST /mappings/:mappingId/disable`
 
 **功能**：将指定 mapping 设为禁用（`enabled=false`），写盘并热重载。
 
@@ -416,7 +467,7 @@
 
 ---
 
-## 8. `POST /mappings/:mappingId/enable`
+## 9. `POST /mappings/:mappingId/enable`
 
 **功能**：将指定 mapping 设为启用（`enabled=true`），写盘并热重载。若与其它 mapping 的 `localRoot` 冲突，会自动降级回禁用并在响应中给出 `warnings`。
 
@@ -443,7 +494,7 @@
 
 ---
 
-## 9. `POST /sync`
+## 10. `POST /sync`
 
 **功能**：对当前所有**实际参与同步**的 mapping 异步触发一次同步（不等待完成）。  
 说明：若同一 `localRoot` 有多条启用 mapping，仅首个启用项会被触发（与 `syncEffective=true` 一致）。
@@ -465,7 +516,7 @@
 
 ---
 
-## 10. `POST /sync/:mappingId`
+## 11. `POST /sync/:mappingId`
 
 **功能**：对**单条** mapping 触发异步同步。
 
@@ -492,7 +543,7 @@
 
 ---
 
-## 11. `POST /reload`
+## 12. `POST /reload`
 
 **功能**：从磁盘**重新读取** `config.json`，重建调度器；**不**重启 HTTP 监听端口。
 
@@ -515,7 +566,7 @@
 
 ---
 
-## 12. `GET /config`
+## 13. `GET /config`
 
 **功能**：读取当前全局配置摘要（**不含** `appKey` 明文）。
 
@@ -558,7 +609,7 @@
 
 ---
 
-## 13. `PUT /config`
+## 14. `PUT /config`
 
 **功能**：部分更新全局配置，写入 `config.json` 并热重载。
 
@@ -588,7 +639,7 @@
 
 ---
 
-## 14. 管理控制台（静态页面）
+## 15. 管理控制台（静态页面）
 
 | 项目 | 说明 |
 |------|------|
@@ -612,5 +663,5 @@
 1. **新增 mapping 前**：`GET /mappings` → 读 `hasGlobalAppKey`。若为 `false`，**必须在** `POST /mappings` 的 JSON 里写 **`appKey`: "<非空>"`**。
 2. **修改 mapping 前**：若打算删掉本条独立 `appKey`（改全局依赖），先确认根级已有全局 `appKey`，否则合并后会触发 **`MAPPING_APPKEY_REQUIRED_WHEN_NO_GLOBAL_APPKEY`**。
 3. **不要**依赖响应里的 `hasOwnAppKey` 推断全局是否有密钥；**仅以** `hasGlobalAppKey` **与**根配置文件为准。
-4. **`mappingId`**：`POST /mappings` 新建时可省略（服务端自动生成）；`PUT /mappings/:id` 的 upsert、删除、启用/禁用、单路同步须在 URL 中给出确定的 `mappingId`（不存在时 PUT 会创建该 id）。
+4. **`mappingId`**：`POST /mappings` 新建时可省略（服务端自动生成）；`PUT /mappings/:id` 的 upsert、删除、启用/禁用、单路同步须在 URL 中给出确定的 `mappingId`（不存在时 PUT 会创建该 id）。按 Agent 工作区批量停用见 **`POST /mappings/disable-by-local-prefix`**（`localPathPrefix`）。
 5. **远端根**：新建或修改时，若不知道知识库内的 `remoteRootFileId`，**请传 `remoteRootFolderPath`**（`/`-分隔逻辑路径）；勿猜测 fileId。组合行为见 [README.md](../README.md) 小节「remoteRootFileId 与 remoteRootFolderPath 组合」。

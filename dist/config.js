@@ -42,6 +42,7 @@ exports.parseSyncConfig = parseSyncConfig;
 exports.readMappingsFromConfigFile = readMappingsFromConfigFile;
 exports.setMappingEnabledInConfigFile = setMappingEnabledInConfigFile;
 exports.normalizeLocalRootPath = normalizeLocalRootPath;
+exports.isLocalRootUnderPrefix = isLocalRootUnderPrefix;
 exports.findDuplicateLocalRootGroups = findDuplicateLocalRootGroups;
 exports.assertUniqueLocalRoots = assertUniqueLocalRoots;
 exports.warnDuplicateLocalRoots = warnDuplicateLocalRoots;
@@ -312,6 +313,26 @@ function setMappingEnabledInConfigFile(configPath, mappingId, enabled) {
 }
 function normalizeLocalRootPath(localRoot) {
     return path.resolve(localRoot);
+}
+/**
+ * localRoot 是否位于给定前缀下（或正好等于前缀）。
+ * Windows 下路径比较忽略大小写；不会把 `/foo` 误匹配成 `/foobar`。
+ */
+function isLocalRootUnderPrefix(localRoot, pathPrefix) {
+    const root = normalizeLocalRootPath(localRoot);
+    const prefix = normalizeLocalRootPath(pathPrefix);
+    if (process.platform === 'win32') {
+        const rootLc = root.toLowerCase();
+        const prefixLc = prefix.toLowerCase();
+        if (rootLc === prefixLc)
+            return true;
+        const sep = path.sep;
+        return rootLc.startsWith(prefixLc.endsWith(sep) ? prefixLc : prefixLc + sep);
+    }
+    if (root === prefix)
+        return true;
+    const sep = path.sep;
+    return root.startsWith(prefix.endsWith(sep) ? prefix : prefix + sep);
 }
 function findDuplicateLocalRootGroups(mappings) {
     const byNorm = new Map();

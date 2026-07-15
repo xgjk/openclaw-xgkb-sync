@@ -50,6 +50,11 @@ export declare class ManagementApi {
     /** PUT /mappings/:mappingId — 存在则部分更新，不存在则按请求体创建（upsert） */
     private handleUpsertMapping;
     private handleDeleteMapping;
+    /**
+     * POST /mappings/disable-by-local-prefix
+     * 将 localRoot 位于给定前缀下的所有 mapping 设为 enabled=false。
+     */
+    private handleDisableByLocalPrefix;
     private handleSetMappingEnabled;
     private handleResetMapping;
     /**
