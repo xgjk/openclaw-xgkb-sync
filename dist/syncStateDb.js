@@ -436,6 +436,15 @@ function parseStats(raw) {
         return null;
     }
 }
+function normalizeFileSyncStatus(raw) {
+    if (raw === 'done' ||
+        raw === 'failed' ||
+        raw === 'done_with_conflict' ||
+        raw === 'local-deleted') {
+        return raw;
+    }
+    return 'done';
+}
 function rowToFileState(row) {
     return {
         mappingId: row.mapping_id,
@@ -445,7 +454,7 @@ function rowToFileState(row) {
         localMtime: row.local_mtime,
         remoteMtime: row.remote_mtime,
         contentHash: row.content_hash,
-        syncStatus: row.sync_status,
+        syncStatus: normalizeFileSyncStatus(row.sync_status),
         lastSyncAt: row.last_sync_at,
         lastError: row.last_error,
         localDev: toInoStr(row.local_dev),

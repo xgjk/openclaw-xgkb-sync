@@ -570,7 +570,7 @@ export interface FileState {
   localMtime?: number | null;
   remoteMtime?: number | null;
   contentHash?: string | null;
-  syncStatus: 'done' | 'failed' | 'done_with_conflict';
+  syncStatus: 'done' | 'failed' | 'done_with_conflict' | 'local-deleted';
   lastSyncAt?: number | null;
   lastError?: string | null;
   /**
@@ -619,6 +619,13 @@ export type SyncOp =
   | 'download-update'
   | 'delete-local'
   | 'delete-remote'
+  /**
+   * 本地文件已删除：不删远端，仅将状态记为 local-deleted（tombstone），
+   * 后续轮次既不 delete-remote 也不再 download 拉回。
+   */
+  | 'tombstone-local'
+  /** 本地路径重新出现后清除 tombstone（通常用于 pull 模式，不覆盖本地内容） */
+  | 'clear-local-tombstone'
   /** 本地文件在同目录内改名 → 调用 updateFileName 同步到远端 */
   | 'rename-remote'
   /** 本地文件移动到其他目录（可同时改名）→ 调用 moveFile 同步到远端 */
@@ -678,6 +685,8 @@ export interface SyncStats {
   renamed?: number;
   /** 本轮执行的远端移动操作数（moveFile） */
   moved?: number;
+  /** 本地删除后写入 tombstone（远端保留、不再拉回）的路径数 */
+  localTombstoned?: number;
   /** 因本地工作区异常而被阻断并改为拉取的远端删除计划数 */
   blockedRemoteDeletes?: number;
 }

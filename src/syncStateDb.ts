@@ -577,6 +577,18 @@ function parseStats(raw: string | null): MappingState['lastStats'] {
   }
 }
 
+function normalizeFileSyncStatus(raw: string): FileState['syncStatus'] {
+  if (
+    raw === 'done' ||
+    raw === 'failed' ||
+    raw === 'done_with_conflict' ||
+    raw === 'local-deleted'
+  ) {
+    return raw;
+  }
+  return 'done';
+}
+
 function rowToFileState(row: RawFileState): FileState {
   return {
     mappingId: row.mapping_id,
@@ -586,7 +598,7 @@ function rowToFileState(row: RawFileState): FileState {
     localMtime: row.local_mtime,
     remoteMtime: row.remote_mtime,
     contentHash: row.content_hash,
-    syncStatus: row.sync_status as FileState['syncStatus'],
+    syncStatus: normalizeFileSyncStatus(row.sync_status),
     lastSyncAt: row.last_sync_at,
     lastError: row.last_error,
     localDev: toInoStr(row.local_dev),

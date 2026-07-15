@@ -32,9 +32,9 @@
 
 | 模式 | 行为 |
 |------|------|
-| `push` | 只上传、只删远端；忽略远端 rename/move |
-| `pull` | 只下载、只删本地（回收站）；不修改远端 |
-| `bidirectional` | 双向同步；冲突用 `conflictStrategy` 配置 |
+| `push` | 只上传；本地删除不删远端（tombstone）；忽略远端 rename/move |
+| `pull` | 只下载、只删本地（回收站）；不修改远端；本地删除不拉回 |
+| `bidirectional` | 双向同步；冲突用 `conflictStrategy`；本地删除不删远端、不拉回 |
 
 ### 1.3 一轮同步的高层结构
 
@@ -273,23 +273,30 @@ allPaths = (localMap.keys \ consumedToPaths) ∪ (remoteMap.keys \ consumedFromP
 | 无 record，仅 local | upload-new | skip | upload-new |
 | 无 record，仅 remote | skip | download-new | download-new |
 | 无 record，双端都有 | upload-update | download-update | conflictStrategy 决定 |
-| 双端都消失 | skip | skip | skip |
-| 无 local，有 remote，remote 变了 | skip | download-update | download-update |
-| 无 local，有 remote，remote 未变 | skip | delete-remote* | delete-remote* |
+| 双端都消失（有 record） | **tombstone-local** | 同左 | 同左 |
+| 同上，且工作区异常偏空 | **skip** | 同左 | 同左 |
+| 本地缺、远端在、有记录 | **tombstone-local**（远端保留，记 `local-deleted`） | 同左 | 同左（禁止拉回） |
+| 同上，且工作区异常偏空 | **skip**（不 tombstone、不拉回） | 同左 | 同左 |
+| 已 tombstone、本地仍缺 | skip（绝不 download / delete-remote） | skip | skip |
+| 已 tombstone、本地同路径恢复 | upload-update / upload-new | clear-local-tombstone | 同上 |
+| 无 record 但 remoteFileId 命中 tombstone（远端 rename 到新路径） | skip | skip | skip |
 | 有 local，无 remote，local 变了 | upload-new | skip | upload-new |
 | 有 local，无 remote，local 未变 | delete-local** | skip | delete-local** |
 | 仅 local 变 | upload-update | skip | upload-update |
-| 仅 remote 变 | skip | download-update | download-update |
+| 仅 remote 变（本地仍在） | skip | download-update | download-update |
 | 双端都变（冲突） | upload-update | download-update | conflictStrategy 决定 |
 | 双端都未变 | skip | skip | skip |
 
-\* `delete-remote` 前有 **10 分钟 recently-synced 安全窗口**（有 record 时）。  
-\*\* `delete-local` 走**回收站**（见 §8），无 record 时**无**安全窗口——清空 DB 后首轮风险点。
+> **本地→知识库不写删除**：路径对账不再因本地缺失而 `delete-remote`。rename/move 仍走 Phase 1 身份对账。  
+> **tombstone 防拉回**：`local-deleted` 不参与远端→本地 rename 检测；Phase 1.5 仅在本地 rename 成功后才 consume 路径；`decide` 对命中 tombstone/`remoteFileId` 已归属其他路径的「新路径」一律 skip（避免同轮「先 tombstone 再 download」）。增量快速通道会检测「tombstone 路径文件又出现」（回收站还原等 mtime 未变场景）。下载队列有第二道 `remoteFileId` 拦截。  
+> **工作区异常偏空**（空目录或骤降 ≥80% 且历史 ≥20）：对「本地缺、远端在」**只 skip**——不 tombstone、不拉回，避免挂载丢失被永久记成用户删除；挂载恢复后可继续对账。正常单文件/少量删除仍走 tombstone。  
+> \*\* `delete-local` 走**回收站**（见 §8），指「远端已无、本地仍在」时清本地，与上条无关。
 
 ### 7.4 执行顺序
 
 ```
-1. delete-local / delete-remote（串行）
+1. delete-local / delete-remote（串行；本地删除已改为 tombstone，delete-remote 仅残余降级路径）
+1b. tombstone-local / clear-local-tombstone（串行写状态）
 2. download-new / download-update（downloadConcurrency 并发）
 3. upload-new / upload-update（uploadConcurrency 并发）
 4. pruneRemoteEmptyDirectories（push/bidirectional）

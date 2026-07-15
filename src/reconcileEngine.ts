@@ -230,6 +230,8 @@ function detectSingleFileMoves(
   for (const r of dbRecords) pathToRecord.set(r.localPath, r);
 
   for (const record of dbRecords) {
+    // 本地已删 tombstone：不再用 inode 触发远端 rename/move
+    if (record.syncStatus === 'local-deleted') continue;
     if (
       !record.localDev ||
       !record.localIno ||

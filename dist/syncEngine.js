@@ -41,6 +41,7 @@ const pathSanitize_1 = require("./pathSanitize");
 const trashBin_1 = require("./trashBin");
 const fileIndexService_1 = require("./fileIndexService");
 const pathSyncScope_1 = require("./pathSyncScope");
+const syncDecide_1 = require("./syncDecide");
 const localRootGuard_1 = require("./localRootGuard");
 /**
  * 核心同步引擎（OpenClaw 版）
@@ -66,6 +67,12 @@ class SyncEngine {
     /** 本地工作区异常时阻断远端删除（含 prune 空目录） */
     remoteDeleteGuardActive = false;
     remoteDeleteGuardReason = '';
+    /**
+     * 本轮已记 tombstone 的远端 fileId：即使远端 rename 到新路径，也禁止 download-new 拉回。
+     */
+    tombstonedRemoteFileIds = new Set();
+    /** remoteFileId → 状态记录（用于识别「远端 rename 后新路径」实为已知身份） */
+    remoteFileIdOwners = new Map();
     constructor(localFs, remoteFs, db, mapping, opts) {
         this.localFs = localFs;
         this.remoteFs = remoteFs;
@@ -117,7 +124,20 @@ class SyncEngine {
             errors: [],
             renamed: 0,
             moved: 0,
+            localTombstoned: 0,
         };
+    }
+    refreshTombstonedRemoteFileIds(recordMap) {
+        this.tombstonedRemoteFileIds.clear();
+        this.remoteFileIdOwners.clear();
+        for (const r of recordMap.values()) {
+            if (r.remoteFileId) {
+                this.remoteFileIdOwners.set(r.remoteFileId, r);
+                if (r.syncStatus === 'local-deleted') {
+                    this.tombstonedRemoteFileIds.add(r.remoteFileId);
+                }
+            }
+        }
     }
     /**
      * 执行一轮同步（增量优先，降级全量）。
@@ -146,6 +166,7 @@ class SyncEngine {
         let localMap = new Map(localFiles.map((f) => [f.path, f]));
         // 一次性批量加载所有文件状态，供决策循环 O(1) 查找，避免 N 次独立 SQLite 查询
         let recordMap = new Map(this.db.getAllFileStates(this.mapping.mappingId).map((r) => [r.localPath, r]));
+        this.refreshTombstonedRemoteFileIds(recordMap);
         if ((0, localRootGuard_1.isLocalWorkspaceAnomaly)(localFiles.length, recordMap.size)) {
             this.remoteDeleteGuardActive = true;
             this.remoteDeleteGuardReason =
@@ -187,8 +208,9 @@ class SyncEngine {
                 for (const plan of [...dirPlans, ...filePlans]) {
                     await this.executePlan(plan, remoteMap);
                 }
-                // 重命名/移动执行后 DB 已变更，重新加载 recordMap
+                // 重命名/移动执行后 DB 已变更，重新加载 recordMap + fileId 归属
                 recordMap = new Map(this.db.getAllFileStates(this.mapping.mappingId).map((r) => [r.localPath, r]));
+                this.refreshTombstonedRemoteFileIds(recordMap);
             }
         }
         // ── Phase 1.5：远端 → 本地 rename/move（仅 bidirectional / pull 模式）────────
@@ -202,14 +224,29 @@ class SyncEngine {
                 // 全量扫描模式：通过 remoteFileId 比对 DB 中的 localPath 来检测
                 moveHints = this.detectRemoteMovesFromFullScan(remoteMap, recordMap);
             }
-            // 过滤掉与本地 inode 检测冲突的路径（同一文件本地也 rename 了）
-            const validHints = moveHints.filter((h) => !consumedFromPaths.has(h.oldPath) && !consumedToPaths.has(h.newPath));
+            // 过滤：与本地 inode 冲突的路径；以及 tombstone 记录（本地已删，禁止借 rename 再拉回）
+            const validHints = moveHints.filter((h) => {
+                if (consumedFromPaths.has(h.oldPath) || consumedToPaths.has(h.newPath))
+                    return false;
+                if (!h.isDirectory && h.record.syncStatus === 'local-deleted')
+                    return false;
+                if (!h.isDirectory &&
+                    h.record.remoteFileId &&
+                    this.tombstonedRemoteFileIds.has(h.record.remoteFileId)) {
+                    return false;
+                }
+                return true;
+            });
             if (validHints.length > 0) {
                 // 目录级优先，避免逐文件 rename 时路径冲突
                 const sortedHints = [...validHints].sort((a, b) => (b.isDirectory ? 1 : 0) - (a.isDirectory ? 1 : 0));
                 prog(`远端 rename/move 检测到 ${sortedHints.length} 项，执行本地同步...`);
+                let anyMoved = false;
                 for (const hint of sortedHints) {
-                    await this.doRemoteMoveToLocal(hint, prog);
+                    const moved = await this.doRemoteMoveToLocal(hint, prog);
+                    if (!moved)
+                        continue;
+                    anyMoved = true;
                     if (hint.isDirectory) {
                         // 目录级：所有旧前缀下的路径都需标记为已消费
                         for (const [p] of recordMap) {
@@ -226,9 +263,12 @@ class SyncEngine {
                     }
                 }
                 // 本地文件已被 rename，必须刷新 localMap，否则 Phase 2 会误判 delete-remote / upload-new
-                const refreshedLocalFiles = await this.localFs.listFiles();
-                localMap = new Map(refreshedLocalFiles.map((f) => [f.path, f]));
-                recordMap = new Map(this.db.getAllFileStates(this.mapping.mappingId).map((r) => [r.localPath, r]));
+                if (anyMoved) {
+                    const refreshedLocalFiles = await this.localFs.listFiles();
+                    localMap = new Map(refreshedLocalFiles.map((f) => [f.path, f]));
+                    recordMap = new Map(this.db.getAllFileStates(this.mapping.mappingId).map((r) => [r.localPath, r]));
+                    this.refreshTombstonedRemoteFileIds(recordMap);
+                }
             }
         }
         // ── Phase 2：路径对账（增量快速通道 & 完整决策循环）─────────────────────
@@ -241,8 +281,19 @@ class SyncEngine {
                     return false;
                 return (recordMap.get(f.path)?.localMtime ?? -1) + constants_1.MTIME_TOLERANCE_MS < f.mtime;
             });
-            const hasLocalDeleted = [...recordMap.keys()].some((p) => !consumedFromPaths.has(p) && !localMap.has(p));
-            if (!hasLocalNew && !hasLocalModified && !hasLocalDeleted) {
+            const hasLocalDeleted = [...recordMap.keys()].some((p) => {
+                if (consumedFromPaths.has(p) || localMap.has(p))
+                    return false;
+                // 已 tombstone 的本地删除不算「本轮新变化」，避免每轮被迫全量决策
+                return recordMap.get(p)?.syncStatus !== 'local-deleted';
+            });
+            // 回收站还原等可能保持原 mtime：tombstone 路径上文件又出现，必须进入决策清标记/再上传
+            const hasTombstoneResurrected = localFiles.some((f) => {
+                if (consumedToPaths.has(f.path))
+                    return false;
+                return recordMap.get(f.path)?.syncStatus === 'local-deleted';
+            });
+            if (!hasLocalNew && !hasLocalModified && !hasLocalDeleted && !hasTombstoneResurrected) {
                 const totalPaths = new Set([...localMap.keys(), ...remoteMap.keys()]).size;
                 this.stats.skipped += totalPaths;
                 await this.pruneRemoteEmptyDirectories(prog, localDirs);
@@ -250,12 +301,20 @@ class SyncEngine {
                 await this.runFileIndexPublish(prog);
                 return this.stats;
             }
-            prog(`远端0变更，但本地有变化（new=${hasLocalNew} mod=${hasLocalModified} del=${hasLocalDeleted}），继续决策`);
+            prog(`远端0变更，但本地有变化（new=${hasLocalNew} mod=${hasLocalModified} del=${hasLocalDeleted}` +
+                ` resurrect=${hasTombstoneResurrected}），继续决策`);
         }
         // 排除已被 rename/move 消费的路径，避免路径对账重复处理
         const effectiveLocalKeys = [...localMap.keys()].filter((p) => !consumedToPaths.has(p));
         const effectiveRemoteKeys = [...remoteMap.keys()].filter((p) => !consumedFromPaths.has(p));
         const allPaths = new Set([...effectiveLocalKeys, ...effectiveRemoteKeys]);
+        // 本地已删、但增量远端图可能不含该文件：仍需对历史记录做 tombstone，防止之后被拉回
+        for (const p of recordMap.keys()) {
+            if (consumedFromPaths.has(p) || consumedToPaths.has(p))
+                continue;
+            if (!localMap.has(p))
+                allPaths.add(p);
+        }
         prog(`共 ${allPaths.size} 个路径需要路径对账决策`);
         // 决策阶段
         const plans = [];
@@ -293,20 +352,39 @@ class SyncEngine {
         }
         // 分类计划：删除 / 下载 / 上传
         const deletePlans = plans.filter((p) => p.op === 'delete-local' || p.op === 'delete-remote');
+        const tombstonePlans = plans.filter((p) => p.op === 'tombstone-local' || p.op === 'clear-local-tombstone');
         const downloadPlans = plans.filter((p) => p.op === 'download-new' || p.op === 'download-update');
+        // 防御：即便 decide 漏判，tombstone / 异路径归属的 fileId 也不得进入下载队列
+        for (const plan of downloadPlans) {
+            if ((0, syncDecide_1.shouldBlockDownloadForRemoteIdentity)({
+                path: plan.path,
+                remoteFileId: plan.remote?.remoteFileId,
+                tombstonedRemoteFileIds: this.tombstonedRemoteFileIds,
+                remoteFileIdOwners: this.remoteFileIdOwners,
+            })) {
+                plan.op = 'skip';
+                prog(`⊘ 已拦截可疑下载（tombstone/异路径 fileId） ${plan.path}`);
+            }
+        }
+        const safeDownloadPlans = downloadPlans.filter((p) => p.op === 'download-new' || p.op === 'download-update');
         const uploadPlans = plans.filter((p) => p.op === 'upload-new' || p.op === 'upload-update');
+        // 须在下载拦截改写 op 之后再统计 skip，避免重复累计
         const skipCount = plans.filter((p) => p.op === 'skip').length;
         this.stats.skipped += skipCount;
-        prog(`执行计划: 删除=${deletePlans.length} 下载=${downloadPlans.length}` +
-            ` 上传=${uploadPlans.length} 跳过=${skipCount}`);
+        prog(`执行计划: 删除=${deletePlans.length} tombstone=${tombstonePlans.length}` +
+            ` 下载=${safeDownloadPlans.length} 上传=${uploadPlans.length} 跳过=${skipCount}`);
         // 1. 删除操作串行（避免竞态）
         for (const plan of deletePlans) {
             await this.executePlan(plan, remoteMap);
         }
+        // 1b. 本地删除 tombstone / 清除 tombstone（串行写状态库）
+        for (const plan of tombstonePlans) {
+            await this.executePlan(plan, remoteMap);
+        }
         // 2. 下载：按 downloadConcurrency 分批，批间加 pause，由 KbApiClient 限速器节流
-        if (downloadPlans.length > 0) {
-            prog(`开始下载 ${downloadPlans.length} 个文件（并发=${this.downloadConcurrency}）...`);
-            await this.executePlansInQueue(downloadPlans, this.downloadConcurrency, '下载', prog);
+        if (safeDownloadPlans.length > 0) {
+            prog(`开始下载 ${safeDownloadPlans.length} 个文件（并发=${this.downloadConcurrency}）...`);
+            await this.executePlansInQueue(safeDownloadPlans, this.downloadConcurrency, '下载', prog);
         }
         // 3. 上传：按 uploadConcurrency 分批，同理
         if (uploadPlans.length > 0) {
@@ -318,6 +396,7 @@ class SyncEngine {
         (0, trashBin_1.cleanupTrash)(this.mapping.mappingId).catch(() => { });
         prog(`完成: ↑${this.stats.uploaded} ↓${this.stats.downloaded} ✗${this.stats.deleted}` +
             ` 重命名:${this.stats.renamed ?? 0} 移动:${this.stats.moved ?? 0}` +
+            ` tombstone:${this.stats.localTombstoned ?? 0}` +
             ` 空目录清理:${this.stats.prunedRemoteDirs ?? 0} fail:${this.stats.failed} skip:${this.stats.skipped}`);
         await this.runFileIndexPublish(prog);
         return this.stats;
@@ -764,8 +843,13 @@ class SyncEngine {
                 const oldName = record.localPath.split('/').pop() ?? '';
                 const oldParentId = record.remoteFolderId ?? '';
                 // 检测远端 rename/move：parentId 或 name 发生变化
+                // tombstone 记录：不发 move hint（本地已无文件）；仍按旧路径挂 remoteMap，由 decide skip
                 let effectivePath = record.localPath;
-                if (newParentId && oldParentId && (newParentId !== oldParentId || newName !== oldName)) {
+                const isTombstoned = record.syncStatus === 'local-deleted';
+                if (!isTombstoned &&
+                    newParentId &&
+                    oldParentId &&
+                    (newParentId !== oldParentId || newName !== oldName)) {
                     // 推导新本地路径
                     const newFolderPath = folderIdToPath.get(newParentId);
                     if (newFolderPath !== undefined) {
@@ -853,6 +937,8 @@ class SyncEngine {
             const record = fileIdToRecord.get(entry.remoteFileId);
             if (!record)
                 continue;
+            if (record.syncStatus === 'local-deleted')
+                continue;
             if (record.localPath === newPath)
                 continue;
             rawChanges.push({ oldPath: record.localPath, newPath, fileId: entry.remoteFileId, record });
@@ -882,9 +968,11 @@ class SyncEngine {
             const [oldDir, newDir] = key.split('\0');
             if (!oldDir)
                 continue;
-            // 统计 DB 中旧目录下的所有文件数
+            // 统计 DB 中旧目录下仍活跃（非 tombstone）的文件数；tombstone 不应拉低覆盖率
             let totalInOldDir = 0;
             for (const record of recordMap.values()) {
+                if (record.syncStatus === 'local-deleted')
+                    continue;
                 if (record.localPath.startsWith(oldDir + '/'))
                     totalInOldDir++;
             }
@@ -979,82 +1067,18 @@ class SyncEngine {
         }
     }
     // ==================== 决策逻辑 ====================
-    decide(_path, local, remote, record) {
-        const dir = this.mapping.syncDirection ?? 'bidirectional';
-        // 无历史记录：首次碰到
-        if (!record) {
-            if (local && !remote)
-                return dir === 'pull' ? 'skip' : 'upload-new';
-            if (!local && remote)
-                return dir === 'push' ? 'skip' : 'download-new';
-            if (local && remote) {
-                if (dir === 'pull')
-                    return 'download-update';
-                if (dir === 'push')
-                    return 'upload-update';
-                // bidirectional 且无历史：用冲突策略决定
-                const conflictWinner = this.mapping.conflictStrategy ?? 'local-wins';
-                return conflictWinner === 'local-wins' ? 'upload-update' : 'download-update';
-            }
-            return 'skip';
-        }
-        // 双端均消失
-        if (!local && !remote)
-            return 'skip';
-        // 本地缺失，远端存在
-        if (!local && remote) {
-            if (dir === 'push')
-                return 'skip';
-            const remoteChanged = remote.mtime > (record.remoteMtime ?? 0) + constants_1.MTIME_TOLERANCE_MS;
-            if (remoteChanged)
-                return 'download-update';
-            const RECENTLY_SYNCED_THRESHOLD_MS = 10 * 60 * 1000;
-            if (record.syncStatus === 'done' &&
-                record.remoteFileId &&
-                record.lastSyncAt &&
-                Date.now() - record.lastSyncAt < RECENTLY_SYNCED_THRESHOLD_MS) {
-                return 'skip';
-            }
-            return 'delete-remote';
-        }
-        // 本地存在，远端缺失
-        if (local && !remote) {
-            if (dir === 'pull')
-                return 'skip';
-            const localChanged = local.mtime > (record.localMtime ?? 0) + constants_1.MTIME_TOLERANCE_MS;
-            if (localChanged)
-                return 'upload-new';
-            // 安全阈值：如果文件是最近刚同步成功的（10 分钟内），不因一次全量列表为空就删本地。
-            // 防止 KB 接口延迟、uploadContent 目录冲突等导致 listDescendantFiles 暂时看不到文件。
-            const RECENTLY_SYNCED_THRESHOLD_MS = 10 * 60 * 1000;
-            if (record.syncStatus === 'done' &&
-                record.remoteFileId &&
-                record.lastSyncAt &&
-                Date.now() - record.lastSyncAt < RECENTLY_SYNCED_THRESHOLD_MS) {
-                return 'skip';
-            }
-            return 'delete-local';
-        }
-        // 双端均存在
-        if (local && remote) {
-            const localChanged = local.mtime > (record.localMtime ?? 0) + constants_1.MTIME_TOLERANCE_MS;
-            const remoteChanged = remote.mtime > (record.remoteMtime ?? 0) + constants_1.MTIME_TOLERANCE_MS;
-            if (!localChanged && !remoteChanged)
-                return 'skip';
-            if (localChanged && !remoteChanged)
-                return dir === 'pull' ? 'skip' : 'upload-update';
-            if (!localChanged && remoteChanged)
-                return dir === 'push' ? 'skip' : 'download-update';
-            // 双端均变更 — 冲突
-            if (dir === 'pull')
-                return 'download-update';
-            if (dir === 'push')
-                return 'upload-update';
-            // bidirectional: 使用配置的冲突策略（不再跨时钟比 mtime）
-            const conflictWinner = this.mapping.conflictStrategy ?? 'local-wins';
-            return conflictWinner === 'local-wins' ? 'upload-update' : 'download-update';
-        }
-        return 'skip';
+    decide(path, local, remote, record) {
+        return (0, syncDecide_1.decideSyncOp)({
+            path,
+            local,
+            remote,
+            record,
+            syncDirection: this.mapping.syncDirection ?? 'bidirectional',
+            conflictStrategy: this.mapping.conflictStrategy,
+            workspaceAnomaly: this.remoteDeleteGuardActive,
+            tombstonedRemoteFileIds: this.tombstonedRemoteFileIds,
+            remoteFileIdOwners: this.remoteFileIdOwners,
+        });
     }
     // ==================== 计划执行 ====================
     /**
@@ -1126,6 +1150,12 @@ class SyncEngine {
                     break;
                 case 'delete-remote':
                     await this.doDeleteRemote(path, record);
+                    break;
+                case 'tombstone-local':
+                    await this.doTombstoneLocal(path, record, remote);
+                    break;
+                case 'clear-local-tombstone':
+                    await this.doClearLocalTombstone(path, record, local, remote);
                     break;
                 case 'rename-remote':
                     if (plan.isDirectory) {
@@ -1300,6 +1330,9 @@ class SyncEngine {
      * - 文件级：rename 单个文件，更新该文件的 DB 记录。
      * - 目录级：rename 整个目录，批量更新 DB 中所有相关文件/文件夹记录的路径前缀。
      */
+    /**
+     * @returns true 仅当本地 rename 实际成功（调用方才应消费路径，避免失败后 Phase2 download-new）
+     */
     async doRemoteMoveToLocal(hint, prog) {
         const { oldPath, newPath, isMove } = hint;
         if (hint.isDirectory) {
@@ -1310,12 +1343,12 @@ class SyncEngine {
             const oldExists = await this.localFs.exists(oldPath);
             if (!oldExists) {
                 console.warn(`[SyncEngine][${this.mapping.mappingId}] 远端 ${isMove ? 'move' : 'rename'}-local 跳过: 本地旧文件不存在 "${oldPath}"`);
-                return;
+                return false;
             }
             const newExists = await this.localFs.exists(newPath);
             if (newExists) {
                 console.warn(`[SyncEngine][${this.mapping.mappingId}] 远端 ${isMove ? 'move' : 'rename'}-local 跳过: 目标路径已存在 "${newPath}"`);
-                return;
+                return false;
             }
             await this.localFs.rename(oldPath, newPath);
             this.notePullLocalTouch(oldPath, newPath);
@@ -1337,12 +1370,14 @@ class SyncEngine {
             else {
                 this.stats.renamed = (this.stats.renamed ?? 0) + 1;
             }
+            return true;
         }
         catch (e) {
             const msg = e instanceof Error ? e.message : String(e);
             console.error(`[SyncEngine][${this.mapping.mappingId}] 远端 ${isMove ? 'move' : 'rename'}-local 失败: ${oldPath} → ${newPath}: ${msg}`);
             this.stats.failed++;
             this.stats.errors.push(`${oldPath}→${newPath}: ${msg}`);
+            return false;
         }
     }
     /**
@@ -1355,12 +1390,12 @@ class SyncEngine {
             const oldExists = await this.localFs.exists(oldPath);
             if (!oldExists) {
                 console.warn(`[SyncEngine][${this.mapping.mappingId}] 远端目录 ${isMove ? 'move' : 'rename'}-local 跳过: 本地旧目录不存在 "${oldPath}"`);
-                return;
+                return false;
             }
             const newExists = await this.localFs.exists(newPath);
             if (newExists) {
                 console.warn(`[SyncEngine][${this.mapping.mappingId}] 远端目录 ${isMove ? 'move' : 'rename'}-local 跳过: 目标路径已存在 "${newPath}"`);
-                return;
+                return false;
             }
             await this.localFs.rename(oldPath, newPath);
             for (const r of this.db.getAllFileStates(this.mapping.mappingId)) {
@@ -1384,12 +1419,14 @@ class SyncEngine {
             else {
                 this.stats.renamed = (this.stats.renamed ?? 0) + 1;
             }
+            return true;
         }
         catch (e) {
             const msg = e instanceof Error ? e.message : String(e);
             console.error(`[SyncEngine][${this.mapping.mappingId}] 远端目录 ${isMove ? 'move' : 'rename'}-local 失败: ${oldPath} → ${newPath}: ${msg}`);
             this.stats.failed++;
             this.stats.errors.push(`dir ${oldPath}→${newPath}: ${msg}`);
+            return false;
         }
     }
     async doDeleteLocal(path, record) {
@@ -1413,6 +1450,52 @@ class SyncEngine {
         this.db.deleteFileState(this.mapping.mappingId, path);
         this.stats.deleted++;
         this.progress(`✗ 远端删除 ${path}`);
+    }
+    /**
+     * 本地删除 → 仅写 tombstone：知识库文件保留，状态标记 local-deleted，
+     * 后续 decide 既不 delete-remote 也不 download。
+     */
+    async doTombstoneLocal(path, record, remote) {
+        this.db.upsertFileState({
+            mappingId: this.mapping.mappingId,
+            localPath: path,
+            remoteFileId: remote?.remoteFileId ?? record.remoteFileId ?? null,
+            remoteFolderId: remote?.remoteFolderId ?? record.remoteFolderId ?? null,
+            localMtime: record.localMtime ?? null,
+            remoteMtime: remote?.mtime ?? record.remoteMtime ?? null,
+            contentHash: record.contentHash ?? null,
+            syncStatus: 'local-deleted',
+            lastSyncAt: Date.now(),
+            lastError: null,
+            localDev: record.localDev ?? null,
+            localIno: record.localIno ?? null,
+            remoteRelativePath: record.remoteRelativePath ?? null,
+        });
+        this.stats.localTombstoned = (this.stats.localTombstoned ?? 0) + 1;
+        this.stats.skipped++;
+        this.progress(`⊘ 本地删除已记 tombstone（远端保留、不再拉回） ${path}`);
+    }
+    /**
+     * 本地路径重新出现后清除 tombstone（pull 模式：保留本地内容，不强制覆盖）。
+     */
+    async doClearLocalTombstone(path, record, local, remote) {
+        this.db.upsertFileState({
+            mappingId: this.mapping.mappingId,
+            localPath: path,
+            remoteFileId: remote?.remoteFileId ?? record.remoteFileId ?? null,
+            remoteFolderId: remote?.remoteFolderId ?? record.remoteFolderId ?? null,
+            localMtime: local?.mtime ?? record.localMtime ?? null,
+            remoteMtime: remote?.mtime ?? record.remoteMtime ?? null,
+            contentHash: record.contentHash ?? null,
+            syncStatus: 'done',
+            lastSyncAt: Date.now(),
+            lastError: null,
+            localDev: local?.dev ?? record.localDev ?? null,
+            localIno: local?.ino ?? record.localIno ?? null,
+            remoteRelativePath: record.remoteRelativePath ?? null,
+        });
+        this.stats.skipped++;
+        this.progress(`↺ 已清除本地删除 tombstone ${path}`);
     }
     /**
      * 目录级 rename-remote：对文件夹 fileId 调用一次 updateFileName，并批量更新子文件 state。

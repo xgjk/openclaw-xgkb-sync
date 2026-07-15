@@ -1,10 +1,11 @@
 {
   "name": "openclaw-xgkb-sync",
-  "version": "1.1.8",
+  "version": "1.1.9",
   "description": "OpenClaw 节点与玄关知识库文件双向同步 Agent",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
+    "test": "tsc && node --test dist/syncDecide.test.js",
     "start": "node dist/index.js",
     "start:config": "node dist/index.js --config config.json",
     "dev": "ts-node src/index.ts",

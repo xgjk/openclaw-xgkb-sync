@@ -27,6 +27,12 @@ export declare class SyncEngine {
     /** 本地工作区异常时阻断远端删除（含 prune 空目录） */
     private remoteDeleteGuardActive;
     private remoteDeleteGuardReason;
+    /**
+     * 本轮已记 tombstone 的远端 fileId：即使远端 rename 到新路径，也禁止 download-new 拉回。
+     */
+    private tombstonedRemoteFileIds;
+    /** remoteFileId → 状态记录（用于识别「远端 rename 后新路径」实为已知身份） */
+    private remoteFileIdOwners;
     constructor(localFs: LocalFsAdapter, remoteFs: RemoteFsAdapter, db: SyncStateDb, mapping: SyncMapping, opts?: {
         downloadConcurrency?: number;
         uploadConcurrency?: number;
@@ -38,6 +44,7 @@ export declare class SyncEngine {
     getPullLocalTouchPaths(): string[];
     private notePullLocalTouch;
     private emptyStats;
+    private refreshTombstonedRemoteFileIds;
     /**
      * 执行一轮同步（增量优先，降级全量）。
      * @param onProgress 进度回调
@@ -147,6 +154,9 @@ export declare class SyncEngine {
      * - 文件级：rename 单个文件，更新该文件的 DB 记录。
      * - 目录级：rename 整个目录，批量更新 DB 中所有相关文件/文件夹记录的路径前缀。
      */
+    /**
+     * @returns true 仅当本地 rename 实际成功（调用方才应消费路径，避免失败后 Phase2 download-new）
+     */
     private doRemoteMoveToLocal;
     /**
      * 目录级远端 rename/move → 本地。
@@ -155,6 +165,15 @@ export declare class SyncEngine {
     private doRemoteDirMoveToLocal;
     private doDeleteLocal;
     private doDeleteRemote;
+    /**
+     * 本地删除 → 仅写 tombstone：知识库文件保留，状态标记 local-deleted，
+     * 后续 decide 既不 delete-remote 也不 download。
+     */
+    private doTombstoneLocal;
+    /**
+     * 本地路径重新出现后清除 tombstone（pull 模式：保留本地内容，不强制覆盖）。
+     */
+    private doClearLocalTombstone;
     /**
      * 目录级 rename-remote：对文件夹 fileId 调用一次 updateFileName，并批量更新子文件 state。
      * 同父目录下改名（如 dirA → dirB）时使用，不涉及 moveFile。
