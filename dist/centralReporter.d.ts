@@ -36,13 +36,30 @@ export declare class CentralReporter {
     private timer;
     private heartbeatInFlight;
     private stopped;
+    /** 同一 mapping 的待发送日志只保留最新一条，避免中心停服时无限堆积。 */
+    private readonly pendingExecutionLogs;
+    private executionLogsInFlight;
+    private readonly activeControllers;
+    private droppedExecutionLogs;
+    private consecutiveExecutionFailures;
+    private executionPauseUntil;
+    private executionDrainTimer;
+    /** stop/restart 后，旧异步回调不得再修改新一代 reporter 状态。 */
+    private lifecycleGeneration;
     constructor(opts: CentralReporterOptions);
+    /** 资源诊断/测试：中心停服时可观察有界队列是否生效。 */
+    getExecutionLogPressure(): {
+        inFlight: number;
+        pending: number;
+        dropped: number;
+    };
     start(): void;
     stop(): void;
     /** 配置变更后重启心跳定时器（如 Web 保存 centralManagerUrl） */
     restart(): void;
     /** mapping 同步结束后上报 execution-log */
     reportExecutionLog(result: MappingSyncRunResult): void;
+    private drainExecutionLogs;
     private sendHeartbeat;
     private buildMappingStats;
     private postJson;

@@ -7,7 +7,7 @@ import { REQUEST_TIMEOUT_MS } from './constants';
 const CHUNK_SIZE = 5 * 1024 * 1024;
 
 export interface FileUploadCreateParams {
-  content: string;
+  content: string | Buffer;
   fileName: string;
   fileSuffix?: string;
   /** 远端目标目录全路径（KB path 语义），空串表示项目根目录 */
@@ -21,7 +21,7 @@ export interface FileUploadCreateResult {
 }
 
 export interface FileUploadUpdateParams {
-  content: string;
+  content: string | Buffer;
   fileName: string;
   fileSuffix?: string;
   /** 目标文件的 remoteFileId，更新时作为新版本追加 */
@@ -51,7 +51,9 @@ export class FileUploader {
    * 2. 调用 saveFileByPath 在知识库中建立文件节点
    */
   async create(params: FileUploadCreateParams): Promise<ApiResult<FileUploadCreateResult>> {
-    const buf = Buffer.from(params.content, 'utf-8');
+    const buf = Buffer.isBuffer(params.content)
+      ? params.content
+      : Buffer.from(params.content, 'utf-8');
     const suffix = params.fileSuffix || extractSuffix(params.fileName);
 
     const resourceResult = await this.uploadToResource(buf, params.fileName, suffix);
@@ -91,7 +93,9 @@ export class FileUploader {
    * 2. 调用 updateFileVersion 绑定新版本
    */
   async update(params: FileUploadUpdateParams): Promise<ApiResult<FileUploadUpdateResult>> {
-    const buf = Buffer.from(params.content, 'utf-8');
+    const buf = Buffer.isBuffer(params.content)
+      ? params.content
+      : Buffer.from(params.content, 'utf-8');
     const suffix = params.fileSuffix || extractSuffix(params.fileName);
 
     const resourceResult = await this.uploadToResource(buf, params.fileName, suffix);

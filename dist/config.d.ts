@@ -1,4 +1,6 @@
 import { SyncConfig, SyncMapping } from './types';
+/** 将外部资源配置收敛为正整数，并设置硬上限，避免 0 死循环或超大并发。 */
+export declare function boundedPositiveInteger(raw: unknown, fallback: number, max: number, label: string): number;
 export type LoadConfigResult = {
     config: SyncConfig;
     /** 本次是否新建或回填/合并了 config.json */

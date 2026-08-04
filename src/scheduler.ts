@@ -1,5 +1,5 @@
 import { KbApiClient } from './kbApi';
-import { FileWatcher } from './fileWatcher';
+import { FileWatcher, SharedFileWatcherBackend } from './fileWatcher';
 import { LocalFsAdapter } from './localFs';
 import { RateLimiter } from './rateLimiter';
 import { RemoteFsAdapter, RemoteFsInitResult } from './remoteFs';
@@ -14,6 +14,7 @@ import {
   DEFAULT_MAX_REQUESTS_PER_MINUTE,
   DEFAULT_RATE_LIMIT_BURST,
   DOWNLOAD_CONCURRENCY,
+  MAX_CONCURRENT_MAPPINGS_LIMIT,
   RATE_LIMIT_COOLDOWN_MS,
   STARTUP_JITTER_MAX_MS,
   STOP_DRAIN_TIMEOUT_MS,
@@ -63,7 +64,10 @@ export function resolveMaxConcurrentMappings(config: SyncConfig): number {
   if (enabledMappings.length === 0) return 0;
 
   if (config.maxConcurrentMappingsMode === 'manual') {
-    return Math.max(1, config.maxConcurrentMappings ?? DEFAULT_MAX_CONCURRENT_MAPPINGS);
+    return Math.min(
+      MAX_CONCURRENT_MAPPINGS_LIMIT,
+      Math.max(1, Math.floor(config.maxConcurrentMappings ?? DEFAULT_MAX_CONCURRENT_MAPPINGS)),
+    );
   }
 
   const appKeySet = new Set(
@@ -91,6 +95,7 @@ export class SyncScheduler {
   private readonly limiters = new Map<string, RateLimiter>();
   private readonly runStates = new Map<string, MappingRunState>();
   private readonly watchers = new Map<string, FileWatcher>();
+  private readonly watcherBackends: SharedFileWatcherBackend[] = [];
   private timers: NodeJS.Timeout[] = [];
   /** triggerAll 错峰、启动抖动、pendingSync 等延迟任务 */
   private readonly pendingTimers = new Set<NodeJS.Timeout>();
@@ -295,12 +300,24 @@ export class SyncScheduler {
     return { running: this.globalRunningSyncs, max: this.maxGlobalRunningSyncs };
   }
 
+  getWatcherPressure(): { mappings: number; backends: number; watchedDirectories: number } {
+    return {
+      mappings: [...this.watchers.values()].filter((watcher) => watcher.isActive()).length,
+      backends: this.watcherBackends.filter((backend) => backend.isActive()).length,
+      watchedDirectories: this.watcherBackends.reduce(
+        (total, backend) => total + backend.getWatchedDirectoryCount(),
+        0,
+      ),
+    };
+  }
+
   /** 无进行中的 mapping 同步（供自动升级等场景） */
   isSyncIdle(): boolean {
     return this.activeSyncCount === 0 && this.globalRunningSyncs === 0;
   }
 
   private startWatchers(mappings: SyncMapping[]): void {
+    const backends = new Map<boolean, SharedFileWatcherBackend>();
     for (const mapping of mappings) {
       if (!resolveWatchEnabled(mapping, this.config)) continue;
 
@@ -310,23 +327,32 @@ export class SyncScheduler {
       }
 
       const scope = resolveSyncScopeOptions(mapping, this.config);
+      const usePolling = resolveWatchUsePolling(mapping, this.config);
+      let backend = backends.get(usePolling);
+      if (!backend) {
+        backend = new SharedFileWatcherBackend(usePolling);
+        backends.set(usePolling, backend);
+        this.watcherBackends.push(backend);
+      }
 
       const watcher = new FileWatcher({
         mappingId: mapping.mappingId,
         localRoot: mapping.localRoot,
         scope,
         debounceMs: resolvePushDebounceMs(mapping, this.config),
-        usePolling: resolveWatchUsePolling(mapping, this.config),
+        usePolling,
         onBatchReady: (pathCount) => {
           console.log(
             `[FileWatcher][${mapping.mappingId}] batch ${pathCount} path(s) → trigger sync`,
           );
           this.scheduleMapping(mapping, 'watch');
         },
-      });
+      }, backend);
       watcher.start();
       this.watchers.set(mapping.mappingId, watcher);
     }
+
+    for (const backend of this.watcherBackends) backend.start();
 
     if (this.watchers.size > 0) {
       console.log(`[Scheduler] 文件监听已启动: ${this.watchers.size} 条 mapping`);
@@ -337,6 +363,8 @@ export class SyncScheduler {
     const stops = [...this.watchers.values()].map((w) => w.stop());
     await Promise.all(stops);
     this.watchers.clear();
+    await Promise.all(this.watcherBackends.map((backend) => backend.stop()));
+    this.watcherBackends.length = 0;
   }
 
   /** 手动触发指定 mapping 同步 */
@@ -635,6 +663,7 @@ export class SyncScheduler {
       filePatterns: scope.filePatterns,
       excludePatterns: scope.excludePatterns,
       syncDotFiles: scope.syncDotFiles,
+      maxFileSizeBytes: this.config.maxFileSizeBytes,
     });
 
     // init() 解析并返回确定的 projectId / rootFileId，写回 SQLite 缓存
@@ -663,6 +692,7 @@ export class SyncScheduler {
       {
         downloadConcurrency: this.config.downloadConcurrency ?? DOWNLOAD_CONCURRENCY,
         uploadConcurrency: this.config.uploadConcurrency ?? UPLOAD_CONCURRENCY,
+        maxFileSizeBytes: this.config.maxFileSizeBytes,
       },
     );
 

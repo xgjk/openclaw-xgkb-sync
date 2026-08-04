@@ -57,7 +57,9 @@ class FileUploader {
      * 2. 调用 saveFileByPath 在知识库中建立文件节点
      */
     async create(params) {
-        const buf = Buffer.from(params.content, 'utf-8');
+        const buf = Buffer.isBuffer(params.content)
+            ? params.content
+            : Buffer.from(params.content, 'utf-8');
         const suffix = params.fileSuffix || extractSuffix(params.fileName);
         const resourceResult = await this.uploadToResource(buf, params.fileName, suffix);
         if (!resourceResult.ok)
@@ -92,7 +94,9 @@ class FileUploader {
      * 2. 调用 updateFileVersion 绑定新版本
      */
     async update(params) {
-        const buf = Buffer.from(params.content, 'utf-8');
+        const buf = Buffer.isBuffer(params.content)
+            ? params.content
+            : Buffer.from(params.content, 'utf-8');
         const suffix = params.fileSuffix || extractSuffix(params.fileName);
         const resourceResult = await this.uploadToResource(buf, params.fileName, suffix);
         if (!resourceResult.ok)

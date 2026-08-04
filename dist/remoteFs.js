@@ -20,6 +20,7 @@ class RemoteFsAdapter {
     resolvedProjectId = null;
     resolvedRootFileId = null;
     resolvedRootFolderPath = null;
+    maxFileSizeBytes;
     constructor(api, opts) {
         this.api = api;
         this.uploader = new fileUploader_1.FileUploader(api);
@@ -29,6 +30,7 @@ class RemoteFsAdapter {
             excludePatterns: opts.excludePatterns ?? constants_1.DEFAULT_EXCLUDE_PATTERNS,
             syncDotFiles: opts.syncDotFiles ?? constants_1.DEFAULT_SYNC_DOT_FILES,
         };
+        this.maxFileSizeBytes = opts.maxFileSizeBytes ?? constants_1.DEFAULT_MAX_FILE_SIZE_BYTES;
     }
     getRootFileId() {
         if (!this.resolvedRootFileId)
@@ -280,36 +282,97 @@ class RemoteFsAdapter {
      * Prefer getDownloadInfo(forceDownload=true) OSS URL; fall back to getFullFileContent.
      */
     async readFile(fileId) {
+        const result = await this.readFileBuffer(fileId);
+        return result.ok ? { ok: true, value: result.value.toString('utf8') } : result;
+    }
+    /** 主同步下载使用 Buffer，避免 Response→UTF-16 string→Buffer 的整文件双重复制。 */
+    async readFileBuffer(fileId) {
         const infoResult = await this.api.getDownloadInfo(fileId, true);
         if (infoResult.ok && infoResult.value.downloadUrl) {
+            if (infoResult.value.size != null &&
+                Number(infoResult.value.size) > this.maxFileSizeBytes) {
+                return {
+                    ok: false,
+                    error: `远端文件 ${infoResult.value.size} bytes 超过安全上限 ${this.maxFileSizeBytes} bytes`,
+                };
+            }
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), constants_1.REQUEST_TIMEOUT_MS * 2);
             try {
-                const resp = await fetch(infoResult.value.downloadUrl);
+                const resp = await fetch(infoResult.value.downloadUrl, { signal: controller.signal });
                 if (!resp.ok) {
-                    if (resp.status === 429) {
-                        return {
-                            ok: false,
-                            error: `OSS download rate limited HTTP 429: ${resp.statusText}`,
-                        };
-                    }
-                    return { ok: false, error: `OSS download failed HTTP ${resp.status}: ${resp.statusText}` };
+                    return {
+                        ok: false,
+                        error: `OSS download failed HTTP ${resp.status}: ${resp.statusText}`,
+                    };
                 }
-                const text = await resp.text();
-                return { ok: true, value: text };
+                const contentLength = Number(resp.headers.get('content-length') ?? 0);
+                if (contentLength > this.maxFileSizeBytes) {
+                    controller.abort();
+                    return {
+                        ok: false,
+                        error: `远端文件 ${contentLength} bytes 超过安全上限 ${this.maxFileSizeBytes} bytes`,
+                    };
+                }
+                return this.readResponseBufferLimited(resp, controller);
             }
             catch (e) {
-                return { ok: false, error: `OSS download error: ${e instanceof Error ? e.message : String(e)}` };
+                return {
+                    ok: false,
+                    error: `OSS download error: ${e instanceof Error ? e.message : String(e)}`,
+                };
+            }
+            finally {
+                clearTimeout(timeout);
             }
         }
-        // Fallback: getDownloadInfo is unavailable or returns no downloadUrl.
-        console.warn(`[RemoteFs] getDownloadInfo falling back to getFullFileContent (fileId=${fileId}): ${infoResult.ok ? 'no downloadUrl' : infoResult.error}`);
-        const r = await this.api.getFullFileContent(fileId);
-        if (!r.ok)
-            return r;
-        // AI fallback may include page footer text.
-        const cleaned = r.value == null
+        console.warn(`[RemoteFs] getDownloadInfo falling back to getFullFileContent (fileId=${fileId}): ` +
+            `${infoResult.ok ? 'no downloadUrl' : infoResult.error}`);
+        const fallback = await this.api.getFullFileContent(fileId);
+        if (!fallback.ok)
+            return fallback;
+        const cleaned = fallback.value == null
             ? ''
-            : r.value.replace(/\n*Page \d+ of \d+\s*$/, '').trimEnd() + '\n';
-        return { ok: true, value: cleaned };
+            : fallback.value.replace(/\n*Page \d+ of \d+\s*$/, '').trimEnd() + '\n';
+        const value = Buffer.from(cleaned, 'utf8');
+        if (value.length > this.maxFileSizeBytes) {
+            return {
+                ok: false,
+                error: `远端文件 ${value.length} bytes 超过安全上限 ${this.maxFileSizeBytes} bytes`,
+            };
+        }
+        return { ok: true, value };
+    }
+    async readResponseBufferLimited(resp, controller) {
+        if (!resp.body)
+            return { ok: true, value: Buffer.alloc(0) };
+        const reader = resp.body.getReader();
+        const chunks = [];
+        let total = 0;
+        try {
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done)
+                    break;
+                total += value.byteLength;
+                if (total > this.maxFileSizeBytes) {
+                    controller.abort();
+                    return {
+                        ok: false,
+                        error: `远端文件超过安全上限 ${this.maxFileSizeBytes} bytes，已中止下载`,
+                    };
+                }
+                chunks.push(Buffer.from(value.buffer, value.byteOffset, value.byteLength));
+            }
+            if (chunks.length === 0)
+                return { ok: true, value: Buffer.alloc(0) };
+            if (chunks.length === 1)
+                return { ok: true, value: chunks[0] };
+            return { ok: true, value: Buffer.concat(chunks, total) };
+        }
+        finally {
+            reader.releaseLock();
+        }
     }
     /**
      * Batch-read file content through getDownloadInfo + OSS fetch.
@@ -339,6 +402,13 @@ class RemoteFsAdapter {
      * @param relativePath Relative path, for example "folder/2024.md".
      */
     async createFile(relativePath, content) {
+        const contentBytes = Buffer.isBuffer(content) ? content.length : Buffer.byteLength(content);
+        if (contentBytes > this.maxFileSizeBytes) {
+            return {
+                ok: false,
+                error: `本地文件 ${contentBytes} bytes 超过安全上限 ${this.maxFileSizeBytes} bytes`,
+            };
+        }
         if (this.resolvedRootFolderPath === null) {
             return { ok: false, error: 'RemoteFsAdapter is not initialized; call init() first' };
         }
@@ -361,6 +431,13 @@ class RemoteFsAdapter {
      * Update a remote file version (append new version to existing fileId).
      */
     async updateFile(remoteFileId, fileName, content) {
+        const contentBytes = Buffer.isBuffer(content) ? content.length : Buffer.byteLength(content);
+        if (contentBytes > this.maxFileSizeBytes) {
+            return {
+                ok: false,
+                error: `本地文件 ${contentBytes} bytes 超过安全上限 ${this.maxFileSizeBytes} bytes`,
+            };
+        }
         const fileSuffix = getFileSuffix(fileName);
         const r = await this.uploader.update({
             content,
@@ -435,6 +512,13 @@ class RemoteFsAdapter {
     }
     /** uploadContent 封装（自动注入 projectId） */
     async uploadTextContent(params) {
+        const contentBytes = Buffer.byteLength(params.content, 'utf8');
+        if (contentBytes > this.maxFileSizeBytes) {
+            return {
+                ok: false,
+                error: `索引文件 ${contentBytes} bytes 超过安全上限 ${this.maxFileSizeBytes} bytes`,
+            };
+        }
         return this.api.uploadContent({
             content: params.content,
             fileName: params.fileName,
@@ -490,7 +574,10 @@ class RemoteFsAdapter {
             const childResult = await this.pruneFolderNode(childId, childRelPath, localDirectoryPaths, false);
             deleted += childResult.deleted;
             failed += childResult.failed;
-            errors.push(...childResult.errors);
+            const remainingErrorSlots = constants_1.MAX_SYNC_ERROR_DETAILS - errors.length;
+            if (remainingErrorSlots > 0) {
+                errors.push(...childResult.errors.slice(0, remainingErrorSlots));
+            }
             if (childResult.existsAfter) {
                 hasChildAfterPrune = true;
             }

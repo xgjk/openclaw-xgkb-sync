@@ -52,8 +52,26 @@ class CentralReporter {
     timer = null;
     heartbeatInFlight = false;
     stopped = false;
+    /** 同一 mapping 的待发送日志只保留最新一条，避免中心停服时无限堆积。 */
+    pendingExecutionLogs = new Map();
+    executionLogsInFlight = 0;
+    activeControllers = new Set();
+    droppedExecutionLogs = 0;
+    consecutiveExecutionFailures = 0;
+    executionPauseUntil = 0;
+    executionDrainTimer = null;
+    /** stop/restart 后，旧异步回调不得再修改新一代 reporter 状态。 */
+    lifecycleGeneration = 0;
     constructor(opts) {
         this.opts = opts;
+    }
+    /** 资源诊断/测试：中心停服时可观察有界队列是否生效。 */
+    getExecutionLogPressure() {
+        return {
+            inFlight: this.executionLogsInFlight,
+            pending: this.pendingExecutionLogs.size,
+            dropped: this.droppedExecutionLogs,
+        };
     }
     start() {
         const config = this.opts.getConfig();
@@ -74,10 +92,22 @@ class CentralReporter {
     }
     stop() {
         this.stopped = true;
+        this.lifecycleGeneration++;
         if (this.timer) {
             clearInterval(this.timer);
             this.timer = null;
         }
+        this.pendingExecutionLogs.clear();
+        this.droppedExecutionLogs = 0;
+        this.consecutiveExecutionFailures = 0;
+        this.executionPauseUntil = 0;
+        if (this.executionDrainTimer) {
+            clearTimeout(this.executionDrainTimer);
+            this.executionDrainTimer = null;
+        }
+        for (const controller of this.activeControllers)
+            controller.abort();
+        this.activeControllers.clear();
     }
     /** 配置变更后重启心跳定时器（如 Web 保存 centralManagerUrl） */
     restart() {
@@ -109,13 +139,76 @@ class CentralReporter {
             failed: result.failed,
             ...(result.errorMsg ? { errorMsg: result.errorMsg } : {}),
         };
-        void this.postJson(baseUrl, '/nologin/node/execution-log', body).catch((e) => {
-            console.warn(`[CentralReporter] execution-log 上报失败 (${result.mappingId}):`, e instanceof Error ? e.message : String(e));
-        });
+        // Map.set 会覆盖同一 mapping 尚未发送的旧记录：中心不可用时保留“最新状态”比
+        // 无限制保存每一轮历史更安全。不同 mapping 仍有硬上限，防配置异常撑爆内存。
+        if (!this.pendingExecutionLogs.has(result.mappingId) &&
+            this.pendingExecutionLogs.size >= constants_1.CENTRAL_EXECUTION_LOG_MAX_PENDING) {
+            const oldestMappingId = this.pendingExecutionLogs.keys().next().value;
+            if (oldestMappingId)
+                this.pendingExecutionLogs.delete(oldestMappingId);
+            this.droppedExecutionLogs++;
+        }
+        else if (this.pendingExecutionLogs.has(result.mappingId)) {
+            this.droppedExecutionLogs++;
+        }
+        this.pendingExecutionLogs.set(result.mappingId, { baseUrl, body });
+        this.drainExecutionLogs();
+    }
+    drainExecutionLogs() {
+        if (this.stopped)
+            return;
+        const backoffRemaining = this.executionPauseUntil - Date.now();
+        if (backoffRemaining > 0) {
+            if (!this.executionDrainTimer) {
+                this.executionDrainTimer = setTimeout(() => {
+                    this.executionDrainTimer = null;
+                    this.drainExecutionLogs();
+                }, backoffRemaining);
+                this.executionDrainTimer.unref();
+            }
+            return;
+        }
+        while (this.executionLogsInFlight < constants_1.CENTRAL_EXECUTION_LOG_CONCURRENCY &&
+            this.pendingExecutionLogs.size > 0) {
+            const next = this.pendingExecutionLogs.entries().next().value;
+            if (!next)
+                return;
+            const [mappingId, item] = next;
+            this.pendingExecutionLogs.delete(mappingId);
+            this.executionLogsInFlight++;
+            const generation = this.lifecycleGeneration;
+            void this.postJson(item.baseUrl, '/nologin/node/execution-log', item.body)
+                .then(() => {
+                if (this.stopped || generation !== this.lifecycleGeneration)
+                    return;
+                this.consecutiveExecutionFailures = 0;
+                this.executionPauseUntil = 0;
+            })
+                .catch((e) => {
+                if (this.stopped || generation !== this.lifecycleGeneration)
+                    return;
+                this.consecutiveExecutionFailures++;
+                const backoffMs = Math.min(constants_1.CENTRAL_REPORT_MAX_BACKOFF_MS, 1_000 * Math.pow(2, Math.min(this.consecutiveExecutionFailures - 1, 10)));
+                this.executionPauseUntil = Math.max(this.executionPauseUntil, Date.now() + backoffMs);
+                console.warn(`[CentralReporter] execution-log 上报失败 (${mappingId}):`, `${e instanceof Error ? e.message : String(e)}；退避 ${Math.round(backoffMs / 1000)}s`);
+            })
+                .finally(() => {
+                this.executionLogsInFlight--;
+                if (!this.stopped &&
+                    generation === this.lifecycleGeneration &&
+                    this.droppedExecutionLogs > 0) {
+                    console.warn(`[CentralReporter] 中心上报拥塞，已合并/舍弃 ${this.droppedExecutionLogs} 条旧 execution-log` +
+                        `（待发送=${this.pendingExecutionLogs.size}，进行中=${this.executionLogsInFlight}）`);
+                    this.droppedExecutionLogs = 0;
+                }
+                this.drainExecutionLogs();
+            });
+        }
     }
     async sendHeartbeat() {
         if (this.stopped || this.heartbeatInFlight)
             return;
+        const generation = this.lifecycleGeneration;
         const config = this.opts.getConfig();
         const baseUrl = config.centralManagerUrl?.trim();
         if (!baseUrl)
@@ -138,6 +231,8 @@ class CentralReporter {
                 reportedConfig: (0, centralConfigMerge_1.buildReportedConfig)(config),
             };
             const data = await this.postJson(baseUrl, '/nologin/node/heartbeat', body);
+            if (this.stopped || generation !== this.lifecycleGeneration)
+                return;
             const latest = data.latestAppVersion?.trim();
             if (latest && isAutoUpgradeEnabled(config)) {
                 if ((0, versionCompare_1.isNewerVersion)(latest, this.opts.appVersion)) {
@@ -158,7 +253,8 @@ class CentralReporter {
             }
         }
         finally {
-            this.heartbeatInFlight = false;
+            if (generation === this.lifecycleGeneration)
+                this.heartbeatInFlight = false;
         }
     }
     buildMappingStats(scheduler) {
@@ -186,33 +282,53 @@ class CentralReporter {
     }
     async postJson(baseUrl, apiPath, body) {
         const url = `${baseUrl.replace(/\/+$/, '')}${apiPath.startsWith('/') ? apiPath : `/${apiPath}`}`;
-        const resp = await fetch(url, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'X-Node-Id': this.opts.getNodeIdentity().nodeId,
-            },
-            body: JSON.stringify(body),
-        });
-        const text = await resp.text();
-        let json;
+        const controller = new AbortController();
+        this.activeControllers.add(controller);
+        const timeout = setTimeout(() => controller.abort(), constants_1.CENTRAL_REPORT_TIMEOUT_MS);
+        timeout.unref();
         try {
-            json = text ? JSON.parse(text) : {};
+            const resp = await fetch(url, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Node-Id': this.opts.getNodeIdentity().nodeId,
+                },
+                body: JSON.stringify(body),
+                signal: controller.signal,
+            });
+            // 超时覆盖响应 body 读取；仅限制到 headers 会让“已回 headers 但 body 卡住”的连接永久悬挂。
+            const text = await resp.text();
+            let json;
+            try {
+                json = text ? JSON.parse(text) : {};
+            }
+            catch {
+                throw new Error(`HTTP ${resp.status} 响应非 JSON: ${text.slice(0, 200)}`);
+            }
+            if (!resp.ok) {
+                throw new Error(`HTTP ${resp.status}: ${text.slice(0, 300)}`);
+            }
+            const envelope = json;
+            const ok = envelope.resultCode === 1 ||
+                envelope.resultCode === 200 ||
+                envelope.success === true;
+            if (!ok) {
+                throw new Error(envelope.resultMsg ?? `sync-manage 返回 resultCode=${envelope.resultCode}`);
+            }
+            return (envelope.data ?? {});
         }
-        catch {
-            throw new Error(`HTTP ${resp.status} 响应非 JSON: ${text.slice(0, 200)}`);
+        catch (e) {
+            if (e instanceof Error && e.name === 'AbortError') {
+                const timeoutError = new Error(`sync-manage 上报超时（>${constants_1.CENTRAL_REPORT_TIMEOUT_MS}ms）`);
+                timeoutError.name = 'AbortError';
+                throw timeoutError;
+            }
+            throw e;
         }
-        if (!resp.ok) {
-            throw new Error(`HTTP ${resp.status}: ${text.slice(0, 300)}`);
+        finally {
+            clearTimeout(timeout);
+            this.activeControllers.delete(controller);
         }
-        const envelope = json;
-        const ok = envelope.resultCode === 1 ||
-            envelope.resultCode === 200 ||
-            envelope.success === true;
-        if (!ok) {
-            throw new Error(envelope.resultMsg ?? `sync-manage 返回 resultCode=${envelope.resultCode}`);
-        }
-        return (envelope.data ?? {});
     }
 }
 exports.CentralReporter = CentralReporter;

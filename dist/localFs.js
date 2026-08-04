@@ -56,32 +56,40 @@ class LocalFsAdapter {
         return this.scope;
     }
     /**
-     * 递归列出 localRoot 下所有匹配 filePatterns 且不在 excludePatterns 中的文件。
-     * 返回路径均为相对于 localRoot 的路径（使用 "/" 分隔）。
+     * 单次遍历同时采集文件与目录。按有限目录批次推进，避免宽目录树创建无界 Promise，
+     * 也避免 SyncEngine 为同一棵树并行执行两次完整 walk。
      */
-    async listFiles() {
-        const entries = [];
-        await this.walk(this.localRoot, '', entries);
-        return entries;
+    async listSnapshot() {
+        const files = [];
+        const directories = [];
+        const pending = [
+            { absDir: this.localRoot, relPrefix: '' },
+        ];
+        const directoryBatchSize = 8;
+        let pendingHead = 0;
+        while (pendingHead < pending.length) {
+            const batch = pending.slice(pendingHead, pendingHead + directoryBatchSize);
+            pendingHead += batch.length;
+            const discovered = await Promise.all(batch.map((item) => this.scanSnapshotDirectory(item.absDir, item.relPrefix, files, directories)));
+            for (const children of discovered)
+                pending.push(...children);
+            // 定期压缩已消费队列，兼顾线性 CPU 与路径对象及时释放。
+            if (pendingHead >= 1_024) {
+                pending.splice(0, pendingHead);
+                pendingHead = 0;
+            }
+        }
+        return { files, directories };
     }
-    /**
-     * 递归列出 localRoot 下所有纳入同步遍历范围的目录（含 dev/ino）。
-     * 返回路径均为相对于 localRoot 的路径（使用 "/" 分隔），不包含根目录自身。
-     */
-    async listDirectories() {
-        const dirs = [];
-        await this.walkDirectories(this.localRoot, '', dirs);
-        return dirs;
-    }
-    async walk(absDir, relPrefix, entries) {
+    async scanSnapshotDirectory(absDir, relPrefix, files, directories) {
         let dirEntries;
         try {
             dirEntries = await fs.readdir(absDir, { withFileTypes: true });
         }
         catch {
-            return;
+            return [];
         }
-        const subDirTasks = [];
+        const children = [];
         for (const dirent of dirEntries) {
             if ((0, pathSyncScope_1.shouldSkipDotEntryName)(dirent.name, this.scope.syncDotFiles))
                 continue;
@@ -90,74 +98,70 @@ class LocalFsAdapter {
             if (dirent.isDirectory()) {
                 if (!(0, pathSyncScope_1.isInSyncScope)(relPath, this.scope, 'directory'))
                     continue;
-                subDirTasks.push(this.walk(absPath, relPath, entries));
-            }
-            else if (dirent.isFile()) {
                 const safePath = (0, pathSanitize_1.normalizeSeparator)(relPath)
                     .split('/')
                     .map((seg) => (0, pathSanitize_1.sanitizePathSegment)(seg))
                     .join('/');
-                if (!(0, pathSyncScope_1.isInSyncScope)(safePath, this.scope, 'file'))
-                    continue;
                 try {
                     const stat = await fs.stat(absPath, { bigint: true });
-                    entries.push({
+                    directories.push({
                         path: safePath,
-                        name: dirent.name,
-                        mtime: Number(stat.mtimeMs),
-                        size: Number(stat.size),
                         dev: stat.dev.toString(),
                         ino: stat.ino.toString(),
                     });
                 }
                 catch {
-                    // stat 失败跳过
+                    directories.push({ path: safePath, dev: '0', ino: '0' });
                 }
+                children.push({ absDir: absPath, relPrefix: relPath });
+                continue;
             }
-        }
-        if (subDirTasks.length > 0) {
-            await Promise.all(subDirTasks);
-        }
-    }
-    async walkDirectories(absDir, relPrefix, dirs) {
-        let dirEntries;
-        try {
-            dirEntries = await fs.readdir(absDir, { withFileTypes: true });
-        }
-        catch {
-            return;
-        }
-        const subDirTasks = [];
-        for (const dirent of dirEntries) {
-            if ((0, pathSyncScope_1.shouldSkipDotEntryName)(dirent.name, this.scope.syncDotFiles))
-                continue;
-            if (!dirent.isDirectory())
-                continue;
-            const relPath = relPrefix ? `${relPrefix}/${dirent.name}` : dirent.name;
-            if (!(0, pathSyncScope_1.isInSyncScope)(relPath, this.scope, 'directory'))
+            if (!dirent.isFile())
                 continue;
             const safePath = (0, pathSanitize_1.normalizeSeparator)(relPath)
                 .split('/')
                 .map((seg) => (0, pathSanitize_1.sanitizePathSegment)(seg))
                 .join('/');
-            const absPath = path.join(absDir, dirent.name);
+            if (!(0, pathSyncScope_1.isInSyncScope)(safePath, this.scope, 'file'))
+                continue;
             try {
                 const stat = await fs.stat(absPath, { bigint: true });
-                dirs.push({ path: safePath, dev: stat.dev.toString(), ino: stat.ino.toString() });
+                files.push({
+                    path: safePath,
+                    name: dirent.name,
+                    mtime: Number(stat.mtimeMs),
+                    size: Number(stat.size),
+                    dev: stat.dev.toString(),
+                    ino: stat.ino.toString(),
+                });
             }
             catch {
-                dirs.push({ path: safePath, dev: '0', ino: '0' });
+                // stat 失败跳过
             }
-            subDirTasks.push(this.walkDirectories(absPath, relPath, dirs));
         }
-        if (subDirTasks.length > 0) {
-            await Promise.all(subDirTasks);
-        }
+        return children;
+    }
+    /**
+     * 递归列出 localRoot 下所有匹配 filePatterns 且不在 excludePatterns 中的文件。
+     * 返回路径均为相对于 localRoot 的路径（使用 "/" 分隔）。
+     */
+    async listFiles() {
+        return (await this.listSnapshot()).files;
+    }
+    /**
+     * 递归列出 localRoot 下所有纳入同步遍历范围的目录（含 dev/ino）。
+     * 返回路径均为相对于 localRoot 的路径（使用 "/" 分隔），不包含根目录自身。
+     */
+    async listDirectories() {
+        return (await this.listSnapshot()).directories;
     }
     /** 读取文件内容（UTF-8） */
     async readFile(relativePath) {
         const absPath = this.resolve(relativePath);
         return fs.readFile(absPath, 'utf-8');
+    }
+    async readFileBuffer(relativePath) {
+        return fs.readFile(this.resolve(relativePath));
     }
     /**
      * 写入文件（自动创建父目录）。
@@ -167,6 +171,13 @@ class LocalFsAdapter {
         const absPath = this.resolve(relativePath);
         await fs.mkdir(path.dirname(absPath), { recursive: true });
         await fs.writeFile(absPath, content, 'utf-8');
+        const stat = await fs.stat(absPath);
+        return stat.mtimeMs;
+    }
+    async writeFileBuffer(relativePath, content) {
+        const absPath = this.resolve(relativePath);
+        await fs.mkdir(path.dirname(absPath), { recursive: true });
+        await fs.writeFile(absPath, content);
         const stat = await fs.stat(absPath);
         return stat.mtimeMs;
     }

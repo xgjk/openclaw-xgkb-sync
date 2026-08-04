@@ -36,7 +36,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.FileWatcher = void 0;
+exports.FileWatcher = exports.SharedFileWatcherBackend = void 0;
 const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
 const chokidar_1 = __importDefault(require("chokidar"));
@@ -44,10 +44,98 @@ const constants_1 = require("./constants");
 const pathSanitize_1 = require("./pathSanitize");
 const pathSyncScope_1 = require("./pathSyncScope");
 /**
+ * 多 mapping 共用的底层 chokidar 实例。
+ *
+ * chokidar 的每个 FSWatcher 都会维护一套完整的目录/文件索引；将多个 root 放进同一实例
+ * 可自动去重父子/重叠目录，同时仍由 FileWatcher 保留 mapping 级 debounce、pause、ignore 语义。
+ * polling 与非 polling 的底层机制不同，由 Scheduler 分成最多两个 backend。
+ */
+class SharedFileWatcherBackend {
+    usePolling;
+    registrations = new Map();
+    watcher = null;
+    readyPromise = Promise.resolve();
+    resolveReady = null;
+    constructor(usePolling) {
+        this.usePolling = usePolling;
+    }
+    register(registration) {
+        this.registrations.set(registration.getMappingId(), registration);
+    }
+    unregister(mappingId) {
+        this.registrations.delete(mappingId);
+    }
+    start() {
+        if (this.watcher || this.registrations.size === 0)
+            return;
+        const roots = [
+            ...new Set([...this.registrations.values()].map((r) => r.getResolvedRoot())),
+        ];
+        if (roots.length === 0)
+            return;
+        this.readyPromise = new Promise((resolve) => {
+            this.resolveReady = resolve;
+        });
+        this.watcher = chokidar_1.default.watch(roots, {
+            ignored: (absPath, stats) => {
+                for (const registration of this.registrations.values()) {
+                    if (!registration.shouldIgnoreSharedTarget(absPath, stats))
+                        return false;
+                }
+                return true;
+            },
+            ignoreInitial: true,
+            persistent: true,
+            awaitWriteFinish: {
+                stabilityThreshold: constants_1.WATCH_AWAIT_WRITE_STABILITY_MS,
+                pollInterval: constants_1.WATCH_AWAIT_WRITE_POLL_MS,
+            },
+            usePolling: this.usePolling,
+            depth: undefined,
+        });
+        this.watcher.on('all', (event, absPath) => {
+            for (const registration of this.registrations.values()) {
+                registration.handleSharedFsEvent(event, absPath);
+            }
+        });
+        this.watcher.on('ready', () => {
+            this.resolveReady?.();
+            this.resolveReady = null;
+            console.log(`[FileWatcher] shared backend ready mappings=${this.registrations.size}` +
+                ` roots=${roots.length} polling=${this.usePolling}`);
+        });
+        this.watcher.on('error', (err) => {
+            console.warn(`[FileWatcher] shared backend error polling=${this.usePolling}: ` +
+                `${err instanceof Error ? err.message : String(err)}; 依赖定时 sync 兜底`);
+        });
+    }
+    async stop() {
+        this.resolveReady?.();
+        this.resolveReady = null;
+        if (this.watcher) {
+            await this.watcher.close();
+            this.watcher = null;
+        }
+        this.registrations.clear();
+    }
+    isActive() {
+        return this.watcher !== null;
+    }
+    /** 供启动编排和集成测试等待初次索引完成，避免漏掉 ready 前的文件事件。 */
+    waitUntilReady() {
+        return this.readyPromise;
+    }
+    getWatchedDirectoryCount() {
+        return this.watcher ? Object.keys(this.watcher.getWatched()).length : 0;
+    }
+}
+exports.SharedFileWatcherBackend = SharedFileWatcherBackend;
+/**
  * mapping 级 chokidar 封装：debounce 合并变更，sync 期间 pause，pull 写入 echo 过滤。
  * 硬排除 `.openclaw-sync-map.json`（方案一索引 consume 写入，避免误触发 push）。
  */
 class FileWatcher {
+    sharedBackend;
     opts;
     ignoreSet = new Set();
     watcher = null;
@@ -56,8 +144,15 @@ class FileWatcher {
     ignoreTailTimer = null;
     paused = false;
     started = false;
-    constructor(opts) {
+    constructor(opts, sharedBackend) {
+        this.sharedBackend = sharedBackend;
         this.opts = opts;
+    }
+    getMappingId() {
+        return this.opts.mappingId;
+    }
+    getResolvedRoot() {
+        return path.resolve(this.opts.localRoot);
     }
     start() {
         if (this.started)
@@ -69,6 +164,10 @@ class FileWatcher {
             return;
         }
         this.started = true;
+        if (this.sharedBackend) {
+            this.sharedBackend.register(this);
+            return;
+        }
         this.watcher = chokidar_1.default.watch(root, {
             ignored: (absPath, stats) => this.shouldIgnoreWatchTarget(absPath, root, scope, stats),
             ignoreInitial: true,
@@ -99,6 +198,10 @@ class FileWatcher {
         }
         this.ignoreSet.clear();
         this.pendingPaths.clear();
+        if (this.sharedBackend) {
+            this.sharedBackend.unregister(this.opts.mappingId);
+            return;
+        }
         if (this.watcher) {
             await this.watcher.close();
             this.watcher = null;
@@ -144,7 +247,18 @@ class FileWatcher {
         }
     }
     isActive() {
-        return this.started && this.watcher !== null;
+        return this.started && (this.sharedBackend?.isActive() ?? this.watcher !== null);
+    }
+    handleSharedFsEvent(event, absPath) {
+        if (!this.started)
+            return;
+        this.onFsEvent(event, absPath, this.getResolvedRoot());
+    }
+    /** backend 的 ignored 回调：不属于本 mapping 时视为 ignore；属于时应用 mapping scope。 */
+    shouldIgnoreSharedTarget(absPath, stats) {
+        if (!this.started)
+            return true;
+        return this.shouldIgnoreWatchTarget(absPath, this.getResolvedRoot(), this.opts.scope, stats);
     }
     onFsEvent(event, absPath, root) {
         if (this.paused)
@@ -157,7 +271,8 @@ class FileWatcher {
         if (this.ignoreSet.has(rel))
             return;
         const isDirEvent = event === 'addDir' || event === 'unlinkDir';
-        if (!isDirEvent && !this.matchesSyncScope(rel))
+        const kind = isDirEvent ? 'directory' : 'file';
+        if (!(0, pathSyncScope_1.isInSyncScope)(rel, this.opts.scope, kind))
             return;
         this.pendingPaths.add(rel);
         this.scheduleDebounce();
@@ -198,7 +313,7 @@ class FileWatcher {
      */
     shouldIgnoreWatchTarget(absPath, root, scope, stats) {
         const rel = path.relative(root, absPath);
-        if (rel.startsWith('..'))
+        if (rel.startsWith('..') || path.isAbsolute(rel))
             return true;
         if (rel === '')
             return false;

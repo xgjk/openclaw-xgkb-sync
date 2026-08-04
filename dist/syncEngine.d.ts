@@ -22,6 +22,7 @@ export declare class SyncEngine {
     private readonly syncScope;
     private readonly downloadConcurrency;
     private readonly uploadConcurrency;
+    private readonly maxFileSizeBytes;
     /** pull/bidirectional 本轮 sync 写入本地的路径，供 FileWatcher resume 后 echo 过滤 */
     private pullLocalTouchPaths;
     /** 本地工作区异常时阻断远端删除（含 prune 空目录） */
@@ -36,8 +37,10 @@ export declare class SyncEngine {
     constructor(localFs: LocalFsAdapter, remoteFs: RemoteFsAdapter, db: SyncStateDb, mapping: SyncMapping, opts?: {
         downloadConcurrency?: number;
         uploadConcurrency?: number;
+        maxFileSizeBytes?: number;
     });
     private delay;
+    private addErrorDetails;
     /** 判断路径是否应纳入同步范围 */
     private matchesSync;
     /** 本轮 sync 中 pull 侧写入本地的路径（供 chokidar echo 过滤） */

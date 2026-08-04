@@ -15,6 +15,7 @@
   "rateLimitCooldownSec": 60,
   "downloadConcurrency": 5,
   "uploadConcurrency": 3,
+  "maxFileSizeBytes": 104857600,
   "startupJitterMaxSec": 20,
 
   "managementPort": 9090,

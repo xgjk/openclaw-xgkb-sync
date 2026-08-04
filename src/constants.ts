@@ -195,11 +195,37 @@ export const DEFAULT_CENTRAL_MANAGER_URL =
 /** sync-manage 心跳默认间隔（秒） */
 export const DEFAULT_CENTRAL_HEARTBEAT_INTERVAL_SEC = 45;
 
+/** sync-manage 单次 HTTP 上报超时，避免对端停服/半开连接永久占用内存。 */
+export const CENTRAL_REPORT_TIMEOUT_MS = 30_000;
+
+/** execution-log 最大并发请求数；其余按 mappingId 合并到有界待发送队列。 */
+export const CENTRAL_EXECUTION_LOG_CONCURRENCY = 2;
+
+/** execution-log 队列最大 mapping 数；同一 mapping 只保留最新一条。 */
+export const CENTRAL_EXECUTION_LOG_MAX_PENDING = 200;
+
+/** 中心连续失败后的最大退避时间，防止 connection-refused 时高频重试。 */
+export const CENTRAL_REPORT_MAX_BACKOFF_MS = 60_000;
+
 /** 发现 latestAppVersion 更新时默认自动升级（显式 false 可关闭） */
 export const DEFAULT_AUTO_UPGRADE_ENABLED = true;
 
 /** 默认最大并发 mapping 数 */
 export const DEFAULT_MAX_CONCURRENT_MAPPINGS = 2;
+
+/** 资源安全硬上限：防止错误配置让所有 mapping / 文件同时占用内存。 */
+export const MAX_CONCURRENT_MAPPINGS_LIMIT = 10;
+export const MAX_DOWNLOAD_CONCURRENCY = 20;
+export const MAX_UPLOAD_CONCURRENCY = 10;
+export const MAX_RATE_LIMIT_BURST = 1_000;
+export const MAX_REQUESTS_PER_MINUTE_LIMIT = 60_000;
+
+/** 单轮仅保留有限数量错误明细；失败总数仍由 stats.failed 完整记录。 */
+export const MAX_SYNC_ERROR_DETAILS = 100;
+
+/** 单文件默认内存安全上限（文本知识库文件）；可通过配置降低或提高。 */
+export const DEFAULT_MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024;
+export const MAX_FILE_SIZE_BYTES_LIMIT = 1024 * 1024 * 1024;
 
 /** 版本备注 */
 export const VERSION_REMARK = 'OpenClaw Sync Agent';

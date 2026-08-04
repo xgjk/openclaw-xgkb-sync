@@ -21,7 +21,7 @@ function resolveMaxConcurrentMappings(config) {
     if (enabledMappings.length === 0)
         return 0;
     if (config.maxConcurrentMappingsMode === 'manual') {
-        return Math.max(1, config.maxConcurrentMappings ?? constants_1.DEFAULT_MAX_CONCURRENT_MAPPINGS);
+        return Math.min(constants_1.MAX_CONCURRENT_MAPPINGS_LIMIT, Math.max(1, Math.floor(config.maxConcurrentMappings ?? constants_1.DEFAULT_MAX_CONCURRENT_MAPPINGS)));
     }
     const appKeySet = new Set(enabledMappings.map((m) => (m.appKey ?? config.appKey ?? '').trim()).filter(Boolean));
     const allUseIndependentKeys = appKeySet.size >= enabledMappings.length;
@@ -46,6 +46,7 @@ class SyncScheduler {
     limiters = new Map();
     runStates = new Map();
     watchers = new Map();
+    watcherBackends = [];
     timers = [];
     /** triggerAll 错峰、启动抖动、pendingSync 等延迟任务 */
     pendingTimers = new Set();
@@ -218,11 +219,19 @@ class SyncScheduler {
     getGlobalSyncPressure() {
         return { running: this.globalRunningSyncs, max: this.maxGlobalRunningSyncs };
     }
+    getWatcherPressure() {
+        return {
+            mappings: [...this.watchers.values()].filter((watcher) => watcher.isActive()).length,
+            backends: this.watcherBackends.filter((backend) => backend.isActive()).length,
+            watchedDirectories: this.watcherBackends.reduce((total, backend) => total + backend.getWatchedDirectoryCount(), 0),
+        };
+    }
     /** 无进行中的 mapping 同步（供自动升级等场景） */
     isSyncIdle() {
         return this.activeSyncCount === 0 && this.globalRunningSyncs === 0;
     }
     startWatchers(mappings) {
+        const backends = new Map();
         for (const mapping of mappings) {
             if (!(0, watchHelpers_1.resolveWatchEnabled)(mapping, this.config))
                 continue;
@@ -231,20 +240,29 @@ class SyncScheduler {
                 console.warn(`[FileWatcher][${mapping.mappingId}] ${ensured.error}`);
             }
             const scope = (0, pathSyncScope_1.resolveSyncScopeOptions)(mapping, this.config);
+            const usePolling = (0, watchHelpers_1.resolveWatchUsePolling)(mapping, this.config);
+            let backend = backends.get(usePolling);
+            if (!backend) {
+                backend = new fileWatcher_1.SharedFileWatcherBackend(usePolling);
+                backends.set(usePolling, backend);
+                this.watcherBackends.push(backend);
+            }
             const watcher = new fileWatcher_1.FileWatcher({
                 mappingId: mapping.mappingId,
                 localRoot: mapping.localRoot,
                 scope,
                 debounceMs: (0, watchHelpers_1.resolvePushDebounceMs)(mapping, this.config),
-                usePolling: (0, watchHelpers_1.resolveWatchUsePolling)(mapping, this.config),
+                usePolling,
                 onBatchReady: (pathCount) => {
                     console.log(`[FileWatcher][${mapping.mappingId}] batch ${pathCount} path(s) → trigger sync`);
                     this.scheduleMapping(mapping, 'watch');
                 },
-            });
+            }, backend);
             watcher.start();
             this.watchers.set(mapping.mappingId, watcher);
         }
+        for (const backend of this.watcherBackends)
+            backend.start();
         if (this.watchers.size > 0) {
             console.log(`[Scheduler] 文件监听已启动: ${this.watchers.size} 条 mapping`);
         }
@@ -253,6 +271,8 @@ class SyncScheduler {
         const stops = [...this.watchers.values()].map((w) => w.stop());
         await Promise.all(stops);
         this.watchers.clear();
+        await Promise.all(this.watcherBackends.map((backend) => backend.stop()));
+        this.watcherBackends.length = 0;
     }
     /** 手动触发指定 mapping 同步 */
     triggerMapping(mappingId) {
@@ -486,6 +506,7 @@ class SyncScheduler {
             filePatterns: scope.filePatterns,
             excludePatterns: scope.excludePatterns,
             syncDotFiles: scope.syncDotFiles,
+            maxFileSizeBytes: this.config.maxFileSizeBytes,
         });
         // init() 解析并返回确定的 projectId / rootFileId，写回 SQLite 缓存
         const initResult = await remoteFs.init();
@@ -505,6 +526,7 @@ class SyncScheduler {
         const engine = new syncEngine_1.SyncEngine(localFs, remoteFs, this.db, { ...mapping, syncDirection: mapping.syncDirection ?? this.config.syncDirection, syncDotFiles: scope.syncDotFiles }, {
             downloadConcurrency: this.config.downloadConcurrency ?? constants_1.DOWNLOAD_CONCURRENCY,
             uploadConcurrency: this.config.uploadConcurrency ?? constants_1.UPLOAD_CONCURRENCY,
+            maxFileSizeBytes: this.config.maxFileSizeBytes,
         });
         let stats;
         let pullTouchPaths = [];

@@ -20,6 +20,102 @@ export interface FileWatcherOptions {
 }
 
 /**
+ * 多 mapping 共用的底层 chokidar 实例。
+ *
+ * chokidar 的每个 FSWatcher 都会维护一套完整的目录/文件索引；将多个 root 放进同一实例
+ * 可自动去重父子/重叠目录，同时仍由 FileWatcher 保留 mapping 级 debounce、pause、ignore 语义。
+ * polling 与非 polling 的底层机制不同，由 Scheduler 分成最多两个 backend。
+ */
+export class SharedFileWatcherBackend {
+  private readonly registrations = new Map<string, FileWatcher>();
+  private watcher: FSWatcher | null = null;
+  private readyPromise: Promise<void> = Promise.resolve();
+  private resolveReady: (() => void) | null = null;
+
+  constructor(private readonly usePolling: boolean) {}
+
+  register(registration: FileWatcher): void {
+    this.registrations.set(registration.getMappingId(), registration);
+  }
+
+  unregister(mappingId: string): void {
+    this.registrations.delete(mappingId);
+  }
+
+  start(): void {
+    if (this.watcher || this.registrations.size === 0) return;
+    const roots = [
+      ...new Set([...this.registrations.values()].map((r) => r.getResolvedRoot())),
+    ];
+    if (roots.length === 0) return;
+
+    this.readyPromise = new Promise<void>((resolve) => {
+      this.resolveReady = resolve;
+    });
+
+    this.watcher = chokidar.watch(roots, {
+      ignored: (absPath, stats) => {
+        for (const registration of this.registrations.values()) {
+          if (!registration.shouldIgnoreSharedTarget(absPath, stats)) return false;
+        }
+        return true;
+      },
+      ignoreInitial: true,
+      persistent: true,
+      awaitWriteFinish: {
+        stabilityThreshold: WATCH_AWAIT_WRITE_STABILITY_MS,
+        pollInterval: WATCH_AWAIT_WRITE_POLL_MS,
+      },
+      usePolling: this.usePolling,
+      depth: undefined,
+    });
+
+    this.watcher.on('all', (event, absPath) => {
+      for (const registration of this.registrations.values()) {
+        registration.handleSharedFsEvent(event, absPath);
+      }
+    });
+    this.watcher.on('ready', () => {
+      this.resolveReady?.();
+      this.resolveReady = null;
+      console.log(
+        `[FileWatcher] shared backend ready mappings=${this.registrations.size}` +
+          ` roots=${roots.length} polling=${this.usePolling}`,
+      );
+    });
+    this.watcher.on('error', (err) => {
+      console.warn(
+        `[FileWatcher] shared backend error polling=${this.usePolling}: ` +
+          `${err instanceof Error ? err.message : String(err)}; 依赖定时 sync 兜底`,
+      );
+    });
+  }
+
+  async stop(): Promise<void> {
+    this.resolveReady?.();
+    this.resolveReady = null;
+    if (this.watcher) {
+      await this.watcher.close();
+      this.watcher = null;
+    }
+    this.registrations.clear();
+  }
+
+  isActive(): boolean {
+    return this.watcher !== null;
+  }
+
+  /** 供启动编排和集成测试等待初次索引完成，避免漏掉 ready 前的文件事件。 */
+  waitUntilReady(): Promise<void> {
+    return this.readyPromise;
+  }
+
+  getWatchedDirectoryCount(): number {
+    return this.watcher ? Object.keys(this.watcher.getWatched()).length : 0;
+  }
+}
+
+/**
  * mapping 级 chokidar 封装：debounce 合并变更，sync 期间 pause，pull 写入 echo 过滤。
  * 硬排除 `.openclaw-sync-map.json`（方案一索引 consume 写入，避免误触发 push）。
  */
@@ -33,8 +129,19 @@ export class FileWatcher {
   private paused = false;
   private started = false;
 
-  constructor(opts: FileWatcherOptions) {
+  constructor(
+    opts: FileWatcherOptions,
+    private readonly sharedBackend?: SharedFileWatcherBackend,
+  ) {
     this.opts = opts;
+  }
+
+  getMappingId(): string {
+    return this.opts.mappingId;
+  }
+
+  getResolvedRoot(): string {
+    return path.resolve(this.opts.localRoot);
   }
 
   start(): void {
@@ -49,6 +156,11 @@ export class FileWatcher {
     }
 
     this.started = true;
+
+    if (this.sharedBackend) {
+      this.sharedBackend.register(this);
+      return;
+    }
 
     this.watcher = chokidar.watch(root, {
       ignored: (absPath, stats) => this.shouldIgnoreWatchTarget(absPath, root, scope, stats),
@@ -86,6 +198,10 @@ export class FileWatcher {
     }
     this.ignoreSet.clear();
     this.pendingPaths.clear();
+    if (this.sharedBackend) {
+      this.sharedBackend.unregister(this.opts.mappingId);
+      return;
+    }
     if (this.watcher) {
       await this.watcher.close();
       this.watcher = null;
@@ -134,7 +250,18 @@ export class FileWatcher {
   }
 
   isActive(): boolean {
-    return this.started && this.watcher !== null;
+    return this.started && (this.sharedBackend?.isActive() ?? this.watcher !== null);
+  }
+
+  handleSharedFsEvent(event: string, absPath: string): void {
+    if (!this.started) return;
+    this.onFsEvent(event, absPath, this.getResolvedRoot());
+  }
+
+  /** backend 的 ignored 回调：不属于本 mapping 时视为 ignore；属于时应用 mapping scope。 */
+  shouldIgnoreSharedTarget(absPath: string, stats?: fs.Stats): boolean {
+    if (!this.started) return true;
+    return this.shouldIgnoreWatchTarget(absPath, this.getResolvedRoot(), this.opts.scope, stats);
   }
 
   private onFsEvent(event: string, absPath: string, root: string): void {
@@ -146,7 +273,8 @@ export class FileWatcher {
     if (this.ignoreSet.has(rel)) return;
 
     const isDirEvent = event === 'addDir' || event === 'unlinkDir';
-    if (!isDirEvent && !this.matchesSyncScope(rel)) return;
+    const kind = isDirEvent ? 'directory' : 'file';
+    if (!isInSyncScope(rel, this.opts.scope, kind)) return;
 
     this.pendingPaths.add(rel);
     this.scheduleDebounce();
@@ -194,7 +322,7 @@ export class FileWatcher {
     stats?: fs.Stats,
   ): boolean {
     const rel = path.relative(root, absPath);
-    if (rel.startsWith('..')) return true;
+    if (rel.startsWith('..') || path.isAbsolute(rel)) return true;
     if (rel === '') return false;
 
     const relNorm = normalizeSeparator(rel);

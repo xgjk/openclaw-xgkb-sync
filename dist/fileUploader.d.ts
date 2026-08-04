@@ -1,7 +1,7 @@
 import { KbApiClient } from './kbApi';
 import { ApiResult } from './types';
 export interface FileUploadCreateParams {
-    content: string;
+    content: string | Buffer;
     fileName: string;
     fileSuffix?: string;
     /** 远端目标目录全路径（KB path 语义），空串表示项目根目录 */
@@ -13,7 +13,7 @@ export interface FileUploadCreateResult {
     remoteFolderId: string;
 }
 export interface FileUploadUpdateParams {
-    content: string;
+    content: string | Buffer;
     fileName: string;
     fileSuffix?: string;
     /** 目标文件的 remoteFileId，更新时作为新版本追加 */

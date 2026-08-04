@@ -11,6 +11,15 @@ export declare class LocalFsAdapter {
     getRoot(): string;
     getSyncScope(): SyncScopeOptions;
     /**
+     * 单次遍历同时采集文件与目录。按有限目录批次推进，避免宽目录树创建无界 Promise，
+     * 也避免 SyncEngine 为同一棵树并行执行两次完整 walk。
+     */
+    listSnapshot(): Promise<{
+        files: LocalFileEntry[];
+        directories: LocalDirEntry[];
+    }>;
+    private scanSnapshotDirectory;
+    /**
      * 递归列出 localRoot 下所有匹配 filePatterns 且不在 excludePatterns 中的文件。
      * 返回路径均为相对于 localRoot 的路径（使用 "/" 分隔）。
      */
@@ -20,15 +29,15 @@ export declare class LocalFsAdapter {
      * 返回路径均为相对于 localRoot 的路径（使用 "/" 分隔），不包含根目录自身。
      */
     listDirectories(): Promise<LocalDirEntry[]>;
-    private walk;
-    private walkDirectories;
     /** 读取文件内容（UTF-8） */
     readFile(relativePath: string): Promise<string>;
+    readFileBuffer(relativePath: string): Promise<Buffer>;
     /**
      * 写入文件（自动创建父目录）。
      * 返回写入后的实际 mtime。
      */
     writeFile(relativePath: string, content: string): Promise<number>;
+    writeFileBuffer(relativePath: string, content: Buffer): Promise<number>;
     /**
      * 删除文件。
      * 若路径不存在则静默跳过。

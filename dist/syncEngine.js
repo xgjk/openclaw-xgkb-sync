@@ -62,6 +62,7 @@ class SyncEngine {
     syncScope;
     downloadConcurrency;
     uploadConcurrency;
+    maxFileSizeBytes;
     /** pull/bidirectional 本轮 sync 写入本地的路径，供 FileWatcher resume 后 echo 过滤 */
     pullLocalTouchPaths = new Set();
     /** 本地工作区异常时阻断远端删除（含 prune 空目录） */
@@ -87,11 +88,18 @@ class SyncEngine {
         };
         this.downloadConcurrency = opts?.downloadConcurrency ?? constants_1.DOWNLOAD_CONCURRENCY;
         this.uploadConcurrency = opts?.uploadConcurrency ?? constants_1.UPLOAD_CONCURRENCY;
+        this.maxFileSizeBytes = opts?.maxFileSizeBytes ?? constants_1.DEFAULT_MAX_FILE_SIZE_BYTES;
         this.stats = this.emptyStats();
         this.progress = () => undefined;
     }
     delay(ms) {
         return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+    addErrorDetails(...messages) {
+        const remaining = constants_1.MAX_SYNC_ERROR_DETAILS - this.stats.errors.length;
+        if (remaining <= 0)
+            return;
+        this.stats.errors.push(...messages.slice(0, remaining));
     }
     /** 判断路径是否应纳入同步范围 */
     matchesSync(path) {
@@ -154,10 +162,9 @@ class SyncEngine {
         };
         await this.runFileIndexConsume(prog);
         prog('扫描本地文件...');
-        const [localFiles, localDirs] = await Promise.all([
-            this.localFs.listFiles(),
-            this.localFs.listDirectories(),
-        ]);
+        const localSnapshot = await this.localFs.listSnapshot();
+        let localFiles = localSnapshot.files;
+        let localDirs = localSnapshot.directories;
         prog(`本地: ${localFiles.length} 个文件, ${localDirs.length} 个目录`);
         const { map: remoteMap, newSince, remoteDeltaCount, fullScan, remoteMoveHints } = await this.buildRemoteMap(lastSyncSince, prog, opts);
         prog(`远端: ${remoteMap.size} 个文件（水位 ${newSince}）`);
@@ -264,8 +271,10 @@ class SyncEngine {
                 }
                 // 本地文件已被 rename，必须刷新 localMap，否则 Phase 2 会误判 delete-remote / upload-new
                 if (anyMoved) {
-                    const refreshedLocalFiles = await this.localFs.listFiles();
-                    localMap = new Map(refreshedLocalFiles.map((f) => [f.path, f]));
+                    const refreshedSnapshot = await this.localFs.listSnapshot();
+                    localFiles = refreshedSnapshot.files;
+                    localDirs = refreshedSnapshot.directories;
+                    localMap = new Map(localFiles.map((f) => [f.path, f]));
                     recordMap = new Map(this.db.getAllFileStates(this.mapping.mappingId).map((r) => [r.localPath, r]));
                     this.refreshTombstonedRemoteFileIds(recordMap);
                 }
@@ -318,6 +327,7 @@ class SyncEngine {
         prog(`共 ${allPaths.size} 个路径需要路径对账决策`);
         // 决策阶段
         const plans = [];
+        let skipCount = 0;
         let idx = 0;
         for (const path of allPaths) {
             idx++;
@@ -328,7 +338,10 @@ class SyncEngine {
             const remote = remoteMap.get(path);
             const record = recordMap.get(path);
             const op = this.decide(path, local, remote, record);
-            plans.push({ path, local, remote, record, op });
+            if (op === 'skip')
+                skipCount++;
+            else
+                plans.push({ path, local, remote, record, op });
         }
         const plannedDeleteRemote = plans.filter((p) => p.op === 'delete-remote').length;
         const deleteGuard = (0, localRootGuard_1.evaluateRemoteDeleteGuard)({
@@ -351,9 +364,23 @@ class SyncEngine {
             console.warn(`[SyncEngine][${this.mapping.mappingId}] ${deleteGuard.reason}`);
         }
         // 分类计划：删除 / 下载 / 上传
-        const deletePlans = plans.filter((p) => p.op === 'delete-local' || p.op === 'delete-remote');
-        const tombstonePlans = plans.filter((p) => p.op === 'tombstone-local' || p.op === 'clear-local-tombstone');
-        const downloadPlans = plans.filter((p) => p.op === 'download-new' || p.op === 'download-update');
+        const deletePlans = [];
+        const tombstonePlans = [];
+        const downloadPlans = [];
+        const uploadPlans = [];
+        for (const plan of plans) {
+            if (plan.op === 'delete-local' || plan.op === 'delete-remote')
+                deletePlans.push(plan);
+            else if (plan.op === 'tombstone-local' || plan.op === 'clear-local-tombstone') {
+                tombstonePlans.push(plan);
+            }
+            else if (plan.op === 'download-new' || plan.op === 'download-update') {
+                downloadPlans.push(plan);
+            }
+            else if (plan.op === 'upload-new' || plan.op === 'upload-update') {
+                uploadPlans.push(plan);
+            }
+        }
         // 防御：即便 decide 漏判，tombstone / 异路径归属的 fileId 也不得进入下载队列
         for (const plan of downloadPlans) {
             if ((0, syncDecide_1.shouldBlockDownloadForRemoteIdentity)({
@@ -363,13 +390,11 @@ class SyncEngine {
                 remoteFileIdOwners: this.remoteFileIdOwners,
             })) {
                 plan.op = 'skip';
+                skipCount++;
                 prog(`⊘ 已拦截可疑下载（tombstone/异路径 fileId） ${plan.path}`);
             }
         }
         const safeDownloadPlans = downloadPlans.filter((p) => p.op === 'download-new' || p.op === 'download-update');
-        const uploadPlans = plans.filter((p) => p.op === 'upload-new' || p.op === 'upload-update');
-        // 须在下载拦截改写 op 之后再统计 skip，避免重复累计
-        const skipCount = plans.filter((p) => p.op === 'skip').length;
         this.stats.skipped += skipCount;
         prog(`执行计划: 删除=${deletePlans.length} tombstone=${tombstonePlans.length}` +
             ` 下载=${safeDownloadPlans.length} 上传=${uploadPlans.length} 跳过=${skipCount}`);
@@ -391,6 +416,7 @@ class SyncEngine {
             prog(`开始上传 ${uploadPlans.length} 个文件（并发=${this.uploadConcurrency}）...`);
             await this.executePlansInQueue(uploadPlans, this.uploadConcurrency, '上传', prog);
         }
+        // 本轮下载/删除可能改变本地目录树；清理远端目录前重新扫描，避免使用启动时快照误判。
         await this.pruneRemoteEmptyDirectories(prog);
         // 清理过期回收站（静默，不阻塞主流程）
         (0, trashBin_1.cleanupTrash)(this.mapping.mappingId).catch(() => { });
@@ -495,7 +521,9 @@ class SyncEngine {
             }
             else {
                 failed++;
-                errors.push(`${folder.localPath}: ${result.error}`);
+                if (errors.length < constants_1.MAX_SYNC_ERROR_DETAILS) {
+                    errors.push(`${folder.localPath}: ${result.error}`);
+                }
                 this.db.deleteFolderState(this.mapping.mappingId, folder.localPath);
                 console.warn(`[SyncEngine] 远端目录删除失败: "${folder.localPath}" (${folder.remoteFolderId}): ${result.error}`);
             }
@@ -503,7 +531,7 @@ class SyncEngine {
         this.stats.prunedRemoteDirs = (this.stats.prunedRemoteDirs ?? 0) + deleted;
         if (failed > 0) {
             this.stats.failed += failed;
-            this.stats.errors.push(...errors);
+            this.addErrorDetails(...errors);
         }
         if (deleted > 0 || failed > 0) {
             prog(`远端空目录清理: 删除=${deleted} 失败=${failed}`);
@@ -1183,7 +1211,7 @@ class SyncEngine {
             const errno = e instanceof Error && 'code' in e ? String(e.code) : '';
             const localAbsPath = nodePath.join(this.localFs.getRoot(), nodePath.normalize(path.replace(/\//g, nodePath.sep)));
             this.stats.failed++;
-            this.stats.errors.push(`${path}: ${msg}`);
+            this.addErrorDetails(`${path}: ${msg}`);
             console.error(`[SyncEngine][${this.mapping.mappingId}] 同步失败 rel=${path} op=${op}${errno ? ` syscallCode=${errno}` : ''}\n` +
                 `  localAbsPath: ${localAbsPath}\n` +
                 `  error: ${msg}`);
@@ -1204,7 +1232,10 @@ class SyncEngine {
     }
     // ==================== 具体操作 ====================
     async doUploadNew(path, local) {
-        const content = await this.localFs.readFile(path);
+        if (local.size > this.maxFileSizeBytes) {
+            throw new Error(`本地文件 ${local.size} bytes 超过安全上限 ${this.maxFileSizeBytes} bytes`);
+        }
+        const content = await this.localFs.readFileBuffer(path);
         const result = await this.remoteFs.createFile(path, content);
         if (!result.ok)
             throw new Error(result.error);
@@ -1228,12 +1259,15 @@ class SyncEngine {
         this.progress(`↑ ${path}`);
     }
     async doUploadUpdate(path, local, record, remote) {
+        if (local.size > this.maxFileSizeBytes) {
+            throw new Error(`本地文件 ${local.size} bytes 超过安全上限 ${this.maxFileSizeBytes} bytes`);
+        }
         // 优先用本轮远端列表的 fileId（远端为权威）；SQLite 里可能是旧 id，会导致 upload 报「文件信息查询失败」
         const remoteFileId = remote?.remoteFileId ?? record?.remoteFileId;
         if (!remoteFileId) {
             throw new Error('upload-update 缺少远端 fileId（状态库无该路径且远端映射无 fileId，请先全量对账）');
         }
-        const content = await this.localFs.readFile(path);
+        const content = await this.localFs.readFileBuffer(path);
         const fileName = path.split('/').pop() ?? path;
         const result = await this.remoteFs.updateFile(remoteFileId, fileName, content);
         if (!result.ok)
@@ -1275,9 +1309,12 @@ class SyncEngine {
         this.progress(`↑ ${path}`);
     }
     async doDownloadNew(path, remote) {
+        if (remote.size != null && remote.size > this.maxFileSizeBytes) {
+            throw new Error(`远端文件 ${remote.size} bytes 超过安全上限 ${this.maxFileSizeBytes} bytes`);
+        }
         this.notePullLocalTouch(path);
         const body = await this.fetchContent(remote.remoteFileId);
-        const actualMtime = await this.localFs.writeFile(path, body);
+        const actualMtime = await this.localFs.writeFileBuffer(path, body);
         this.db.upsertFileState({
             mappingId: this.mapping.mappingId,
             localPath: path,
@@ -1294,9 +1331,12 @@ class SyncEngine {
         this.progress(`↓ ${path}`);
     }
     async doDownloadUpdate(path, remote, record) {
+        if (remote.size != null && remote.size > this.maxFileSizeBytes) {
+            throw new Error(`远端文件 ${remote.size} bytes 超过安全上限 ${this.maxFileSizeBytes} bytes`);
+        }
         this.notePullLocalTouch(path);
         const body = await this.fetchContent(remote.remoteFileId);
-        const actualMtime = await this.localFs.writeFile(path, body);
+        const actualMtime = await this.localFs.writeFileBuffer(path, body);
         const now = Date.now();
         if (record) {
             this.db.upsertFileState({
@@ -1376,7 +1416,7 @@ class SyncEngine {
             const msg = e instanceof Error ? e.message : String(e);
             console.error(`[SyncEngine][${this.mapping.mappingId}] 远端 ${isMove ? 'move' : 'rename'}-local 失败: ${oldPath} → ${newPath}: ${msg}`);
             this.stats.failed++;
-            this.stats.errors.push(`${oldPath}→${newPath}: ${msg}`);
+            this.addErrorDetails(`${oldPath}→${newPath}: ${msg}`);
             return false;
         }
     }
@@ -1425,7 +1465,7 @@ class SyncEngine {
             const msg = e instanceof Error ? e.message : String(e);
             console.error(`[SyncEngine][${this.mapping.mappingId}] 远端目录 ${isMove ? 'move' : 'rename'}-local 失败: ${oldPath} → ${newPath}: ${msg}`);
             this.stats.failed++;
-            this.stats.errors.push(`dir ${oldPath}→${newPath}: ${msg}`);
+            this.addErrorDetails(`dir ${oldPath}→${newPath}: ${msg}`);
             return false;
         }
     }
@@ -1660,7 +1700,7 @@ class SyncEngine {
         if (mv.mainSkipped === true) {
             const msg = `move-remote 主节点因冲突被跳过: ${fromPath} → ${toPath}`;
             console.warn(`[SyncEngine][${this.mapping.mappingId}] ${msg}`);
-            this.stats.errors.push(msg);
+            this.addErrorDetails(msg);
             return;
         }
         const idMappings = this.collectMoveIdMappings(mv);
@@ -1746,7 +1786,7 @@ class SyncEngine {
         if (mv.mainSkipped === true) {
             const msg = `目录 move-remote 因冲突被跳过: ${directoryOldPath} → ${directoryNewPath}`;
             console.warn(`[SyncEngine][${this.mapping.mappingId}] ${msg}`);
-            this.stats.errors.push(msg);
+            this.addErrorDetails(msg);
             return;
         }
         const idMappings = this.collectMoveIdMappings(mv);
@@ -1831,12 +1871,12 @@ class SyncEngine {
     }
     /** 拉取单个文件内容，由 KbApiClient 内置限速器控制请求速率 */
     async fetchContent(remoteFileId) {
-        const r = await this.remoteFs.readFile(remoteFileId);
+        const r = await this.remoteFs.readFileBuffer(remoteFileId);
         if (!r.ok)
             throw new Error(`下载失败: ${r.error}`);
         if (!r.value) {
             console.warn(`[SyncEngine] fileId=${remoteFileId} 返回空内容，写入空文件`);
-            return '';
+            return Buffer.alloc(0);
         }
         return r.value;
     }

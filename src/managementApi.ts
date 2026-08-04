@@ -25,6 +25,7 @@ import type { NodeIdentityInfo } from './nodeIdentity';
 import { APP_VERSION } from './version';
 import { ensureMappingLocalRoot } from './ensureLocalRoot';
 const PUBLIC_DIR = path.resolve(__dirname, '../public');
+const MAX_MANAGEMENT_REQUEST_BODY_BYTES = 1024 * 1024;
 
 /** 仅用于界面展示的脱敏 AppKey，避免返回明文。 */
 function maskSecret(value?: string): string | undefined {
@@ -49,6 +50,7 @@ const EDITABLE_CONFIG_FIELDS = [
   'rateLimitCooldownSec',
   'downloadConcurrency',
   'uploadConcurrency',
+  'maxFileSizeBytes',
   'startupJitterMaxSec',
   'managementPort',
   'managementHost',
@@ -274,6 +276,8 @@ export class ManagementApi {
     const config = scheduler.getConfig();
     const enabledCount = config.mappings.filter((m) => m.enabled).length;
     const pressure = scheduler.getGlobalSyncPressure();
+    const watcherPressure = scheduler.getWatcherPressure();
+    const memory = process.memoryUsage();
 
     const overloaded = pressure.running >= pressure.max && pressure.max > 0;
     const highLag = this.lastEventLoopLagMs > 15_000;
@@ -295,6 +299,16 @@ export class ManagementApi {
       eventLoopLagMs: this.lastEventLoopLagMs,
       globalSyncRunning: pressure.running,
       globalSyncMax: pressure.max,
+      watcherMappings: watcherPressure.mappings,
+      watcherBackends: watcherPressure.backends,
+      watchedDirectories: watcherPressure.watchedDirectories,
+      memory: {
+        rss: memory.rss,
+        heapUsed: memory.heapUsed,
+        heapTotal: memory.heapTotal,
+        external: memory.external,
+        arrayBuffers: memory.arrayBuffers,
+      },
       degraded: highLag || overloaded,
       ...(highLag && {
         warn: 'event_loop_lag_high',
@@ -514,6 +528,7 @@ export class ManagementApi {
           key === 'rateLimitCooldownSec' ||
           key === 'downloadConcurrency' ||
           key === 'uploadConcurrency' ||
+          key === 'maxFileSizeBytes' ||
           key === 'startupJitterMaxSec'
         ) {
           if (typeof val !== 'number' || val < 0) {
@@ -1313,15 +1328,40 @@ export class ManagementApi {
   private readBody(req: http.IncomingMessage): Promise<unknown> {
     return new Promise((resolve, reject) => {
       const chunks: Buffer[] = [];
-      req.on('data', (chunk: Buffer) => chunks.push(chunk));
+      let totalBytes = 0;
+      let settled = false;
+      const onData = (chunk: Buffer) => {
+        if (settled) return;
+        totalBytes += chunk.length;
+        if (totalBytes > MAX_MANAGEMENT_REQUEST_BODY_BYTES) {
+          settled = true;
+          chunks.length = 0;
+          req.off('data', onData);
+          req.resume();
+          reject(
+            new Error(
+              `请求体超过 ${MAX_MANAGEMENT_REQUEST_BODY_BYTES} bytes 上限`,
+            ),
+          );
+          return;
+        }
+        chunks.push(chunk);
+      };
+      req.on('data', onData);
       req.on('end', () => {
+        if (settled) return;
+        settled = true;
         try {
           resolve(JSON.parse(Buffer.concat(chunks).toString('utf-8')));
         } catch (e) {
           reject(new Error('请求体不是合法 JSON'));
         }
       });
-      req.on('error', reject);
+      req.on('error', (error) => {
+        if (settled) return;
+        settled = true;
+        reject(error);
+      });
     });
   }
 
@@ -1389,6 +1429,7 @@ export class ManagementApi {
       rateLimitCooldownSec: config.rateLimitCooldownSec,
       downloadConcurrency: config.downloadConcurrency,
       uploadConcurrency: config.uploadConcurrency,
+      maxFileSizeBytes: config.maxFileSizeBytes,
       startupJitterMaxSec: config.startupJitterMaxSec,
       managementPort: config.managementPort,
       managementHost: config.managementHost,

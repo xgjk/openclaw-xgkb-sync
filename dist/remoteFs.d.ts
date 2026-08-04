@@ -23,6 +23,8 @@ export interface RemoteFsOptions {
     excludePatterns?: string[];
     /** Whether dot-segment paths participate in remote list filtering. */
     syncDotFiles?: boolean;
+    /** 下载/上传正文的单文件内存安全上限。 */
+    maxFileSizeBytes?: number;
 }
 /** Resolved IDs returned by init() for Scheduler to persist. */
 export interface RemoteFsInitResult {
@@ -47,6 +49,7 @@ export declare class RemoteFsAdapter {
     private resolvedProjectId;
     private resolvedRootFileId;
     private resolvedRootFolderPath;
+    private readonly maxFileSizeBytes;
     constructor(api: KbApiClient, opts: RemoteFsOptions);
     getRootFileId(): string;
     getProjectId(): string;
@@ -86,6 +89,9 @@ export declare class RemoteFsAdapter {
      * Prefer getDownloadInfo(forceDownload=true) OSS URL; fall back to getFullFileContent.
      */
     readFile(fileId: string): Promise<ApiResult<string>>;
+    /** 主同步下载使用 Buffer，避免 Response→UTF-16 string→Buffer 的整文件双重复制。 */
+    readFileBuffer(fileId: string): Promise<ApiResult<Buffer>>;
+    private readResponseBufferLimited;
     /**
      * Batch-read file content through getDownloadInfo + OSS fetch.
      * Single-file failures are warned here; callers can retry on cache miss.
@@ -95,14 +101,14 @@ export declare class RemoteFsAdapter {
      * Create a remote file (new upload, no existing fileId).
      * @param relativePath Relative path, for example "folder/2024.md".
      */
-    createFile(relativePath: string, content: string): Promise<ApiResult<{
+    createFile(relativePath: string, content: string | Buffer): Promise<ApiResult<{
         remoteFileId: string;
         remoteFolderId: string;
     }>>;
     /**
      * Update a remote file version (append new version to existing fileId).
      */
-    updateFile(remoteFileId: string, fileName: string, content: string): Promise<ApiResult<string>>;
+    updateFile(remoteFileId: string, fileName: string, content: string | Buffer): Promise<ApiResult<string>>;
     /**
      * 重命名远端文件或文件夹（同目录内改名，不移动）。
      * 对应 KB v2 updateFileName 接口。

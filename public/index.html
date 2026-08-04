@@ -209,6 +209,11 @@
               <small id="globalUploadConcurrencyHint">push/bidirectional 推荐 3。</small>
             </label>
             <label>
+              <span>单文件上限（字节）</span>
+              <input type="number" name="maxFileSizeBytes" min="1" max="1073741824" step="1" placeholder="104857600" />
+              <small>默认 100 MiB，防止超大文件在整文件上传/下载时耗尽内存。</small>
+            </label>
+            <label>
               <span>管理 API 端口</span>
               <input type="number" name="managementPort" min="0" step="1" />
               <small>建议：9090。修改后需重启进程；设为 0 可禁用管理 API。</small>

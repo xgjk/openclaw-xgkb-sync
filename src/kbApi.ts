@@ -129,25 +129,22 @@ export class KbApiClient {
       }
       lastErrorWasRateLimit = false;
 
+      const attemptStart = Date.now();
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+      timeoutId.unref();
       try {
-        const attemptStart = Date.now();
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-        let resp: Response;
-        try {
-          resp = await fetch(url, {
-            method,
-            headers: {
-              'Content-Type': 'application/json',
-              appKey: this.appKey,
-            },
-            body,
-            signal: controller.signal,
-          });
-        } finally {
-          clearTimeout(timeoutId);
-        }
+        const resp = await fetch(url, {
+          method,
+          headers: {
+            'Content-Type': 'application/json',
+            appKey: this.appKey,
+          },
+          body,
+          signal: controller.signal,
+        });
 
+        // timeout 必须覆盖响应体；只覆盖 headers 会让 body 卡住的连接永久占用同步并发。
         const rawText = await resp.text();
         const urlForLog = truncateForLog(url);
 
@@ -268,8 +265,10 @@ export class KbApiClient {
         console.error(
           `[KbApi] request#${requestId} 请求异常 method=${method} path=${apiPath} attempt=${attempt + 1}/${MAX_RETRIES}\n` +
             `  params: ${paramsSummary}\n` +
-            `  error: ${lastError}`,
+          `  error: ${lastError}`,
         );
+      } finally {
+        clearTimeout(timeoutId);
       }
     }
 

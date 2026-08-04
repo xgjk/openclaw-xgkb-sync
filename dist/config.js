@@ -33,6 +33,7 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.boundedPositiveInteger = boundedPositiveInteger;
 exports.getDefaultConfigRaw = getDefaultConfigRaw;
 exports.configToRaw = configToRaw;
 exports.writeConfigFile = writeConfigFile;
@@ -56,6 +57,21 @@ const path = __importStar(require("path"));
 const crypto_1 = require("crypto");
 const constants_1 = require("./constants");
 const DEFAULT_CONFIG_PATH = './config.json';
+/** 将外部资源配置收敛为正整数，并设置硬上限，避免 0 死循环或超大并发。 */
+function boundedPositiveInteger(raw, fallback, max, label) {
+    if (typeof raw !== 'number' || !Number.isFinite(raw) || raw <= 0) {
+        if (raw !== undefined) {
+            console.warn(`[Config] ${label}=${String(raw)} 无效，已使用安全默认值 ${fallback}`);
+        }
+        return fallback;
+    }
+    const value = Math.max(1, Math.floor(raw));
+    if (value > max) {
+        console.warn(`[Config] ${label}=${value} 超过安全上限，已限制为 ${max}`);
+        return max;
+    }
+    return value;
+}
 /**
  * 默认 config.json 内容（可序列化对象，不含 appKey）。
  * 服务可在无 mapping、无密钥时启动，通过 Web 控制台或管理 API 后续补全。
@@ -74,6 +90,7 @@ function getDefaultConfigRaw() {
         rateLimitCooldownSec: constants_1.RATE_LIMIT_COOLDOWN_MS / 1000,
         downloadConcurrency: constants_1.DOWNLOAD_CONCURRENCY,
         uploadConcurrency: constants_1.UPLOAD_CONCURRENCY,
+        maxFileSizeBytes: constants_1.DEFAULT_MAX_FILE_SIZE_BYTES,
         startupJitterMaxSec: constants_1.STARTUP_JITTER_MAX_MS / 1000,
         managementPort: constants_1.DEFAULT_MANAGEMENT_PORT,
         managementHost: constants_1.DEFAULT_MANAGEMENT_HOST,
@@ -102,6 +119,7 @@ function configToRaw(config) {
         rateLimitCooldownSec: config.rateLimitCooldownSec,
         downloadConcurrency: config.downloadConcurrency,
         uploadConcurrency: config.uploadConcurrency,
+        maxFileSizeBytes: config.maxFileSizeBytes,
         startupJitterMaxSec: config.startupJitterMaxSec,
         managementPort: config.managementPort,
         managementHost: config.managementHost,
@@ -425,18 +443,15 @@ function validateConfig(raw, filePath, options) {
             ? obj.stateDbPath.trim()
             : constants_1.DEFAULT_DB_PATH,
         maxConcurrentMappingsMode: obj.maxConcurrentMappingsMode === 'manual' ? 'manual' : 'auto',
-        maxConcurrentMappings: typeof obj.maxConcurrentMappings === 'number'
-            ? obj.maxConcurrentMappings
-            : constants_1.DEFAULT_MAX_CONCURRENT_MAPPINGS,
-        maxRequestsPerMinute: typeof obj.maxRequestsPerMinute === 'number'
-            ? obj.maxRequestsPerMinute
-            : constants_1.DEFAULT_MAX_REQUESTS_PER_MINUTE,
-        rateLimitBurst: typeof obj.rateLimitBurst === 'number' ? obj.rateLimitBurst : constants_1.DEFAULT_RATE_LIMIT_BURST,
+        maxConcurrentMappings: boundedPositiveInteger(obj.maxConcurrentMappings, constants_1.DEFAULT_MAX_CONCURRENT_MAPPINGS, constants_1.MAX_CONCURRENT_MAPPINGS_LIMIT, 'maxConcurrentMappings'),
+        maxRequestsPerMinute: boundedPositiveInteger(obj.maxRequestsPerMinute, constants_1.DEFAULT_MAX_REQUESTS_PER_MINUTE, constants_1.MAX_REQUESTS_PER_MINUTE_LIMIT, 'maxRequestsPerMinute'),
+        rateLimitBurst: boundedPositiveInteger(obj.rateLimitBurst, constants_1.DEFAULT_RATE_LIMIT_BURST, constants_1.MAX_RATE_LIMIT_BURST, 'rateLimitBurst'),
         rateLimitCooldownSec: typeof obj.rateLimitCooldownSec === 'number'
             ? obj.rateLimitCooldownSec
             : constants_1.RATE_LIMIT_COOLDOWN_MS / 1000,
-        downloadConcurrency: typeof obj.downloadConcurrency === 'number' ? obj.downloadConcurrency : constants_1.DOWNLOAD_CONCURRENCY,
-        uploadConcurrency: typeof obj.uploadConcurrency === 'number' ? obj.uploadConcurrency : constants_1.UPLOAD_CONCURRENCY,
+        downloadConcurrency: boundedPositiveInteger(obj.downloadConcurrency, constants_1.DOWNLOAD_CONCURRENCY, constants_1.MAX_DOWNLOAD_CONCURRENCY, 'downloadConcurrency'),
+        uploadConcurrency: boundedPositiveInteger(obj.uploadConcurrency, constants_1.UPLOAD_CONCURRENCY, constants_1.MAX_UPLOAD_CONCURRENCY, 'uploadConcurrency'),
+        maxFileSizeBytes: boundedPositiveInteger(obj.maxFileSizeBytes, constants_1.DEFAULT_MAX_FILE_SIZE_BYTES, constants_1.MAX_FILE_SIZE_BYTES_LIMIT, 'maxFileSizeBytes'),
         startupJitterMaxSec: typeof obj.startupJitterMaxSec === 'number'
             ? obj.startupJitterMaxSec
             : constants_1.STARTUP_JITTER_MAX_MS / 1000,

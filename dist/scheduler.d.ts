@@ -20,6 +20,7 @@ export declare class SyncScheduler {
     private readonly limiters;
     private readonly runStates;
     private readonly watchers;
+    private readonly watcherBackends;
     private timers;
     /** triggerAll 错峰、启动抖动、pendingSync 等延迟任务 */
     private readonly pendingTimers;
@@ -58,6 +59,11 @@ export declare class SyncScheduler {
     getGlobalSyncPressure(): {
         running: number;
         max: number;
+    };
+    getWatcherPressure(): {
+        mappings: number;
+        backends: number;
+        watchedDirectories: number;
     };
     /** 无进行中的 mapping 同步（供自动升级等场景） */
     isSyncIdle(): boolean;

@@ -31,13 +31,103 @@ export class LocalFsAdapter {
   }
 
   /**
+   * 单次遍历同时采集文件与目录。按有限目录批次推进，避免宽目录树创建无界 Promise，
+   * 也避免 SyncEngine 为同一棵树并行执行两次完整 walk。
+   */
+  async listSnapshot(): Promise<{ files: LocalFileEntry[]; directories: LocalDirEntry[] }> {
+    const files: LocalFileEntry[] = [];
+    const directories: LocalDirEntry[] = [];
+    const pending: Array<{ absDir: string; relPrefix: string }> = [
+      { absDir: this.localRoot, relPrefix: '' },
+    ];
+    const directoryBatchSize = 8;
+    let pendingHead = 0;
+
+    while (pendingHead < pending.length) {
+      const batch = pending.slice(pendingHead, pendingHead + directoryBatchSize);
+      pendingHead += batch.length;
+      const discovered = await Promise.all(
+        batch.map((item) => this.scanSnapshotDirectory(item.absDir, item.relPrefix, files, directories)),
+      );
+      for (const children of discovered) pending.push(...children);
+      // 定期压缩已消费队列，兼顾线性 CPU 与路径对象及时释放。
+      if (pendingHead >= 1_024) {
+        pending.splice(0, pendingHead);
+        pendingHead = 0;
+      }
+    }
+
+    return { files, directories };
+  }
+
+  private async scanSnapshotDirectory(
+    absDir: string,
+    relPrefix: string,
+    files: LocalFileEntry[],
+    directories: LocalDirEntry[],
+  ): Promise<Array<{ absDir: string; relPrefix: string }>> {
+    let dirEntries: fsSync.Dirent[];
+    try {
+      dirEntries = await fs.readdir(absDir, { withFileTypes: true });
+    } catch {
+      return [];
+    }
+
+    const children: Array<{ absDir: string; relPrefix: string }> = [];
+    for (const dirent of dirEntries) {
+      if (shouldSkipDotEntryName(dirent.name, this.scope.syncDotFiles)) continue;
+      const relPath = relPrefix ? `${relPrefix}/${dirent.name}` : dirent.name;
+      const absPath = path.join(absDir, dirent.name);
+
+      if (dirent.isDirectory()) {
+        if (!isInSyncScope(relPath, this.scope, 'directory')) continue;
+        const safePath = normalizeSeparator(relPath)
+          .split('/')
+          .map((seg) => sanitizePathSegment(seg))
+          .join('/');
+        try {
+          const stat = await fs.stat(absPath, { bigint: true });
+          directories.push({
+            path: safePath,
+            dev: stat.dev.toString(),
+            ino: stat.ino.toString(),
+          });
+        } catch {
+          directories.push({ path: safePath, dev: '0', ino: '0' });
+        }
+        children.push({ absDir: absPath, relPrefix: relPath });
+        continue;
+      }
+
+      if (!dirent.isFile()) continue;
+      const safePath = normalizeSeparator(relPath)
+        .split('/')
+        .map((seg) => sanitizePathSegment(seg))
+        .join('/');
+      if (!isInSyncScope(safePath, this.scope, 'file')) continue;
+      try {
+        const stat = await fs.stat(absPath, { bigint: true });
+        files.push({
+          path: safePath,
+          name: dirent.name,
+          mtime: Number(stat.mtimeMs),
+          size: Number(stat.size),
+          dev: stat.dev.toString(),
+          ino: stat.ino.toString(),
+        });
+      } catch {
+        // stat 失败跳过
+      }
+    }
+    return children;
+  }
+
+  /**
    * 递归列出 localRoot 下所有匹配 filePatterns 且不在 excludePatterns 中的文件。
    * 返回路径均为相对于 localRoot 的路径（使用 "/" 分隔）。
    */
   async listFiles(): Promise<LocalFileEntry[]> {
-    const entries: LocalFileEntry[] = [];
-    await this.walk(this.localRoot, '', entries);
-    return entries;
+    return (await this.listSnapshot()).files;
   }
 
   /**
@@ -45,106 +135,17 @@ export class LocalFsAdapter {
    * 返回路径均为相对于 localRoot 的路径（使用 "/" 分隔），不包含根目录自身。
    */
   async listDirectories(): Promise<LocalDirEntry[]> {
-    const dirs: LocalDirEntry[] = [];
-    await this.walkDirectories(this.localRoot, '', dirs);
-    return dirs;
-  }
-
-  private async walk(
-    absDir: string,
-    relPrefix: string,
-    entries: LocalFileEntry[],
-  ): Promise<void> {
-    let dirEntries: fsSync.Dirent[];
-    try {
-      dirEntries = await fs.readdir(absDir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-
-    const subDirTasks: Promise<void>[] = [];
-
-    for (const dirent of dirEntries) {
-      if (shouldSkipDotEntryName(dirent.name, this.scope.syncDotFiles)) continue;
-
-      const relPath = relPrefix ? `${relPrefix}/${dirent.name}` : dirent.name;
-      const absPath = path.join(absDir, dirent.name);
-
-      if (dirent.isDirectory()) {
-        if (!isInSyncScope(relPath, this.scope, 'directory')) continue;
-        subDirTasks.push(this.walk(absPath, relPath, entries));
-      } else if (dirent.isFile()) {
-        const safePath = normalizeSeparator(relPath)
-          .split('/')
-          .map((seg) => sanitizePathSegment(seg))
-          .join('/');
-
-        if (!isInSyncScope(safePath, this.scope, 'file')) continue;
-
-        try {
-          const stat = await fs.stat(absPath, { bigint: true });
-          entries.push({
-            path: safePath,
-            name: dirent.name,
-            mtime: Number(stat.mtimeMs),
-            size: Number(stat.size),
-            dev: stat.dev.toString(),
-            ino: stat.ino.toString(),
-          });
-        } catch {
-          // stat 失败跳过
-        }
-      }
-    }
-
-    if (subDirTasks.length > 0) {
-      await Promise.all(subDirTasks);
-    }
-  }
-
-  private async walkDirectories(
-    absDir: string,
-    relPrefix: string,
-    dirs: LocalDirEntry[],
-  ): Promise<void> {
-    let dirEntries: fsSync.Dirent[];
-    try {
-      dirEntries = await fs.readdir(absDir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-
-    const subDirTasks: Promise<void>[] = [];
-    for (const dirent of dirEntries) {
-      if (shouldSkipDotEntryName(dirent.name, this.scope.syncDotFiles)) continue;
-      if (!dirent.isDirectory()) continue;
-
-      const relPath = relPrefix ? `${relPrefix}/${dirent.name}` : dirent.name;
-      if (!isInSyncScope(relPath, this.scope, 'directory')) continue;
-
-      const safePath = normalizeSeparator(relPath)
-        .split('/')
-        .map((seg) => sanitizePathSegment(seg))
-        .join('/');
-      const absPath = path.join(absDir, dirent.name);
-      try {
-        const stat = await fs.stat(absPath, { bigint: true });
-        dirs.push({ path: safePath, dev: stat.dev.toString(), ino: stat.ino.toString() });
-      } catch {
-        dirs.push({ path: safePath, dev: '0', ino: '0' });
-      }
-      subDirTasks.push(this.walkDirectories(absPath, relPath, dirs));
-    }
-
-    if (subDirTasks.length > 0) {
-      await Promise.all(subDirTasks);
-    }
+    return (await this.listSnapshot()).directories;
   }
 
   /** 读取文件内容（UTF-8） */
   async readFile(relativePath: string): Promise<string> {
     const absPath = this.resolve(relativePath);
     return fs.readFile(absPath, 'utf-8');
+  }
+
+  async readFileBuffer(relativePath: string): Promise<Buffer> {
+    return fs.readFile(this.resolve(relativePath));
   }
 
   /**
@@ -155,6 +156,14 @@ export class LocalFsAdapter {
     const absPath = this.resolve(relativePath);
     await fs.mkdir(path.dirname(absPath), { recursive: true });
     await fs.writeFile(absPath, content, 'utf-8');
+    const stat = await fs.stat(absPath);
+    return stat.mtimeMs;
+  }
+
+  async writeFileBuffer(relativePath: string, content: Buffer): Promise<number> {
+    const absPath = this.resolve(relativePath);
+    await fs.mkdir(path.dirname(absPath), { recursive: true });
+    await fs.writeFile(absPath, content);
     const stat = await fs.stat(absPath);
     return stat.mtimeMs;
   }

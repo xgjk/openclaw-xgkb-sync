@@ -985,7 +985,7 @@
           const body = {};
           const fields = [
             'serverUrl', 'syncDirection', 'autoSyncIntervalSec', 'maxConcurrentMappingsMode', 'maxConcurrentMappings',
-            'fullReconcileIntervalSec', 'maxRequestsPerMinute', 'stateDbPath', 'downloadConcurrency', 'uploadConcurrency',
+            'fullReconcileIntervalSec', 'maxRequestsPerMinute', 'stateDbPath', 'downloadConcurrency', 'uploadConcurrency', 'maxFileSizeBytes',
             'managementPort', 'managementHost', 'pushDebounceMs',
             'centralManagerUrl', 'centralHeartbeatIntervalSec', 'autoUpgradeScript', 'nodeId', 'nodeAdvertiseIp',
           ];

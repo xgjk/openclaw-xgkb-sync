@@ -13,6 +13,7 @@ import {
   DEFAULT_FULL_RECONCILE_INTERVAL_SEC,
   DEFAULT_MANAGEMENT_HOST,
   DEFAULT_MANAGEMENT_PORT,
+  DEFAULT_MAX_FILE_SIZE_BYTES,
   DEFAULT_MAX_CONCURRENT_MAPPINGS,
   DEFAULT_MAX_REQUESTS_PER_MINUTE,
   DEFAULT_RATE_LIMIT_BURST,
@@ -22,12 +23,39 @@ import {
   DEFAULT_WATCH_ENABLED,
   DEFAULT_WATCH_USE_POLLING,
   DOWNLOAD_CONCURRENCY,
+  MAX_CONCURRENT_MAPPINGS_LIMIT,
+  MAX_DOWNLOAD_CONCURRENCY,
+  MAX_FILE_SIZE_BYTES_LIMIT,
+  MAX_RATE_LIMIT_BURST,
+  MAX_REQUESTS_PER_MINUTE_LIMIT,
+  MAX_UPLOAD_CONCURRENCY,
   RATE_LIMIT_COOLDOWN_MS,
   STARTUP_JITTER_MAX_MS,
   UPLOAD_CONCURRENCY,
 } from './constants';
 
 const DEFAULT_CONFIG_PATH = './config.json';
+
+/** 将外部资源配置收敛为正整数，并设置硬上限，避免 0 死循环或超大并发。 */
+export function boundedPositiveInteger(
+  raw: unknown,
+  fallback: number,
+  max: number,
+  label: string,
+): number {
+  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw <= 0) {
+    if (raw !== undefined) {
+      console.warn(`[Config] ${label}=${String(raw)} 无效，已使用安全默认值 ${fallback}`);
+    }
+    return fallback;
+  }
+  const value = Math.max(1, Math.floor(raw));
+  if (value > max) {
+    console.warn(`[Config] ${label}=${value} 超过安全上限，已限制为 ${max}`);
+    return max;
+  }
+  return value;
+}
 
 export type LoadConfigResult = {
   config: SyncConfig;
@@ -53,6 +81,7 @@ export function getDefaultConfigRaw(): Record<string, unknown> {
     rateLimitCooldownSec: RATE_LIMIT_COOLDOWN_MS / 1000,
     downloadConcurrency: DOWNLOAD_CONCURRENCY,
     uploadConcurrency: UPLOAD_CONCURRENCY,
+    maxFileSizeBytes: DEFAULT_MAX_FILE_SIZE_BYTES,
     startupJitterMaxSec: STARTUP_JITTER_MAX_MS / 1000,
     managementPort: DEFAULT_MANAGEMENT_PORT,
     managementHost: DEFAULT_MANAGEMENT_HOST,
@@ -82,6 +111,7 @@ export function configToRaw(config: SyncConfig): Record<string, unknown> {
     rateLimitCooldownSec: config.rateLimitCooldownSec,
     downloadConcurrency: config.downloadConcurrency,
     uploadConcurrency: config.uploadConcurrency,
+    maxFileSizeBytes: config.maxFileSizeBytes,
     startupJitterMaxSec: config.startupJitterMaxSec,
     managementPort: config.managementPort,
     managementHost: config.managementHost,
@@ -471,23 +501,51 @@ function validateConfig(
     maxConcurrentMappingsMode:
       obj.maxConcurrentMappingsMode === 'manual' ? 'manual' : 'auto',
     maxConcurrentMappings:
-      typeof obj.maxConcurrentMappings === 'number'
-        ? obj.maxConcurrentMappings
-        : DEFAULT_MAX_CONCURRENT_MAPPINGS,
+      boundedPositiveInteger(
+        obj.maxConcurrentMappings,
+        DEFAULT_MAX_CONCURRENT_MAPPINGS,
+        MAX_CONCURRENT_MAPPINGS_LIMIT,
+        'maxConcurrentMappings',
+      ),
     maxRequestsPerMinute:
-      typeof obj.maxRequestsPerMinute === 'number'
-        ? obj.maxRequestsPerMinute
-        : DEFAULT_MAX_REQUESTS_PER_MINUTE,
+      boundedPositiveInteger(
+        obj.maxRequestsPerMinute,
+        DEFAULT_MAX_REQUESTS_PER_MINUTE,
+        MAX_REQUESTS_PER_MINUTE_LIMIT,
+        'maxRequestsPerMinute',
+      ),
     rateLimitBurst:
-      typeof obj.rateLimitBurst === 'number' ? obj.rateLimitBurst : DEFAULT_RATE_LIMIT_BURST,
+      boundedPositiveInteger(
+        obj.rateLimitBurst,
+        DEFAULT_RATE_LIMIT_BURST,
+        MAX_RATE_LIMIT_BURST,
+        'rateLimitBurst',
+      ),
     rateLimitCooldownSec:
       typeof obj.rateLimitCooldownSec === 'number'
         ? obj.rateLimitCooldownSec
         : RATE_LIMIT_COOLDOWN_MS / 1000,
     downloadConcurrency:
-      typeof obj.downloadConcurrency === 'number' ? obj.downloadConcurrency : DOWNLOAD_CONCURRENCY,
+      boundedPositiveInteger(
+        obj.downloadConcurrency,
+        DOWNLOAD_CONCURRENCY,
+        MAX_DOWNLOAD_CONCURRENCY,
+        'downloadConcurrency',
+      ),
     uploadConcurrency:
-      typeof obj.uploadConcurrency === 'number' ? obj.uploadConcurrency : UPLOAD_CONCURRENCY,
+      boundedPositiveInteger(
+        obj.uploadConcurrency,
+        UPLOAD_CONCURRENCY,
+        MAX_UPLOAD_CONCURRENCY,
+        'uploadConcurrency',
+      ),
+    maxFileSizeBytes:
+      boundedPositiveInteger(
+        obj.maxFileSizeBytes,
+        DEFAULT_MAX_FILE_SIZE_BYTES,
+        MAX_FILE_SIZE_BYTES_LIMIT,
+        'maxFileSizeBytes',
+      ),
     startupJitterMaxSec:
       typeof obj.startupJitterMaxSec === 'number'
         ? obj.startupJitterMaxSec

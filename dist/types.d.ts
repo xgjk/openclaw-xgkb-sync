@@ -133,6 +133,8 @@ export interface SyncConfig {
      * 上传并发数，默认 3。控制同时进行的文件上传操作数量。
      */
     uploadConcurrency?: number;
+    /** 单文件最大字节数，默认 100 MiB，防止整文件上传/下载撑爆内存。 */
+    maxFileSizeBytes?: number;
     /**
      * 启动后首次同步的随机抖动上限（秒），默认 20。
      * 多台服务器同时启动时，随机延迟可分散请求突刺。设为 0 禁用抖动。

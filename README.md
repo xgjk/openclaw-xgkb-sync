@@ -167,18 +167,21 @@ npm run dev:config                   # 显式使用 ./config.json
 | `fullReconcileIntervalSec` | 否 | `3600` | 强制全量对账间隔（秒），用于修复 `listChanges` 或状态库漏记录；`0` = 关闭。升级后首次同步若尚无全量记录，会触发一次全量对账 |
 | `stateDbPath` | 否 | `./openclaw-sync-state.db` | SQLite 状态库路径 |
 | `maxConcurrentMappingsMode` | 否 | `auto` | mapping 并发策略：`auto` 按映射数量与 AppKey 分布自动适配；`manual` 使用下方 `maxConcurrentMappings` |
-| `maxConcurrentMappings` | 否 | `2` | 手动模式下的最大并发 mapping 数。`auto` 模式下通常为 1～5，详见调度器 `resolveMaxConcurrentMappings` |
+| `maxConcurrentMappings` | 否 | `2` | 手动模式下的最大并发 mapping 数，资源安全上限为 10。`auto` 模式下通常为 1～5 |
 | `maxRequestsPerMinute` | 否 | `180` | 每 appKey 每分钟最大请求数（令牌桶稳态速率）。每个 `appKey` 独立计算，互不干扰 |
 | `rateLimitBurst` | 否 | `8` | 令牌桶突发容量，允许短时间内连续发出最多 N 个请求后再按稳态补充 |
 | `rateLimitCooldownSec` | 否 | `60` | 收到限流响应（HTTP 429 或 resultCode 610012）后的冷却时间（秒） |
-| `downloadConcurrency` | 否 | `5` | 单次同步中并发下载文件数 |
-| `uploadConcurrency` | 否 | `3` | 单次同步中并发上传文件数 |
+| `downloadConcurrency` | 否 | `5` | 单次同步中并发下载文件数，范围 1～20 |
+| `uploadConcurrency` | 否 | `3` | 单次同步中并发上传文件数，范围 1～10 |
+| `maxFileSizeBytes` | 否 | `104857600` | 单文件内存安全上限，默认 100 MiB，最大可配置为 1 GiB |
 | `startupJitterMaxSec` | 否 | `20` | 启动后首次同步的随机抖动上限（秒）。多实例同时重启时分散请求，设为 `0` 禁用 |
 | `managementPort` | 否 | `9090` | HTTP 管理 API 监听端口，设为 `0` 禁用管理 API |
 | `managementHost` | 否 | `0.0.0.0` | HTTP 管理 API 监听地址；默认允许局域网访问，本机浏览器请用 `127.0.0.1`（注意防火墙） |
 | `watchEnabled` | 否 | `true` | push/bidirectional 是否启用 chokidar 本地文件监听；`false` 时仅依赖定时 sync |
 | `pushDebounceMs` | 否 | `1500` | 文件监听 debounce（毫秒），合并连续保存 |
 | `watchUsePolling` | 否 | `false` | **仅 watch 开启时有效**。chokidar 用轮询代替系统原生文件事件（NFS/Docker 卷）；不是「定时 sync」的替代品 |
+
+中心上报具有资源保护：单请求 30 秒超时，execution-log 最多 2 个请求在途；拥塞时同一 mapping 只保留最新一条并采用指数退避，不会因 sync-manage 停服而无限积压。
 
 ### 同步方向与参数生效关系
 
@@ -282,6 +285,7 @@ push / bidirectional mapping 在 `watchEnabled: true`（默认）时，使用 **
 | 方案一索引 | `.openclaw-sync-map.json` 被 watch **硬排除**；sync 期间 watcher **pause**，consume 不会误触发 push |
 | bidirectional | pull 写入本地时 watcher pause + 路径 ignore，避免 echo push |
 | 关闭 watch | 设 `watchEnabled: false`，仅依赖 `autoSyncIntervalSec` 定时 sync |
+| 多 mapping | 相同 polling 模式共用一个底层 chokidar；重叠/父子 `localRoot` 的目录索引只保留一份 |
 
 ### 每条 Mapping 字段
 
@@ -710,7 +714,7 @@ start http://127.0.0.1:9090/
 适用于云端部署多个个人助理 Agent、每个 Agent 对应一位用户知识库的场景：
 
 - 每个 mapping 配置独立 `appKey`（用户各自的密钥），限速器按 appKey 独立管理
-- 调高 `maxConcurrentMappings`（建议 10～20），提升并发吞吐
+- 逐步调高 `maxConcurrentMappings`（不超过安全上限 10），并同步观察 RSS/事件循环延迟
 - 增量模式下若本地和远端均无变化，决策阶段会被完全跳过，单轮同步仅需几毫秒
 - `autoSyncIntervalSec` 建议设为 `120` 或以上，给每轮完整扫描留足时间
 

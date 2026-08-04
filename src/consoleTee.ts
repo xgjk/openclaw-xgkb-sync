@@ -125,6 +125,8 @@ function pickInitialLogSegment(
 }
 
 class RotatingLogWriter {
+  /** 日志磁盘变慢时最多在 JS 侧保留 4 MiB；超过后舍弃旧时效日志。 */
+  private static readonly MAX_PENDING_BYTES = 4 * 1024 * 1024;
   private readonly logDir: string;
   private readonly baseName: string;
   private readonly maxFileBytes: number;
@@ -133,6 +135,12 @@ class RotatingLogWriter {
   private currentPath: string;
   private stream: fs.WriteStream;
   private bytesInFile: number;
+  private pendingLines: string[] = [];
+  private pendingHead = 0;
+  private pendingBytes = 0;
+  private backpressured = false;
+  private rotating = false;
+  private droppedLines = 0;
 
   constructor(logDir: string, baseName: string, maxFileBytes: number) {
     this.logDir = logDir;
@@ -151,7 +159,7 @@ class RotatingLogWriter {
     this.currentSegment = initial.segment;
     this.currentPath = initial.absPath;
     this.bytesInFile = initial.bytesInFile;
-    this.stream = fs.createWriteStream(this.currentPath, { flags: 'a' });
+    this.stream = this.createStream(this.currentPath);
   }
 
   getCurrentPath(): string {
@@ -159,30 +167,88 @@ class RotatingLogWriter {
   }
 
   write(line: string): void {
-    const today = formatLogDate();
-    if (today !== this.currentDate) {
-      this.rotateTo(today, 0);
-    }
-
     const lineBytes = Buffer.byteLength(line, 'utf8');
-    if (this.bytesInFile > 0 && this.bytesInFile + lineBytes > this.maxFileBytes) {
-      this.rotateTo(this.currentDate, this.currentSegment + 1);
+    if (
+      lineBytes > RotatingLogWriter.MAX_PENDING_BYTES ||
+      this.pendingBytes + lineBytes > RotatingLogWriter.MAX_PENDING_BYTES
+    ) {
+      this.droppedLines++;
+      return;
+    }
+    this.pendingLines.push(line);
+    this.pendingBytes += lineBytes;
+    this.pump();
+  }
+
+  private pump(): void {
+    if (this.backpressured || this.rotating) return;
+
+    while (this.pendingHead < this.pendingLines.length) {
+      const line = this.pendingLines[this.pendingHead];
+      const lineBytes = Buffer.byteLength(line, 'utf8');
+      const today = formatLogDate();
+      const dateChanged = today !== this.currentDate;
+      const sizeExceeded =
+        this.bytesInFile > 0 && this.bytesInFile + lineBytes > this.maxFileBytes;
+      if (dateChanged || sizeExceeded) {
+        this.rotateTo(dateChanged ? today : this.currentDate, dateChanged ? 0 : this.currentSegment + 1);
+        return;
+      }
+
+      this.pendingHead++;
+      this.pendingBytes -= lineBytes;
+      this.bytesInFile += lineBytes;
+      const accepted = this.stream.write(line);
+      if (!accepted) {
+        this.backpressured = true;
+        this.stream.once('drain', () => {
+          this.backpressured = false;
+          this.compactQueue();
+          this.pump();
+        });
+        return;
+      }
     }
 
-    this.stream.write(line);
-    this.bytesInFile += lineBytes;
+    this.compactQueue();
+    if (this.droppedLines > 0) {
+      const dropped = this.droppedLines;
+      this.droppedLines = 0;
+      this.write(
+        `[${new Date().toISOString()}] [WARN] [ConsoleTee] 日志磁盘写入拥塞，已舍弃 ${dropped} 行日志\n`,
+      );
+    }
+  }
+
+  private compactQueue(): void {
+    if (this.pendingHead === 0) return;
+    this.pendingLines = this.pendingLines.slice(this.pendingHead);
+    this.pendingHead = 0;
   }
 
   private rotateTo(date: string, segment: number): void {
-    this.stream.end();
-    this.currentDate = date;
-    this.currentSegment = segment;
-    this.currentPath = path.join(
-      this.logDir,
-      buildLogFileName(this.baseName, date, segment),
-    );
-    this.bytesInFile = 0;
-    this.stream = fs.createWriteStream(this.currentPath, { flags: 'a' });
+    this.rotating = true;
+    this.stream.end(() => {
+      this.currentDate = date;
+      this.currentSegment = segment;
+      this.currentPath = path.join(
+        this.logDir,
+        buildLogFileName(this.baseName, date, segment),
+      );
+      this.bytesInFile = 0;
+      this.stream = this.createStream(this.currentPath);
+      this.rotating = false;
+      this.pump();
+    });
+  }
+
+  private createStream(filePath: string): fs.WriteStream {
+    const stream = fs.createWriteStream(filePath, { flags: 'a' });
+    stream.on('error', (e) => {
+      // 不再通过 console 输出，避免日志 writer 自己递归；队列有硬上限，不会因磁盘故障失控。
+      process.stderr.write(`[ConsoleTee] 写日志失败 ${filePath}: ${e.message}\n`);
+    });
+    return stream;
   }
 }
 
