@@ -257,6 +257,16 @@ export const WATCH_AWAIT_WRITE_POLL_MS = 100;
 /** pull 写入结束后 ignoreSet 额外保留时间（毫秒），防止 resume 后 chokidar 迟到的 echo */
 export const WATCH_PULL_IGNORE_TAIL_MS = 200;
 
+/** macOS 原生递归 watcher 的根目录硬上限；超出部分依赖定时同步兜底。 */
+export const MAX_NATIVE_RECURSIVE_WATCH_ROOTS = 256;
+
+/** 永久远端错误首次熔断 30 分钟，重复探测失败后指数退避，最长 24 小时。 */
+export const PERMANENT_ERROR_CIRCUIT_BASE_MS = 30 * 60_000;
+export const PERMANENT_ERROR_CIRCUIT_MAX_MS = 24 * 60 * 60_000;
+
+/** 成功 API 仅记录慢请求；普通成功请求不再逐条打印参数和响应。 */
+export const API_SLOW_REQUEST_LOG_MS = 5_000;
+
 /** 状态库至少有多少条文件记录时，才启用「本地骤降」远端删除保护 */
 export const LOCAL_ROOT_GUARD_MIN_KNOWN_FILES = 20;
 

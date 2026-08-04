@@ -36,6 +36,7 @@ export declare class SyncScheduler {
     /** localRoot 缺失后即时挂起，阻止 timer/watch 继续触发（热重载前） */
     private readonly suspendedMappingIds;
     private readonly missingRootDisableInFlight;
+    private readonly circuitBreakers;
     constructor(config: SyncConfig, opts?: SyncSchedulerOptions);
     /**
      * 按 appKey 获取或创建对应的限速器。
@@ -64,6 +65,13 @@ export declare class SyncScheduler {
         mappings: number;
         backends: number;
         watchedDirectories: number;
+        watchedRoots: number;
+        droppedRoots: number;
+        modes: Record<string, number>;
+    };
+    getCircuitBreakerPressure(): {
+        open: number;
+        total: number;
     };
     /** 无进行中的 mapping 同步（供自动升级等场景） */
     isSyncIdle(): boolean;
@@ -81,6 +89,9 @@ export declare class SyncScheduler {
     private suspendMappingForMissingLocalRoot;
     private disableMappingForMissingLocalRoot;
     private doSync;
+    private shouldSkipForCircuit;
+    private tripCircuit;
+    private clearCircuit;
     /** 获取当前生效的配置（供 ManagementApi 读取） */
     getConfig(): SyncConfig;
     private shouldForceFullScan;
@@ -98,6 +109,9 @@ export declare class SyncScheduler {
         lastTriggerReason?: SyncTriggerReason;
         lastWatchTriggerAt?: number;
         watchActive: boolean;
+        circuitOpen: boolean;
+        circuitUntil?: number;
+        circuitReason?: string;
         lastState: unknown;
     }>;
 }

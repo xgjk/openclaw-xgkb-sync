@@ -177,9 +177,9 @@ npm run dev:config                   # 显式使用 ./config.json
 | `startupJitterMaxSec` | 否 | `20` | 启动后首次同步的随机抖动上限（秒）。多实例同时重启时分散请求，设为 `0` 禁用 |
 | `managementPort` | 否 | `9090` | HTTP 管理 API 监听端口，设为 `0` 禁用管理 API |
 | `managementHost` | 否 | `0.0.0.0` | HTTP 管理 API 监听地址；默认允许局域网访问，本机浏览器请用 `127.0.0.1`（注意防火墙） |
-| `watchEnabled` | 否 | `true` | push/bidirectional 是否启用 chokidar 本地文件监听；`false` 时仅依赖定时 sync |
+| `watchEnabled` | 否 | `true` | push/bidirectional 是否启用本地文件监听；`false` 时仅依赖定时 sync |
 | `pushDebounceMs` | 否 | `1500` | 文件监听 debounce（毫秒），合并连续保存 |
-| `watchUsePolling` | 否 | `false` | **仅 watch 开启时有效**。chokidar 用轮询代替系统原生文件事件（NFS/Docker 卷）；不是「定时 sync」的替代品 |
+| `watchUsePolling` | 否 | `false` | **仅 watch 开启时有效**。改用 chokidar 轮询（NFS/Docker 卷）；不是「定时 sync」的替代品 |
 
 中心上报具有资源保护：单请求 30 秒超时，execution-log 最多 2 个请求在途；拥塞时同一 mapping 只保留最新一条并采用指数退避，不会因 sync-manage 停服而无限积压。
 
@@ -200,7 +200,7 @@ npm run dev:config                   # 显式使用 ./config.json
 | 字段 | 含义 |
 |------|------|
 | `watchEnabled` | **要不要**监听本地目录（总开关） |
-| `watchUsePolling` | **怎么**监听：默认 `false` 用 Windows/Linux 原生事件（快）；`true` 用 chokidar 轮询（NFS/Docker 卷更可靠，CPU 略高） |
+| `watchUsePolling` | **怎么**监听：默认 `false` 使用平台事件（macOS 为原生递归 `fs.watch`，其他平台由 chokidar 适配）；`true` 用 chokidar 轮询（NFS/Docker 卷更可靠，CPU 略高） |
 
 `watchEnabled: false` 时回退到 **定时 sync**，不是打开 `watchUsePolling`。
 
@@ -275,7 +275,7 @@ npm run dev:config                   # 显式使用 ./config.json
 
 ### 本地文件监听（即时 push）
 
-push / bidirectional mapping 在 `watchEnabled: true`（默认）时，使用 **chokidar** 监听 `localRoot` 下匹配 `filePatterns` 的变更，debounce 后触发与定时器相同的 `SyncEngine.runSync()`（含 rename/move、方案一索引 publish/consume）。
+push / bidirectional mapping 在 `watchEnabled: true`（默认）时监听 `localRoot` 下匹配 `filePatterns` 的变更，debounce 后触发与定时器相同的 `SyncEngine.runSync()`（含 rename/move、方案一索引 publish/consume）。macOS 非 polling 模式使用原生递归 `fs.watch`，避免 chokidar 为每级目录保留大量 FSEvents/CFString 对象。
 
 | 项目 | 说明 |
 |------|------|
@@ -285,7 +285,9 @@ push / bidirectional mapping 在 `watchEnabled: true`（默认）时，使用 **
 | 方案一索引 | `.openclaw-sync-map.json` 被 watch **硬排除**；sync 期间 watcher **pause**，consume 不会误触发 push |
 | bidirectional | pull 写入本地时 watcher pause + 路径 ignore，避免 echo push |
 | 关闭 watch | 设 `watchEnabled: false`，仅依赖 `autoSyncIntervalSec` 定时 sync |
-| 多 mapping | 相同 polling 模式共用一个底层 chokidar；重叠/父子 `localRoot` 的目录索引只保留一份 |
+| 多 mapping | 相同模式共用 backend；重叠/父子 `localRoot` 合并为最少有效根。macOS 原生递归 root 上限 256，超出部分由定时同步兜底并在 `/health` 标记 degraded |
+
+上传队列先串行探测到一次真实成功，之后才放开配置并发。明确的鉴权失败、权限不足，或远端初始化阶段的参数错误会停止本轮剩余远端任务，并对该 mapping 开启持久化指数冷却（30 分钟起，最长 24 小时）。单文件参数错误仍保持文件级隔离，不会阻塞其他正常文件。自动触发在冷却期跳过；Web/管理 API 的手动同步始终可以立即探测，成功后自动解除熔断。
 
 ### 每条 Mapping 字段
 
@@ -302,7 +304,7 @@ push / bidirectional mapping 在 `watchEnabled: true`（默认）时，使用 **
 | `excludePatterns` | 否 | 排除文件的 glob 模式，默认 `["**/_conflict_*", "**/.tmp/**"]` |
 | `syncDirection` | 否 | 单条 mapping 的同步方向，覆盖全局配置 |
 | `enableFileIndex` | 否 | 是否启用映射索引文件 `.openclaw-sync-map.json`，默认 `false`。见下节 |
-| `watchEnabled` | 否 | 覆盖全局；是否启用 chokidar 即时 push（pull-only 无效） |
+| `watchEnabled` | 否 | 覆盖全局；是否启用本地监听即时 push（pull-only 无效） |
 | `pushDebounceMs` | 否 | 覆盖全局监听 debounce（毫秒） |
 | `watchUsePolling` | 否 | 覆盖全局；NFS/Docker 卷轮询监听 |
 

@@ -40,6 +40,10 @@ import {
   evaluateRemoteDeleteGuard,
   isLocalWorkspaceAnomaly,
 } from './localRootGuard';
+import {
+  classifyPermanentSyncFailure,
+  type PermanentSyncFailure,
+} from './syncErrorPolicy';
 
 type ProgressCallback = (msg: string) => void;
 
@@ -102,6 +106,8 @@ export class SyncEngine {
   private tombstonedRemoteFileIds = new Set<string>();
   /** remoteFileId → 状态记录（用于识别「远端 rename 后新路径」实为已知身份） */
   private remoteFileIdOwners = new Map<string, FileState>();
+  /** 本轮首次明确的鉴权/权限/参数类永久错误；一旦出现便停止剩余远端写操作。 */
+  private permanentFailure: PermanentSyncFailure | null = null;
 
   constructor(
     localFs: LocalFsAdapter,
@@ -150,6 +156,33 @@ export class SyncEngine {
   /** 本轮 sync 中 pull 侧写入本地的路径（供 chokidar echo 过滤） */
   getPullLocalTouchPaths(): string[] {
     return [...this.pullLocalTouchPaths];
+  }
+
+  getPermanentFailure(): PermanentSyncFailure | null {
+    return this.permanentFailure;
+  }
+
+  private capturePermanentFailure(message: string): void {
+    if (this.permanentFailure) return;
+    const failure = classifyPermanentSyncFailure(message);
+    if (!failure) return;
+    // 文件级参数错误可能只影响一个路径；仅鉴权/权限问题足以证明整个 mapping 继续请求无意义。
+    if (failure.category === 'validation') return;
+    this.permanentFailure = failure;
+    console.error(
+      `[SyncEngine][${this.mapping.mappingId}] 检测到永久远端错误 category=${failure.category}，` +
+        `本轮停止剩余远端操作: ${failure.message}`,
+    );
+  }
+
+  private finishAfterPermanentFailure(prog: ProgressCallback): SyncStats {
+    if (this.permanentFailure) {
+      prog(
+        `永久远端错误已触发快速停止（${this.permanentFailure.category}），` +
+          `剩余任务等待人工修复或冷却后探测`,
+      );
+    }
+    return this.stats;
   }
 
   private notePullLocalTouch(...paths: (string | undefined)[]): void {
@@ -203,6 +236,7 @@ export class SyncEngine {
     this.stats = this.emptyStats();
     this.progress = onProgress ?? (() => undefined);
     this.pullLocalTouchPaths.clear();
+    this.permanentFailure = null;
 
     const prog = (msg: string) => {
       console.log(`[SyncEngine][${this.mapping.mappingId}] ${msg}`);
@@ -295,9 +329,9 @@ export class SyncEngine {
         );
         this.logRenamePlans(renamePlans);
         // 先执行目录级（一次 API），再单文件
-        for (const plan of [...dirPlans, ...filePlans]) {
-          await this.executePlan(plan, remoteMap);
-        }
+        const orderedRenamePlans = [...dirPlans, ...filePlans];
+        await this.executePlansSerial(orderedRenamePlans, remoteMap);
+        if (this.permanentFailure) return this.finishAfterPermanentFailure(prog);
         // 重命名/移动执行后 DB 已变更，重新加载 recordMap + fileId 归属
         recordMap = new Map<string, FileState>(
           this.db.getAllFileStates(this.mapping.mappingId).map((r) => [r.localPath, r]),
@@ -497,25 +531,30 @@ export class SyncEngine {
     );
 
     // 1. 删除操作串行（避免竞态）
-    for (const plan of deletePlans) {
-      await this.executePlan(plan, remoteMap);
-    }
+    await this.executePlansSerial(deletePlans, remoteMap);
+    if (this.permanentFailure) return this.finishAfterPermanentFailure(prog);
 
     // 1b. 本地删除 tombstone / 清除 tombstone（串行写状态库）
-    for (const plan of tombstonePlans) {
-      await this.executePlan(plan, remoteMap);
-    }
+    await this.executePlansSerial(tombstonePlans, remoteMap);
 
     // 2. 下载：按 downloadConcurrency 分批，批间加 pause，由 KbApiClient 限速器节流
     if (safeDownloadPlans.length > 0) {
       prog(`开始下载 ${safeDownloadPlans.length} 个文件（并发=${this.downloadConcurrency}）...`);
       await this.executePlansInQueue(safeDownloadPlans, this.downloadConcurrency, '下载', prog);
+      if (this.permanentFailure) return this.finishAfterPermanentFailure(prog);
     }
 
     // 3. 上传：按 uploadConcurrency 分批，同理
     if (uploadPlans.length > 0) {
       prog(`开始上传 ${uploadPlans.length} 个文件（并发=${this.uploadConcurrency}）...`);
-      await this.executePlansInQueue(uploadPlans, this.uploadConcurrency, '上传', prog);
+      await this.executePlansInQueue(
+        uploadPlans,
+        this.uploadConcurrency,
+        '上传',
+        prog,
+        true,
+      );
+      if (this.permanentFailure) return this.finishAfterPermanentFailure(prog);
     }
 
     // 本轮下载/删除可能改变本地目录树；清理远端目录前重新扫描，避免使用启动时快照误判。
@@ -619,7 +658,16 @@ export class SyncEngine {
 
       // 3. 安全检查：远端目录是否真的为空（可能有非同步文件）
       const childResult = await this.remoteFs.getChildFiles(folder.remoteFolderId);
-      if (childResult.ok && childResult.value && childResult.value.length > 0) {
+      if (!childResult.ok) {
+        failed++;
+        const error = `${folder.localPath}: 检查远端目录失败: ${childResult.error}`;
+        if (errors.length < MAX_SYNC_ERROR_DETAILS) errors.push(error);
+        this.capturePermanentFailure(childResult.error);
+        console.warn(`[SyncEngine] ${error}`);
+        if (this.permanentFailure) break;
+        continue;
+      }
+      if (childResult.value && childResult.value.length > 0) {
         console.log(
           `[SyncEngine] 跳过远端非空目录: "${folder.localPath}" (${folder.remoteFolderId}) 远端有 ${childResult.value.length} 个子项`,
         );
@@ -638,8 +686,9 @@ export class SyncEngine {
         if (errors.length < MAX_SYNC_ERROR_DETAILS) {
           errors.push(`${folder.localPath}: ${result.error}`);
         }
-        this.db.deleteFolderState(this.mapping.mappingId, folder.localPath);
+        this.capturePermanentFailure(result.error);
         console.warn(`[SyncEngine] 远端目录删除失败: "${folder.localPath}" (${folder.remoteFolderId}): ${result.error}`);
+        if (this.permanentFailure) break;
       }
     }
 
@@ -1313,16 +1362,58 @@ export class SyncEngine {
     concurrency: number,
     label: string,
     prog: ProgressCallback,
+    probeFirst = false,
   ): Promise<void> {
     const total = plans.length;
-    for (let i = 0; i < total; i += concurrency) {
+    let startIndex = 0;
+
+    // 上传新文件可能先创建分片/resource，最终入库才暴露权限错误。
+    // 串行到一次真实成功后再放开并发，可将权限错误配置的远端副作用限制为最多一次。
+    if (probeFirst && total > 0) {
+      // 跳过或普通单文件错误都不能证明远端写权限有效；继续串行，直到一次真实上传成功。
+      while (startIndex < total) {
+        const uploadedBefore = this.stats.uploaded;
+        await this.executePlan(plans[startIndex]);
+        startIndex++;
+        prog(`${label} ${startIndex}/${total}...`);
+        if (this.permanentFailure) {
+          this.stats.skipped += total - startIndex;
+          return;
+        }
+        if (this.stats.uploaded > uploadedBefore) break;
+      }
+      if (startIndex < total) await this.delay(EXECUTE_BATCH_PAUSE_MS);
+    }
+
+    for (let i = startIndex; i < total; i += concurrency) {
+      if (this.permanentFailure) {
+        this.stats.skipped += total - i;
+        break;
+      }
       const chunk = plans.slice(i, i + concurrency);
       await Promise.all(chunk.map((p) => this.executePlan(p)));
-      const done = Math.min(i + concurrency, total);
+      const done = i + chunk.length;
       prog(`${label} ${done}/${total}...`);
+      if (this.permanentFailure) {
+        this.stats.skipped += total - done;
+        break;
+      }
       // 批间 pause：给限速器补充令牌，同时平滑磁盘/网络压力
       if (done < total) {
         await this.delay(EXECUTE_BATCH_PAUSE_MS);
+      }
+    }
+  }
+
+  private async executePlansSerial(
+    plans: SyncPlan[],
+    remoteMap?: Map<string, RemoteFileEntry>,
+  ): Promise<void> {
+    for (let i = 0; i < plans.length; i++) {
+      await this.executePlan(plans[i], remoteMap);
+      if (this.permanentFailure) {
+        this.stats.skipped += plans.length - i - 1;
+        return;
       }
     }
   }
@@ -1409,6 +1500,7 @@ export class SyncEngine {
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
+      this.capturePermanentFailure(msg);
       const errno =
         e instanceof Error && 'code' in e ? String((e as NodeJS.ErrnoException).code) : '';
       const localAbsPath = nodePath.join(

@@ -16,6 +16,8 @@ export declare class SyncStateDb {
      * 在修改 remoteRootFolderPath / projectId 配置后调用，强制下次启动重新解析。
      */
     clearResolvedCache(mappingId: string): void;
+    setMappingCircuitBreaker(mappingId: string, level: number, until: number, reason: string): void;
+    clearMappingCircuitBreaker(mappingId: string): void;
     /**
      * 完全重置 mapping 的同步状态：
      * 1. 删除所有文件记录（sync_file_state）

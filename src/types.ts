@@ -553,6 +553,10 @@ export interface MappingState {
   indexFileRemoteId?: string | null;
   /** 上次成功 publish 的索引 JSON 内容 hash（SHA256 hex） */
   indexContentHash?: string | null;
+  /** 永久远端错误熔断状态（持久化，避免服务重启后立刻重放失败批次）。 */
+  circuitBreakerLevel?: number | null;
+  circuitBreakerUntil?: number | null;
+  circuitBreakerReason?: string | null;
 }
 
 /** 映射索引 JSON 文档（根目录全量表） */

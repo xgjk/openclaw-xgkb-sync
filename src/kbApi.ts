@@ -26,6 +26,7 @@ import {
   API_ERROR_LOG_MAX_CHARS,
   API_ERROR_MESSAGE_BODY_MAX,
   API_PATHS,
+  API_SLOW_REQUEST_LOG_MS,
   MAX_RETRIES,
   RATE_LIMIT_RESULT_CODES,
   REQUEST_TIMEOUT_MS,
@@ -110,11 +111,11 @@ export class KbApiClient {
       body = JSON.stringify(params);
     }
 
-    const paramsSummary = summarizeParams(params);
-    console.log(
-      `[KbApi] request#${requestId} start method=${method} path=${apiPath}\n` +
-        `  params: ${paramsSummary}`,
-    );
+    let paramsSummaryCache: string | undefined;
+    const paramsSummary = (): string => {
+      paramsSummaryCache ??= summarizeParams(params);
+      return paramsSummaryCache;
+    };
     let lastError = '';
     let lastErrorWasRateLimit = false;
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
@@ -153,7 +154,7 @@ export class KbApiClient {
           console.error(
             `[KbApi] request#${requestId} HTTP 错误 method=${method} path=${apiPath} status=${resp.status} ${resp.statusText} attempt=${attempt + 1}/${MAX_RETRIES} elapsed=${Date.now() - attemptStart}ms\n` +
               `  url: ${urlForLog}\n` +
-              `  params: ${paramsSummary}\n` +
+              `  params: ${paramsSummary()}\n` +
               `  responseBody: ${truncateForLog(rawText)}`,
           );
           const shortErr = `HTTP ${resp.status}: ${resp.statusText}${rawText ? ` | body=${bodySnippet}` : ''}`;
@@ -186,7 +187,7 @@ export class KbApiClient {
           console.error(
             `[KbApi] request#${requestId} 响应非 JSON method=${method} path=${apiPath} attempt=${attempt + 1}/${MAX_RETRIES} elapsed=${Date.now() - attemptStart}ms\n` +
               `  url: ${urlForLog}\n` +
-              `  params: ${paramsSummary}\n` +
+              `  params: ${paramsSummary()}\n` +
               `  raw: ${truncateForLog(rawText)}`,
           );
           return {
@@ -215,7 +216,7 @@ export class KbApiClient {
               `[KbApi] request#${requestId} 业务层限流 code=${result.resultCode} method=${method} path=${apiPath}` +
                 ` attempt=${attempt + 1}/${MAX_RETRIES} elapsed=${Date.now() - attemptStart}ms\n` +
                 `  url: ${urlForLog}\n` +
-                `  params: ${paramsSummary}\n` +
+                `  params: ${paramsSummary()}\n` +
                 `  msg: ${result.resultMsg}`,
             );
             this.limiter?.onRateLimited();
@@ -231,7 +232,7 @@ export class KbApiClient {
               `[KbApi] request#${requestId} 业务层临时错误 code=${result.resultCode} method=${method} path=${apiPath}` +
                 ` attempt=${attempt + 1}/${MAX_RETRIES} elapsed=${Date.now() - attemptStart}ms\n` +
                 `  url: ${urlForLog}\n` +
-                `  params: ${paramsSummary}\n` +
+                `  params: ${paramsSummary()}\n` +
                 `  msg: ${result.resultMsg}`,
             );
             lastError = shortErr;
@@ -242,19 +243,20 @@ export class KbApiClient {
           console.error(
             `[KbApi] request#${requestId} 业务错误 method=${method} path=${apiPath} attempt=${attempt + 1}/${MAX_RETRIES} elapsed=${Date.now() - attemptStart}ms\n` +
               `  url: ${urlForLog}\n` +
-              `  params: ${paramsSummary}\n` +
+              `  params: ${paramsSummary()}\n` +
               `  response: ${truncateForLog(JSON.stringify(parsed))}`,
           );
           return { ok: false, error: shortErr };
         }
 
-        const dataSummary =
-          result.data != null ? summarizeParams({ data: result.data as unknown as Record<string, unknown> }) : '{}';
-        console.log(
-          `[KbApi] request#${requestId} success method=${method} path=${apiPath}` +
-            ` attempt=${attempt + 1}/${MAX_RETRIES} elapsed=${Date.now() - attemptStart}ms total=${Date.now() - reqStart}ms\n` +
-            `  data: ${dataSummary}`,
-        );
+        const totalElapsed = Date.now() - reqStart;
+        if (totalElapsed >= API_SLOW_REQUEST_LOG_MS || attempt > 0) {
+          console.log(
+            `[KbApi] request#${requestId} success method=${method} path=${apiPath}` +
+              ` attempt=${attempt + 1}/${MAX_RETRIES} elapsed=${Date.now() - attemptStart}ms` +
+              ` total=${totalElapsed}ms${totalElapsed >= API_SLOW_REQUEST_LOG_MS ? ' slow=true' : ''}`,
+          );
+        }
         return { ok: true, value: result.data };
       } catch (e) {
         if (e instanceof Error && e.name === 'AbortError') {
@@ -264,7 +266,7 @@ export class KbApiClient {
         }
         console.error(
           `[KbApi] request#${requestId} 请求异常 method=${method} path=${apiPath} attempt=${attempt + 1}/${MAX_RETRIES}\n` +
-            `  params: ${paramsSummary}\n` +
+            `  params: ${paramsSummary()}\n` +
           `  error: ${lastError}`,
         );
       } finally {
@@ -274,7 +276,7 @@ export class KbApiClient {
 
     console.error(
       `[KbApi] request#${requestId} 已达最大重试 method=${method} path=${apiPath} total=${Date.now() - reqStart}ms\n` +
-        `  params: ${paramsSummary}\n` +
+        `  params: ${paramsSummary()}\n` +
         `  lastError: ${lastError}`,
     );
     return { ok: false, error: `请求失败(重试${MAX_RETRIES}次): ${lastError}` };

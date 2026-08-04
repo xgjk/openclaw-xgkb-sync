@@ -277,10 +277,19 @@ export class ManagementApi {
     const enabledCount = config.mappings.filter((m) => m.enabled).length;
     const pressure = scheduler.getGlobalSyncPressure();
     const watcherPressure = scheduler.getWatcherPressure();
+    const circuitPressure = scheduler.getCircuitBreakerPressure();
     const memory = process.memoryUsage();
+    const activeResources = process.getActiveResourcesInfo().reduce<Record<string, number>>(
+      (counts, resource) => {
+        counts[resource] = (counts[resource] ?? 0) + 1;
+        return counts;
+      },
+      {},
+    );
 
     const overloaded = pressure.running >= pressure.max && pressure.max > 0;
     const highLag = this.lastEventLoopLagMs > 15_000;
+    const watcherCapacityExceeded = watcherPressure.droppedRoots > 0;
 
     // 能执行到这里说明事件循环未完全卡死；黑盒探针应认 200，负载用字段表达
     const id = this.opts.getNodeIdentity();
@@ -301,7 +310,13 @@ export class ManagementApi {
       globalSyncMax: pressure.max,
       watcherMappings: watcherPressure.mappings,
       watcherBackends: watcherPressure.backends,
+      watcherModes: watcherPressure.modes,
+      watchedRoots: watcherPressure.watchedRoots,
       watchedDirectories: watcherPressure.watchedDirectories,
+      droppedWatcherRoots: watcherPressure.droppedRoots,
+      openCircuitBreakers: circuitPressure.open,
+      trackedCircuitBreakers: circuitPressure.total,
+      activeResources,
       memory: {
         rss: memory.rss,
         heapUsed: memory.heapUsed,
@@ -309,7 +324,7 @@ export class ManagementApi {
         external: memory.external,
         arrayBuffers: memory.arrayBuffers,
       },
-      degraded: highLag || overloaded,
+      degraded: highLag || overloaded || watcherCapacityExceeded || circuitPressure.open > 0,
       ...(highLag && {
         warn: 'event_loop_lag_high',
         hint: '同步阻塞事件循环，HTTP 可能间歇超时；请调大黑盒 timeout 或降低并行同步',
@@ -317,6 +332,10 @@ export class ManagementApi {
       ...(overloaded && {
         warn: 'global_sync_saturated',
         hint: '全局同步并发已满，新任务在排队',
+      }),
+      ...(watcherCapacityExceeded && {
+        warn: 'watcher_capacity_exceeded',
+        hint: '部分根目录未启用实时监听，当前由定时同步兜底',
       }),
     });
   }
@@ -339,6 +358,9 @@ export class ManagementApi {
           ? resolveWatchEnabled(mapping, config)
           : false,
         watchActive: state.watchActive,
+        circuitOpen: state.circuitOpen,
+        circuitUntil: state.circuitUntil ?? null,
+        circuitReason: state.circuitReason ?? null,
         lastTriggerReason: state.lastTriggerReason ?? null,
         lastWatchTriggerAt: state.lastWatchTriggerAt ?? null,
         isSyncing: state.isSyncing,
@@ -1022,6 +1044,8 @@ export class ManagementApi {
       });
     }
 
+    // reload 已等待旧 scheduler 排空；新 scheduler 不含该 mapping，此时清状态不存在并发回写。
+    this.opts.getScheduler().resetMappingState(mappingId);
     console.log(`[ManagementApi] 删除 mapping: ${mappingId}`);
     this.sendJson(res, 200, { ok: true, reloadOk: true, message: `mapping "${mappingId}" 已删除` });
   }

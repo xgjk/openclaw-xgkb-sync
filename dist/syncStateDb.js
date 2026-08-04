@@ -33,7 +33,10 @@ class SyncStateDb {
         last_error              TEXT,
         last_stats_json         TEXT,
         resolved_root_file_id   TEXT,
-        resolved_project_id     TEXT
+        resolved_project_id     TEXT,
+        circuit_breaker_level   INTEGER,
+        circuit_breaker_until   INTEGER,
+        circuit_breaker_reason  TEXT
       );
 
       CREATE TABLE IF NOT EXISTS sync_file_state (
@@ -91,6 +94,9 @@ class SyncStateDb {
             'ALTER TABLE sync_file_state ADD COLUMN remote_relative_path TEXT',
             'ALTER TABLE sync_mapping_state ADD COLUMN index_file_remote_id TEXT',
             'ALTER TABLE sync_mapping_state ADD COLUMN index_content_hash TEXT',
+            'ALTER TABLE sync_mapping_state ADD COLUMN circuit_breaker_level INTEGER',
+            'ALTER TABLE sync_mapping_state ADD COLUMN circuit_breaker_until INTEGER',
+            'ALTER TABLE sync_mapping_state ADD COLUMN circuit_breaker_reason TEXT',
         ];
         for (const sql of migrations) {
             try {
@@ -166,6 +172,24 @@ class SyncStateDb {
        SET resolved_root_file_id = NULL, resolved_project_id = NULL
        WHERE mapping_id = ?`, [mappingId]);
     }
+    setMappingCircuitBreaker(mappingId, level, until, reason) {
+        this.assertOpen();
+        this.db.run(`INSERT INTO sync_mapping_state
+         (mapping_id, circuit_breaker_level, circuit_breaker_until, circuit_breaker_reason)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(mapping_id) DO UPDATE SET
+         circuit_breaker_level = excluded.circuit_breaker_level,
+         circuit_breaker_until = excluded.circuit_breaker_until,
+         circuit_breaker_reason = excluded.circuit_breaker_reason`, [mappingId, level, until, reason]);
+    }
+    clearMappingCircuitBreaker(mappingId) {
+        this.assertOpen();
+        this.db.run(`UPDATE sync_mapping_state
+       SET circuit_breaker_level = NULL,
+           circuit_breaker_until = NULL,
+           circuit_breaker_reason = NULL
+       WHERE mapping_id = ?`, [mappingId]);
+    }
     /**
      * 完全重置 mapping 的同步状态：
      * 1. 删除所有文件记录（sync_file_state）
@@ -190,7 +214,10 @@ class SyncStateDb {
              resolved_root_file_id = NULL,
              resolved_project_id   = NULL,
              index_file_remote_id  = NULL,
-             index_content_hash    = NULL
+             index_content_hash    = NULL,
+             circuit_breaker_level = NULL,
+             circuit_breaker_until = NULL,
+             circuit_breaker_reason = NULL
          WHERE mapping_id = ?`, [mappingId]);
             this.db.exec('COMMIT');
         }
@@ -424,6 +451,9 @@ function rowToMappingState(row) {
         resolvedProjectId: row.resolved_project_id,
         indexFileRemoteId: row.index_file_remote_id,
         indexContentHash: row.index_content_hash,
+        circuitBreakerLevel: row.circuit_breaker_level,
+        circuitBreakerUntil: row.circuit_breaker_until,
+        circuitBreakerReason: row.circuit_breaker_reason,
     };
 }
 function parseStats(raw) {

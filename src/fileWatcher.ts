@@ -3,12 +3,35 @@ import * as path from 'path';
 import chokidar, { FSWatcher } from 'chokidar';
 import {
   FILE_INDEX_NAME,
+  MAX_NATIVE_RECURSIVE_WATCH_ROOTS,
   WATCH_AWAIT_WRITE_POLL_MS,
   WATCH_AWAIT_WRITE_STABILITY_MS,
   WATCH_PULL_IGNORE_TAIL_MS,
 } from './constants';
 import { canonicalizeRelativeSyncPath, normalizeSeparator } from './pathSanitize';
 import { isInSyncScope, shouldSkipDotEntryName, type SyncScopeOptions } from './pathSyncScope';
+
+export type FileWatcherBackendMode =
+  | 'darwin-native-recursive'
+  | 'chokidar'
+  | 'chokidar-polling';
+
+function isPathWithin(candidate: string, ancestor: string): boolean {
+  const rel = path.relative(path.resolve(ancestor), path.resolve(candidate));
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
+/** 去掉完全重复和被父目录覆盖的 root，避免为嵌套 mapping 重复建立递归 watcher。 */
+export function compactWatchRoots(roots: Iterable<string>): string[] {
+  const unique = [...new Set([...roots].map((root) => path.resolve(root)))].sort(
+    (a, b) => a.length - b.length || a.localeCompare(b),
+  );
+  const compact: string[] = [];
+  for (const root of unique) {
+    if (!compact.some((parent) => isPathWithin(root, parent))) compact.push(root);
+  }
+  return compact;
+}
 
 export interface FileWatcherOptions {
   mappingId: string;
@@ -29,10 +52,15 @@ export interface FileWatcherOptions {
 export class SharedFileWatcherBackend {
   private readonly registrations = new Map<string, FileWatcher>();
   private watcher: FSWatcher | null = null;
+  private readonly nativeWatchers = new Map<string, fs.FSWatcher>();
+  private droppedRootCount = 0;
   private readyPromise: Promise<void> = Promise.resolve();
   private resolveReady: (() => void) | null = null;
 
-  constructor(private readonly usePolling: boolean) {}
+  constructor(
+    private readonly usePolling: boolean,
+    private readonly platform: NodeJS.Platform = process.platform,
+  ) {}
 
   register(registration: FileWatcher): void {
     this.registrations.set(registration.getMappingId(), registration);
@@ -43,15 +71,22 @@ export class SharedFileWatcherBackend {
   }
 
   start(): void {
-    if (this.watcher || this.registrations.size === 0) return;
-    const roots = [
-      ...new Set([...this.registrations.values()].map((r) => r.getResolvedRoot())),
-    ];
+    if (this.isActive() || this.registrations.size === 0) return;
+    const roots = compactWatchRoots(
+      [...this.registrations.values()].map((registration) => registration.getResolvedRoot()),
+    );
     if (roots.length === 0) return;
 
     this.readyPromise = new Promise<void>((resolve) => {
       this.resolveReady = resolve;
     });
+
+    if (this.getMode() === 'darwin-native-recursive') {
+      this.startDarwinNativeWatchers(roots);
+      this.resolveReady?.();
+      this.resolveReady = null;
+      return;
+    }
 
     this.watcher = chokidar.watch(roots, {
       ignored: (absPath, stats) => {
@@ -98,11 +133,19 @@ export class SharedFileWatcherBackend {
       await this.watcher.close();
       this.watcher = null;
     }
+    for (const watcher of this.nativeWatchers.values()) watcher.close();
+    this.nativeWatchers.clear();
+    this.droppedRootCount = 0;
     this.registrations.clear();
   }
 
   isActive(): boolean {
-    return this.watcher !== null;
+    return this.watcher !== null || this.nativeWatchers.size > 0;
+  }
+
+  isRegistrationActive(root: string): boolean {
+    if (this.watcher) return true;
+    return [...this.nativeWatchers.keys()].some((watchedRoot) => isPathWithin(root, watchedRoot));
   }
 
   /** 供启动编排和集成测试等待初次索引完成，避免漏掉 ready 前的文件事件。 */
@@ -112,6 +155,76 @@ export class SharedFileWatcherBackend {
 
   getWatchedDirectoryCount(): number {
     return this.watcher ? Object.keys(this.watcher.getWatched()).length : 0;
+  }
+
+  getWatchedRootCount(): number {
+    if (this.watcher) {
+      return compactWatchRoots(
+        [...this.registrations.values()].map((registration) => registration.getResolvedRoot()),
+      ).length;
+    }
+    return this.nativeWatchers.size;
+  }
+
+  getDroppedRootCount(): number {
+    return this.droppedRootCount;
+  }
+
+  getMode(): FileWatcherBackendMode {
+    if (this.usePolling) return 'chokidar-polling';
+    return this.platform === 'darwin' ? 'darwin-native-recursive' : 'chokidar';
+  }
+
+  private startDarwinNativeWatchers(allRoots: string[]): void {
+    const roots = allRoots.slice(0, MAX_NATIVE_RECURSIVE_WATCH_ROOTS);
+    this.droppedRootCount = allRoots.length - roots.length;
+
+    for (const root of roots) {
+      try {
+        const watcher = fs.watch(
+          root,
+          { recursive: true, persistent: true },
+          (eventType, filename) => {
+            if (filename == null || filename.toString().length === 0) {
+              for (const registration of this.registrations.values()) {
+                registration.handleSharedUnknownFsEvent(root);
+              }
+              return;
+            }
+            const absPath = path.resolve(root, filename.toString());
+            for (const registration of this.registrations.values()) {
+              registration.handleSharedNativeFsEvent(eventType, absPath);
+            }
+          },
+        );
+        watcher.on('error', (err) => {
+          watcher.close();
+          this.nativeWatchers.delete(root);
+          console.warn(
+            `[FileWatcher] macOS native recursive watcher error root=${root}: ` +
+              `${err instanceof Error ? err.message : String(err)}; 依赖定时 sync 兜底`,
+          );
+        });
+        this.nativeWatchers.set(root, watcher);
+      } catch (err) {
+        console.warn(
+          `[FileWatcher] macOS native recursive watcher start failed root=${root}: ` +
+            `${err instanceof Error ? err.message : String(err)}; 依赖定时 sync 兜底`,
+        );
+      }
+    }
+
+    console.log(
+      `[FileWatcher] shared backend ready mode=darwin-native-recursive` +
+        ` mappings=${this.registrations.size} roots=${this.nativeWatchers.size}` +
+        `${this.droppedRootCount > 0 ? ` droppedRoots=${this.droppedRootCount}` : ''}`,
+    );
+    if (this.droppedRootCount > 0) {
+      console.error(
+        `[FileWatcher] watcher root 数量超过安全上限 ${MAX_NATIVE_RECURSIVE_WATCH_ROOTS}，` +
+          `${this.droppedRootCount} 个 root 不启用实时监听，将由定时同步兜底`,
+      );
+    }
   }
 }
 
@@ -250,12 +363,31 @@ export class FileWatcher {
   }
 
   isActive(): boolean {
-    return this.started && (this.sharedBackend?.isActive() ?? this.watcher !== null);
+    return this.started &&
+      (this.sharedBackend?.isRegistrationActive(this.getResolvedRoot()) ?? this.watcher !== null);
   }
 
   handleSharedFsEvent(event: string, absPath: string): void {
     if (!this.started) return;
     this.onFsEvent(event, absPath, this.getResolvedRoot());
+  }
+
+  handleSharedNativeFsEvent(event: string, absPath: string): void {
+    if (!this.started) return;
+    let kind: 'file' | 'directory' | 'unknown' = 'unknown';
+    try {
+      kind = fs.statSync(absPath).isDirectory() ? 'directory' : 'file';
+    } catch {
+      // rename 同时表示新增/删除；删除后无法 stat，按 unknown 同时检查文件和目录 scope。
+    }
+    this.onFsEvent(event, absPath, this.getResolvedRoot(), kind);
+  }
+
+  handleSharedUnknownFsEvent(watchedRoot: string): void {
+    if (!this.started || this.paused) return;
+    if (!isPathWithin(this.getResolvedRoot(), watchedRoot)) return;
+    this.pendingPaths.add('[unknown-native-event]');
+    this.scheduleDebounce();
   }
 
   /** backend 的 ignored 回调：不属于本 mapping 时视为 ignore；属于时应用 mapping scope。 */
@@ -264,17 +396,28 @@ export class FileWatcher {
     return this.shouldIgnoreWatchTarget(absPath, this.getResolvedRoot(), this.opts.scope, stats);
   }
 
-  private onFsEvent(event: string, absPath: string, root: string): void {
+  private onFsEvent(
+    event: string,
+    absPath: string,
+    root: string,
+    kindOverride?: 'file' | 'directory' | 'unknown',
+  ): void {
     if (this.paused) return;
     if (event === 'ready') return;
 
     const rel = this.toRelativePath(absPath, root);
     if (!rel) return;
+    if (rel === FILE_INDEX_NAME) return;
     if (this.ignoreSet.has(rel)) return;
 
     const isDirEvent = event === 'addDir' || event === 'unlinkDir';
-    const kind = isDirEvent ? 'directory' : 'file';
-    if (!isInSyncScope(rel, this.opts.scope, kind)) return;
+    const kind = kindOverride ?? (isDirEvent ? 'directory' : 'file');
+    if (
+      kind === 'unknown'
+        ? !isInSyncScope(rel, this.opts.scope, 'file') &&
+          !isInSyncScope(rel, this.opts.scope, 'directory')
+        : !isInSyncScope(rel, this.opts.scope, kind)
+    ) return;
 
     this.pendingPaths.add(rel);
     this.scheduleDebounce();

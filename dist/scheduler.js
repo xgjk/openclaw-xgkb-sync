@@ -15,6 +15,7 @@ const watchHelpers_1 = require("./watchHelpers");
 const ensureLocalRoot_1 = require("./ensureLocalRoot");
 const localRootGuard_1 = require("./localRootGuard");
 const pathSyncScope_1 = require("./pathSyncScope");
+const syncErrorPolicy_1 = require("./syncErrorPolicy");
 let schedulerInstanceSeq = 0;
 function resolveMaxConcurrentMappings(config) {
     const enabledMappings = config.mappings.filter((m) => (0, config_1.isMappingEffectiveEnabled)(m, config.mappings));
@@ -62,6 +63,7 @@ class SyncScheduler {
     /** localRoot 缺失后即时挂起，阻止 timer/watch 继续触发（热重载前） */
     suspendedMappingIds = new Set();
     missingRootDisableInFlight = new Set();
+    circuitBreakers = new Map();
     constructor(config, opts) {
         this.config = config;
         this.onMappingSyncFinished = opts?.onMappingSyncFinished;
@@ -100,6 +102,17 @@ class SyncScheduler {
         console.log(`[Scheduler] 启动，映射规则: ${enabledMappings.length} 条，自动同步间隔: ${this.config.autoSyncIntervalSec}s`);
         for (const mapping of enabledMappings) {
             this.runStates.set(mapping.mappingId, { isSyncing: false, pendingSync: false });
+            const persisted = this.db.getMappingState(mapping.mappingId);
+            if (persisted?.circuitBreakerLevel &&
+                persisted.circuitBreakerUntil &&
+                persisted.circuitBreakerReason) {
+                this.circuitBreakers.set(mapping.mappingId, {
+                    level: persisted.circuitBreakerLevel,
+                    trippedAt: 0,
+                    until: persisted.circuitBreakerUntil,
+                    reason: persisted.circuitBreakerReason,
+                });
+            }
         }
         this.startWatchers(enabledMappings);
         // 启动后加随机抖动再触发首次同步，分散多实例同时启动的请求突刺
@@ -220,11 +233,29 @@ class SyncScheduler {
         return { running: this.globalRunningSyncs, max: this.maxGlobalRunningSyncs };
     }
     getWatcherPressure() {
+        const modes = {};
+        for (const backend of this.watcherBackends) {
+            if (!backend.isActive())
+                continue;
+            modes[backend.getMode()] = (modes[backend.getMode()] ?? 0) + 1;
+        }
         return {
             mappings: [...this.watchers.values()].filter((watcher) => watcher.isActive()).length,
             backends: this.watcherBackends.filter((backend) => backend.isActive()).length,
             watchedDirectories: this.watcherBackends.reduce((total, backend) => total + backend.getWatchedDirectoryCount(), 0),
+            watchedRoots: this.watcherBackends.reduce((total, backend) => total + backend.getWatchedRootCount(), 0),
+            droppedRoots: this.watcherBackends.reduce((total, backend) => total + backend.getDroppedRootCount(), 0),
+            modes,
         };
+    }
+    getCircuitBreakerPressure() {
+        const now = Date.now();
+        let open = 0;
+        for (const breaker of this.circuitBreakers.values()) {
+            if (breaker.until > now)
+                open++;
+        }
+        return { open, total: this.circuitBreakers.size };
     }
     /** 无进行中的 mapping 同步（供自动升级等场景） */
     isSyncIdle() {
@@ -314,6 +345,8 @@ class SyncScheduler {
             console.log(`[Scheduler][${mapping.mappingId}] 已挂起（localRoot 缺失），跳过同步 (${(0, watchHelpers_1.formatSyncTriggerReason)(reason)})`);
             return;
         }
+        if (reason !== 'manual' && this.shouldSkipForCircuit(mapping.mappingId))
+            return;
         let state = this.runStates.get(mapping.mappingId);
         if (!state) {
             state = { isSyncing: false, pendingSync: false };
@@ -356,9 +389,17 @@ class SyncScheduler {
         const startTime = Date.now();
         let syncResult = { pullTouchPaths: [] };
         let shouldDisableMapping = false;
+        let circuitTripped = false;
         try {
             syncResult = await this.doSync(mapping, reason);
             shouldDisableMapping = syncResult.shouldDisableMapping === true;
+            if (syncResult.permanentError) {
+                this.tripCircuit(mapping.mappingId, syncResult.permanentError);
+                circuitTripped = true;
+            }
+            else if (syncResult.stats && syncResult.stats.failed === 0) {
+                this.clearCircuit(mapping.mappingId);
+            }
         }
         finally {
             if (!shouldDisableMapping) {
@@ -392,6 +433,7 @@ class SyncScheduler {
                 !this.dbClosed &&
                 state.pendingSync &&
                 !shouldDisableMapping &&
+                !circuitTripped &&
                 !this.suspendedMappingIds.has(mapping.mappingId)) {
                 const pendingReason = state.pendingReason ?? 'manual';
                 state.pendingSync = false;
@@ -399,7 +441,7 @@ class SyncScheduler {
                 console.log(`[Scheduler][${mapping.mappingId}] 执行待挂起的同步 (${(0, watchHelpers_1.formatSyncTriggerReason)(pendingReason)})`);
                 this.scheduleDelayed(() => this.scheduleMapping(mapping, pendingReason), 0);
             }
-            else if (state.pendingSync || shouldDisableMapping) {
+            else if (state.pendingSync || shouldDisableMapping || circuitTripped) {
                 state.pendingSync = false;
                 state.pendingReason = undefined;
             }
@@ -514,7 +556,11 @@ class SyncScheduler {
             const msg = `远端初始化失败: ${initResult.error}`;
             console.error(`[Scheduler][${mapping.mappingId}] ${msg}`);
             this.db.upsertMappingState({ mappingId: mapping.mappingId, lastError: msg });
-            return { pullTouchPaths: [], errorMsg: msg };
+            return {
+                pullTouchPaths: [],
+                errorMsg: msg,
+                permanentError: (0, syncErrorPolicy_1.classifyPermanentSyncFailure)(msg)?.message,
+            };
         }
         const resolved = initResult.value;
         this.db.upsertMappingState({
@@ -531,7 +577,7 @@ class SyncScheduler {
         let stats;
         let pullTouchPaths = [];
         try {
-            stats = await engine.runSync((msg) => console.log(`  [${mapping.mappingId}] ${msg}`), lastSyncSince, {
+            stats = await engine.runSync(undefined, lastSyncSince, {
                 forceFullScan: forceFullScan.force,
                 forceFullScanReason: forceFullScan.reason,
             });
@@ -544,7 +590,11 @@ class SyncScheduler {
                 mappingId: mapping.mappingId,
                 lastError: msg,
             });
-            return { pullTouchPaths, errorMsg: msg };
+            return {
+                pullTouchPaths,
+                errorMsg: msg,
+                permanentError: (0, syncErrorPolicy_1.classifyPermanentSyncFailure)(msg)?.message,
+            };
         }
         // 仅在无系统性失败时推进水位
         if (stats.failed === 0 && stats.newSince) {
@@ -572,7 +622,44 @@ class SyncScheduler {
             console.warn(`[Scheduler][${mapping.mappingId}] 存在 ${stats.failed} 个失败文件，水位未推进，下轮将重试`);
         }
         console.log(`[Scheduler][${mapping.mappingId}] ===== 同步完成 ↑${stats.uploaded} ↓${stats.downloaded} ✗${stats.deleted} fail:${stats.failed} =====`);
-        return { pullTouchPaths, stats };
+        return {
+            pullTouchPaths,
+            stats,
+            permanentError: engine.getPermanentFailure()?.message,
+        };
+    }
+    shouldSkipForCircuit(mappingId) {
+        const breaker = this.circuitBreakers.get(mappingId);
+        if (!breaker || breaker.until <= Date.now())
+            return false;
+        const now = Date.now();
+        if (!breaker.lastSkipLogAt || now - breaker.lastSkipLogAt >= 60_000) {
+            breaker.lastSkipLogAt = now;
+            console.warn(`[Scheduler][${mappingId}] 永久错误熔断中，跳过自动同步；` +
+                `下次探测 ${new Date(breaker.until).toLocaleString('zh-CN')}，手动同步可立即探测`);
+        }
+        return true;
+    }
+    tripCircuit(mappingId, reason) {
+        const previous = this.circuitBreakers.get(mappingId);
+        const level = Math.min((previous?.level ?? 0) + 1, 32);
+        const delayMs = (0, syncErrorPolicy_1.permanentCircuitDelayMs)(level, constants_1.PERMANENT_ERROR_CIRCUIT_BASE_MS, constants_1.PERMANENT_ERROR_CIRCUIT_MAX_MS);
+        const now = Date.now();
+        this.circuitBreakers.set(mappingId, {
+            level,
+            trippedAt: now,
+            until: now + delayMs,
+            reason: reason.slice(0, 800),
+        });
+        this.db.setMappingCircuitBreaker(mappingId, level, now + delayMs, reason.slice(0, 800));
+        console.error(`[Scheduler][${mappingId}] 已开启永久错误熔断 level=${level} cooldown=${Math.round(delayMs / 60_000)}min: ${reason}`);
+    }
+    clearCircuit(mappingId) {
+        const existed = this.circuitBreakers.delete(mappingId);
+        if (!existed)
+            return;
+        this.db.clearMappingCircuitBreaker(mappingId);
+        console.log(`[Scheduler][${mappingId}] 同步成功，永久错误熔断已解除`);
     }
     /** 获取当前生效的配置（供 ManagementApi 读取） */
     getConfig() {
@@ -604,12 +691,14 @@ class SyncScheduler {
         if (this.dbClosed)
             return;
         this.db.resetMappingState(mappingId);
+        this.circuitBreakers.delete(mappingId);
         console.log(`[Scheduler] 已重置 mapping 同步状态: ${mappingId}`);
     }
     /** 获取所有 mapping 的当前状态摘要 */
     getStatus() {
         const result = {};
         for (const [mappingId, runState] of this.runStates) {
+            const breaker = this.circuitBreakers.get(mappingId);
             result[mappingId] = {
                 isSyncing: runState.isSyncing,
                 pendingSync: runState.pendingSync,
@@ -617,6 +706,9 @@ class SyncScheduler {
                 lastTriggerReason: runState.lastTriggerReason,
                 lastWatchTriggerAt: runState.lastWatchTriggerAt,
                 watchActive: this.watchers.get(mappingId)?.isActive() ?? false,
+                circuitOpen: (breaker?.until ?? 0) > Date.now(),
+                circuitUntil: breaker?.until,
+                circuitReason: breaker?.reason,
                 lastState: this.dbClosed ? null : this.db.getMappingState(mappingId),
             };
         }

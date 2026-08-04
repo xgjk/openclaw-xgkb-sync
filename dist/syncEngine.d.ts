@@ -2,6 +2,7 @@ import { LocalFsAdapter } from './localFs';
 import { RemoteFsAdapter } from './remoteFs';
 import { SyncStateDb } from './syncStateDb';
 import { SyncMapping, SyncStats } from './types';
+import { type PermanentSyncFailure } from './syncErrorPolicy';
 type ProgressCallback = (msg: string) => void;
 /**
  * 核心同步引擎（OpenClaw 版）
@@ -34,6 +35,8 @@ export declare class SyncEngine {
     private tombstonedRemoteFileIds;
     /** remoteFileId → 状态记录（用于识别「远端 rename 后新路径」实为已知身份） */
     private remoteFileIdOwners;
+    /** 本轮首次明确的鉴权/权限/参数类永久错误；一旦出现便停止剩余远端写操作。 */
+    private permanentFailure;
     constructor(localFs: LocalFsAdapter, remoteFs: RemoteFsAdapter, db: SyncStateDb, mapping: SyncMapping, opts?: {
         downloadConcurrency?: number;
         uploadConcurrency?: number;
@@ -45,6 +48,9 @@ export declare class SyncEngine {
     private matchesSync;
     /** 本轮 sync 中 pull 侧写入本地的路径（供 chokidar echo 过滤） */
     getPullLocalTouchPaths(): string[];
+    getPermanentFailure(): PermanentSyncFailure | null;
+    private capturePermanentFailure;
+    private finishAfterPermanentFailure;
     private notePullLocalTouch;
     private emptyStats;
     private refreshTombstonedRemoteFileIds;
@@ -144,6 +150,7 @@ export declare class SyncEngine {
      * 真正的请求限速由 KbApiClient 内置的 RateLimiter 负责，这里的 pause 只是平滑突发。
      */
     private executePlansInQueue;
+    private executePlansSerial;
     /**
      * @param remoteMap 可选：rename/move 执行后需同步更新远端视图，保持路径对账视图一致性
      */

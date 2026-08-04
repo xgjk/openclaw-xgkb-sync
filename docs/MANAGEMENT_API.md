@@ -80,6 +80,14 @@
 | `mappingCount` | `number` | 是 | 当前配置中 mapping 条数 |
 | `enabledMappingCount` | `number` | 是 | `enabled !== false` 的 mapping 条数 |
 | `nodeVersion` | `string` | 是 | Node.js 版本 |
+| `watcherModes` | `object` | 是 | watcher backend 模式及数量，如 `darwin-native-recursive` |
+| `watchedRoots` | `number` | 是 | 合并父子路径后的递归监听根数量 |
+| `watchedDirectories` | `number` | 是 | chokidar 已索引目录数；原生递归模式为 `0` |
+| `droppedWatcherRoots` | `number` | 是 | 超过安全上限、仅靠定时同步兜底的 root 数 |
+| `openCircuitBreakers` | `number` | 是 | 当前处于永久错误冷却期的 mapping 数 |
+| `activeResources` | `object` | 是 | Node 活跃资源类型计数，用于诊断 `FSEventWrap` 等资源 |
+| `memory` | `object` | 是 | Node RSS、heap、external、arrayBuffers 字节数 |
+| `degraded` | `boolean` | 是 | 事件循环高延迟、同步饱和、watch root 丢弃或存在熔断时为 `true` |
 
 ---
 
@@ -114,7 +122,7 @@
 | `syncDirection` | `string` | `bidirectional` \| `push` \| `pull` |
 | `autoSyncIntervalSec` | `number` | 定时 sync 兜底间隔（秒）；watch 启用时仍为兜底 |
 | `fullReconcileIntervalSec` | `number` \| 省略 | 强制全量对账间隔秒，默认 `3600`；`0` = 关闭 |
-| `watchEnabled` | `boolean` \| 省略 | 全局是否启用 chokidar 本地监听，默认 `true` |
+| `watchEnabled` | `boolean` \| 省略 | 全局是否启用本地监听，默认 `true` |
 | `pushDebounceMs` | `number` \| 省略 | watch debounce 毫秒，默认 `1500` |
 | `watchUsePolling` | `boolean` \| 省略 | NFS/Docker 等环境改用轮询，默认 `false` |
 | `maxConcurrentMappingsMode` | `string` \| 省略 | `auto` \| `manual`，默认 `auto` |
@@ -133,7 +141,10 @@
 | `remoteRootFolderPath` | `string` \| 省略 | 远端路径 |
 | `syncDirection` | `string` | 本条或回退到全局 |
 | `watchEnabledEffective` | `boolean` | 本条是否实际启用 watch（综合全局/本条配置与 sync 方向） |
-| `watchActive` | `boolean` | chokidar 是否已启动 |
+| `watchActive` | `boolean` | 本条 mapping 的 watcher 是否已启动且覆盖其 root |
+| `circuitOpen` | `boolean` | 是否因明确的永久远端错误处于自动同步冷却期 |
+| `circuitUntil` | `number` \| `null` | 冷却截止时间戳（毫秒）；手动同步不受此限制 |
+| `circuitReason` | `string` \| `null` | 首个触发熔断的错误摘要 |
 | `lastTriggerReason` | `string` \| `null` | 最近一次 sync 触发源：`watch` \| `timer` \| `startup` \| `manual` |
 | `lastWatchTriggerAt` | `number` \| `null` | 最近一次 watch 触发的本地时间戳（毫秒） |
 | `isSyncing` | `boolean` | 是否正在同步 |
@@ -148,6 +159,9 @@
 | `lastServerTime` | `number` \| `null` | 服务端时间戳 |
 | `lastSuccessAt` | `number` \| `null` | 上次成功完成同步的本地时间戳（毫秒） |
 | `lastFullScanAt` | `number` \| `null` | 上次成功全量对账的本地时间戳（毫秒） |
+| `circuitBreakerLevel` | `number` \| `null` | 持久化熔断级别 |
+| `circuitBreakerUntil` | `number` \| `null` | 持久化冷却截止时间 |
+| `circuitBreakerReason` | `string` \| `null` | 持久化错误摘要 |
 | `lastError` | `string` \| `null` | 上次错误摘要 |
 | `lastStats` | `object` \| `null` | 最近一次同步的统计（见下表） |
 | `resolvedRootFileId` | `string` \| `null` | 缓存的远端根 fileId |
@@ -368,7 +382,7 @@
 
 ## 6. `DELETE /mappings/:mappingId`
 
-**功能**：删除指定 mapping，写盘并热重载。
+**功能**：删除指定 mapping，写盘并热重载；重载成功后清除该 mapping 的 SQLite 水位、文件/目录记录和熔断状态，避免同 ID 重建时继承旧身份。
 
 | 项目 | 说明 |
 |------|------|
