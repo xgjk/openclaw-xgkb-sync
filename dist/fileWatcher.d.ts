@@ -52,6 +52,7 @@ export declare class FileWatcher {
     private readonly ignoreSet;
     private watcher;
     private pendingPaths;
+    private pendingPathOverflowCount;
     private debounceTimer;
     private ignoreTailTimer;
     private paused;
@@ -76,6 +77,7 @@ export declare class FileWatcher {
     /** backend 的 ignored 回调：不属于本 mapping 时视为 ignore；属于时应用 mapping scope。 */
     shouldIgnoreSharedTarget(absPath: string, stats?: fs.Stats): boolean;
     private onFsEvent;
+    private recordPendingPath;
     private scheduleDebounce;
     private clearDebounce;
     private toRelativePath;

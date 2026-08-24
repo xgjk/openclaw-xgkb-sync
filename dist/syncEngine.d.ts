@@ -24,6 +24,10 @@ export declare class SyncEngine {
     private readonly downloadConcurrency;
     private readonly uploadConcurrency;
     private readonly maxFileSizeBytes;
+    private readonly massSyncProtectionEnabled;
+    private readonly maxUploadFilesPerSync;
+    private readonly maxDownloadFilesPerSync;
+    private readonly persistedFolderPaths;
     /** pull/bidirectional 本轮 sync 写入本地的路径，供 FileWatcher resume 后 echo 过滤 */
     private pullLocalTouchPaths;
     /** 本地工作区异常时阻断远端删除（含 prune 空目录） */
@@ -41,6 +45,9 @@ export declare class SyncEngine {
         downloadConcurrency?: number;
         uploadConcurrency?: number;
         maxFileSizeBytes?: number;
+        massSyncProtectionEnabled?: boolean;
+        maxUploadFilesPerSync?: number;
+        maxDownloadFilesPerSync?: number;
     });
     private delay;
     private addErrorDetails;
@@ -82,10 +89,9 @@ export declare class SyncEngine {
      * 从 DB 记录中构建「本地相对目录路径 → 远端 folderId」映射。
      * 用于 reconcileEngine 在生成 move-remote 计划时解析目标 folderId。
      */
-    /**
-     * 收集本地相对目录路径（不含文件名），用于补齐 folderPathToRemoteId。
-     */
-    private collectLocalDirPaths;
+    /** 仅收集 inode 明确表明发生 move 的目标父目录；全新文件/目录不需要远端 folderId。 */
+    private collectMovedTargetDirPaths;
+    private relativeParent;
     /**
      * 为 inode 对账补齐「本地目录 → 远端 folderId」。
      * sync_file_state 只存文件不存文件夹；新目标目录若从未同步过文件，须通过 KB API 解析/创建。

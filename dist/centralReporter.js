@@ -62,6 +62,8 @@ class CentralReporter {
     executionDrainTimer = null;
     /** stop/restart 后，旧异步回调不得再修改新一代 reporter 状态。 */
     lifecycleGeneration = 0;
+    loggedIgnoredCentralConfig = false;
+    lastAnnouncedLatestVersion = null;
     constructor(opts) {
         this.opts = opts;
     }
@@ -235,7 +237,9 @@ class CentralReporter {
                 return;
             const latest = data.latestAppVersion?.trim();
             if (latest && isAutoUpgradeEnabled(config)) {
-                if ((0, versionCompare_1.isNewerVersion)(latest, this.opts.appVersion)) {
+                if ((0, versionCompare_1.isNewerVersion)(latest, this.opts.appVersion) &&
+                    latest !== this.lastAnnouncedLatestVersion) {
+                    this.lastAnnouncedLatestVersion = latest;
                     console.log(`[CentralReporter] 中心发布新版本 ${latest}（当前 ${this.opts.appVersion}），检查是否可自动升级…`);
                 }
                 (0, autoUpgrade_1.maybeScheduleAutoUpgrade)(latest, {
@@ -248,7 +252,10 @@ class CentralReporter {
                 });
             }
             // 节点侧自行维护 config.json，暂不应用中心下发的 config
-            if (data.config && typeof data.config === 'object') {
+            if (data.config &&
+                typeof data.config === 'object' &&
+                !this.loggedIgnoredCentralConfig) {
+                this.loggedIgnoredCentralConfig = true;
                 console.log('[CentralReporter] 心跳响应含 config 字段，已忽略（节点配置由本地 Web/文件维护）');
             }
         }

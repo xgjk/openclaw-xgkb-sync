@@ -74,6 +74,12 @@ export interface SyncMapping {
   pushDebounceMs?: number;
   /** NFS/Docker 等环境改用 chokidar 轮询模式 */
   watchUsePolling?: boolean;
+  /** 是否启用单轮大批量上传/下载保护；覆盖全局配置。 */
+  massSyncProtectionEnabled?: boolean;
+  /** 单轮允许的最大上传文件数；超过后自动停用本 mapping。 */
+  maxUploadFilesPerSync?: number;
+  /** 单轮允许的最大下载文件数；超过后自动停用本 mapping。 */
+  maxDownloadFilesPerSync?: number;
 }
 
 /** 同步触发来源（日志与诊断） */
@@ -140,6 +146,12 @@ export interface SyncConfig {
   uploadConcurrency?: number;
   /** 单文件最大字节数，默认 100 MiB，防止整文件上传/下载撑爆内存。 */
   maxFileSizeBytes?: number;
+  /** 是否启用单轮大批量上传/下载保护，默认 true。 */
+  massSyncProtectionEnabled?: boolean;
+  /** 单轮最大上传文件数，默认 1000。 */
+  maxUploadFilesPerSync?: number;
+  /** 单轮最大下载文件数，默认 1000。 */
+  maxDownloadFilesPerSync?: number;
   /**
    * 启动后首次同步的随机抖动上限（秒），默认 20。
    * 多台服务器同时启动时，随机延迟可分散请求突刺。设为 0 禁用抖动。

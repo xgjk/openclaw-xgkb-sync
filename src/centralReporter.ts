@@ -66,6 +66,8 @@ export class CentralReporter {
   private executionDrainTimer: NodeJS.Timeout | null = null;
   /** stop/restart 后，旧异步回调不得再修改新一代 reporter 状态。 */
   private lifecycleGeneration = 0;
+  private loggedIgnoredCentralConfig = false;
+  private lastAnnouncedLatestVersion: string | null = null;
 
   constructor(opts: CentralReporterOptions) {
     this.opts = opts;
@@ -277,7 +279,11 @@ export class CentralReporter {
 
       const latest = data.latestAppVersion?.trim();
       if (latest && isAutoUpgradeEnabled(config)) {
-        if (isNewerVersion(latest, this.opts.appVersion)) {
+        if (
+          isNewerVersion(latest, this.opts.appVersion) &&
+          latest !== this.lastAnnouncedLatestVersion
+        ) {
+          this.lastAnnouncedLatestVersion = latest;
           console.log(
             `[CentralReporter] 中心发布新版本 ${latest}（当前 ${this.opts.appVersion}），检查是否可自动升级…`,
           );
@@ -293,7 +299,12 @@ export class CentralReporter {
       }
 
       // 节点侧自行维护 config.json，暂不应用中心下发的 config
-      if (data.config && typeof data.config === 'object') {
+      if (
+        data.config &&
+        typeof data.config === 'object' &&
+        !this.loggedIgnoredCentralConfig
+      ) {
+        this.loggedIgnoredCentralConfig = true;
         console.log(
           '[CentralReporter] 心跳响应含 config 字段，已忽略（节点配置由本地 Web/文件维护）',
         );

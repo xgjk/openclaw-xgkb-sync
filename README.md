@@ -174,6 +174,9 @@ npm run dev:config                   # 显式使用 ./config.json
 | `downloadConcurrency` | 否 | `5` | 单次同步中并发下载文件数，范围 1～20 |
 | `uploadConcurrency` | 否 | `3` | 单次同步中并发上传文件数，范围 1～10 |
 | `maxFileSizeBytes` | 否 | `104857600` | 单文件内存安全上限，默认 100 MiB，最大可配置为 1 GiB |
+| `massSyncProtectionEnabled` | 否 | `true` | 单轮异常批量上传/下载保护；触发后在执行文件传输前自动禁用对应 mapping |
+| `maxUploadFilesPerSync` | 否 | `1000` | 单轮允许的最大上传文件数；严格超过时触发保护 |
+| `maxDownloadFilesPerSync` | 否 | `1000` | 单轮允许的最大下载文件数；严格超过时触发保护 |
 | `startupJitterMaxSec` | 否 | `20` | 启动后首次同步的随机抖动上限（秒）。多实例同时重启时分散请求，设为 `0` 禁用 |
 | `managementPort` | 否 | `9090` | HTTP 管理 API 监听端口，设为 `0` 禁用管理 API |
 | `managementHost` | 否 | `0.0.0.0` | HTTP 管理 API 监听地址；默认允许局域网访问，本机浏览器请用 `127.0.0.1`（注意防火墙） |
@@ -307,6 +310,11 @@ push / bidirectional mapping 在 `watchEnabled: true`（默认）时监听 `loca
 | `watchEnabled` | 否 | 覆盖全局；是否启用本地监听即时 push（pull-only 无效） |
 | `pushDebounceMs` | 否 | 覆盖全局监听 debounce（毫秒） |
 | `watchUsePolling` | 否 | 覆盖全局；NFS/Docker 卷轮询监听 |
+| `massSyncProtectionEnabled` | 否 | 覆盖全局异常批量保护开关 |
+| `maxUploadFilesPerSync` | 否 | 覆盖全局单轮上传阈值 |
+| `maxDownloadFilesPerSync` | 否 | 覆盖全局单轮下载阈值 |
+
+当计划上传或下载的文件数严格超过阈值时，服务会在任何上传/下载执行前中止本轮，记录数量、阈值和最多 20 条路径样本，并将该 mapping 的 `enabled` 写为 `false`。确认变更符合预期后，应先补充 `excludePatterns`（例如 `"**/vendor-audit/**"`）或提高阈值，再通过管理 API/控制台重新启用。其他 mapping 不受影响。
 
 ### 映射索引文件（`enableFileIndex`）
 

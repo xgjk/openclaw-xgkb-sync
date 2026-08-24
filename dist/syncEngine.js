@@ -44,6 +44,7 @@ const pathSyncScope_1 = require("./pathSyncScope");
 const syncDecide_1 = require("./syncDecide");
 const localRootGuard_1 = require("./localRootGuard");
 const syncErrorPolicy_1 = require("./syncErrorPolicy");
+const syncSafety_1 = require("./syncSafety");
 /**
  * 核心同步引擎（OpenClaw 版）
  * 与 Obsidian 版的主要差异：
@@ -64,6 +65,10 @@ class SyncEngine {
     downloadConcurrency;
     uploadConcurrency;
     maxFileSizeBytes;
+    massSyncProtectionEnabled;
+    maxUploadFilesPerSync;
+    maxDownloadFilesPerSync;
+    persistedFolderPaths = new Set();
     /** pull/bidirectional 本轮 sync 写入本地的路径，供 FileWatcher resume 后 echo 过滤 */
     pullLocalTouchPaths = new Set();
     /** 本地工作区异常时阻断远端删除（含 prune 空目录） */
@@ -92,6 +97,12 @@ class SyncEngine {
         this.downloadConcurrency = opts?.downloadConcurrency ?? constants_1.DOWNLOAD_CONCURRENCY;
         this.uploadConcurrency = opts?.uploadConcurrency ?? constants_1.UPLOAD_CONCURRENCY;
         this.maxFileSizeBytes = opts?.maxFileSizeBytes ?? constants_1.DEFAULT_MAX_FILE_SIZE_BYTES;
+        this.massSyncProtectionEnabled =
+            opts?.massSyncProtectionEnabled ?? constants_1.DEFAULT_MASS_SYNC_PROTECTION_ENABLED;
+        this.maxUploadFilesPerSync =
+            opts?.maxUploadFilesPerSync ?? constants_1.DEFAULT_MAX_UPLOAD_FILES_PER_SYNC;
+        this.maxDownloadFilesPerSync =
+            opts?.maxDownloadFilesPerSync ?? constants_1.DEFAULT_MAX_DOWNLOAD_FILES_PER_SYNC;
         this.stats = this.emptyStats();
         this.progress = () => undefined;
     }
@@ -183,23 +194,30 @@ class SyncEngine {
         this.progress = onProgress ?? (() => undefined);
         this.pullLocalTouchPaths.clear();
         this.permanentFailure = null;
+        this.persistedFolderPaths.clear();
         const prog = (msg) => {
             console.log(`[SyncEngine][${this.mapping.mappingId}] ${msg}`);
             this.progress(msg);
         };
-        await this.runFileIndexConsume(prog);
-        prog('扫描本地文件...');
+        const warn = (msg) => {
+            console.warn(`[SyncEngine][${this.mapping.mappingId}] ${msg}`);
+            this.progress(msg);
+        };
+        await this.runFileIndexConsume();
         const localSnapshot = await this.localFs.listSnapshot();
         let localFiles = localSnapshot.files;
         let localDirs = localSnapshot.directories;
-        prog(`本地: ${localFiles.length} 个文件, ${localDirs.length} 个目录`);
         const { map: remoteMap, newSince, remoteDeltaCount, fullScan, remoteMoveHints } = await this.buildRemoteMap(lastSyncSince, prog, opts);
-        prog(`远端: ${remoteMap.size} 个文件（水位 ${newSince}）`);
+        prog(`快照: localFiles=${localFiles.length} localDirs=${localDirs.length}` +
+            ` remoteFiles=${remoteMap.size} remoteDelta=${remoteDeltaCount ?? '-'} watermark=${newSince}`);
         this.stats.newSince = newSince;
         this.stats.fullScan = fullScan;
         let localMap = new Map(localFiles.map((f) => [f.path, f]));
         // 一次性批量加载所有文件状态，供决策循环 O(1) 查找，避免 N 次独立 SQLite 查询
         let recordMap = new Map(this.db.getAllFileStates(this.mapping.mappingId).map((r) => [r.localPath, r]));
+        let folderRecords = this.db.getAllFolderStates(this.mapping.mappingId);
+        for (const folder of folderRecords)
+            this.persistedFolderPaths.add(folder.localPath);
         this.refreshTombstonedRemoteFileIds(recordMap);
         if ((0, localRootGuard_1.isLocalWorkspaceAnomaly)(localFiles.length, recordMap.size)) {
             this.remoteDeleteGuardActive = true;
@@ -207,8 +225,7 @@ class SyncEngine {
                 localFiles.length === 0
                     ? `本地目录为空，状态库仍有 ${recordMap.size} 条记录，已启用远端删除保护`
                     : `本地文件数异常偏少（${localFiles.length}/${recordMap.size}），已启用远端删除保护`;
-            prog(`⚠ ${this.remoteDeleteGuardReason}`);
-            console.warn(`[SyncEngine][${this.mapping.mappingId}] ${this.remoteDeleteGuardReason}`);
+            warn(this.remoteDeleteGuardReason);
         }
         // ── Phase 1：inode 对账（rename/move 检测）──────────────────────────────
         // 只在 push / bidirectional 方向下执行（pull 不修改远端）
@@ -219,10 +236,10 @@ class SyncEngine {
             // 补全迁移后被清空的 inode（旧 INTEGER→新 TEXT bigint 升级时置 NULL 的记录）
             this.backfillInodes(localFiles, recordMap);
             // 同步本地目录 inode 到 sync_folder_state（为文件夹 rename 检测准备数据）
-            this.syncFolderInodes(localDirs);
-            const folderPathToRemoteId = this.buildFolderPathToRemoteId([...recordMap.values()], this.remoteFs.getRootFileId());
-            await this.enrichFolderPathToRemoteId(folderPathToRemoteId, localFiles, [...recordMap.values()], prog);
-            const folderRecords = this.db.getAllFolderStates(this.mapping.mappingId);
+            folderRecords = this.syncFolderInodes(localDirs, folderRecords);
+            const folderPathToRemoteId = this.buildFolderPathToRemoteId([...recordMap.values()], this.remoteFs.getRootFileId(), folderRecords);
+            const movedTargetDirs = this.collectMovedTargetDirPaths(localFiles, localDirs, [...recordMap.values()], folderRecords);
+            await this.enrichFolderPathToRemoteId(folderPathToRemoteId, movedTargetDirs, prog);
             const { plans: renamePlans, consumedFromPaths: cfp, consumedToPaths: ctp } = (0, reconcileEngine_1.detectLocalRenames)(localFiles, localDirs, [...recordMap.values()], folderRecords, folderPathToRemoteId);
             this.logInodeDetectionGaps(localFiles, [...recordMap.values()], renamePlans);
             consumedFromPaths = cfp;
@@ -334,8 +351,7 @@ class SyncEngine {
                 const totalPaths = new Set([...localMap.keys(), ...remoteMap.keys()]).size;
                 this.stats.skipped += totalPaths;
                 await this.pruneRemoteEmptyDirectories(prog, localDirs);
-                prog(`增量无变化（远端0变更，本地无新增/修改/删除），跳过决策，共跳过 ${totalPaths} 个路径`);
-                await this.runFileIndexPublish(prog);
+                await this.runFileIndexPublish();
                 return this.stats;
             }
             prog(`远端0变更，但本地有变化（new=${hasLocalNew} mod=${hasLocalModified} del=${hasLocalDeleted}` +
@@ -352,14 +368,14 @@ class SyncEngine {
             if (!localMap.has(p))
                 allPaths.add(p);
         }
-        prog(`共 ${allPaths.size} 个路径需要路径对账决策`);
         // 决策阶段
         const plans = [];
         let skipCount = 0;
         let idx = 0;
+        const decisionProgressStep = allPaths.size >= 5_000 ? Math.max(1, Math.ceil(allPaths.size / 10)) : 0;
         for (const path of allPaths) {
             idx++;
-            if (idx % 500 === 0 || idx === allPaths.size) {
+            if (decisionProgressStep > 0 && idx < allPaths.size && idx % decisionProgressStep === 0) {
                 prog(`决策中 ${idx}/${allPaths.size}...`);
             }
             const local = localMap.get(path);
@@ -388,8 +404,7 @@ class SyncEngine {
                 converted++;
             }
             this.stats.blockedRemoteDeletes = converted;
-            prog(`⚠ ${deleteGuard.reason}`);
-            console.warn(`[SyncEngine][${this.mapping.mappingId}] ${deleteGuard.reason}`);
+            warn(deleteGuard.reason);
         }
         // 分类计划：删除 / 下载 / 上传
         const deletePlans = [];
@@ -410,6 +425,8 @@ class SyncEngine {
             }
         }
         // 防御：即便 decide 漏判，tombstone / 异路径归属的 fileId 也不得进入下载队列
+        const blockedDownloadSamples = [];
+        let blockedDownloadCount = 0;
         for (const plan of downloadPlans) {
             if ((0, syncDecide_1.shouldBlockDownloadForRemoteIdentity)({
                 path: plan.path,
@@ -419,13 +436,37 @@ class SyncEngine {
             })) {
                 plan.op = 'skip';
                 skipCount++;
-                prog(`⊘ 已拦截可疑下载（tombstone/异路径 fileId） ${plan.path}`);
+                blockedDownloadCount++;
+                if (blockedDownloadSamples.length < 10)
+                    blockedDownloadSamples.push(plan.path);
             }
+        }
+        if (blockedDownloadCount > 0) {
+            warn(`已拦截 ${blockedDownloadCount} 个可疑下载（tombstone/异路径 fileId）` +
+                ` samples=${JSON.stringify(blockedDownloadSamples)}`);
         }
         const safeDownloadPlans = downloadPlans.filter((p) => p.op === 'download-new' || p.op === 'download-update');
         this.stats.skipped += skipCount;
         prog(`执行计划: 删除=${deletePlans.length} tombstone=${tombstonePlans.length}` +
             ` 下载=${safeDownloadPlans.length} 上传=${uploadPlans.length} 跳过=${skipCount}`);
+        const safetyTrip = (0, syncSafety_1.evaluateMassSyncProtection)({
+            enabled: this.massSyncProtectionEnabled,
+            uploadPlans,
+            downloadPlans: safeDownloadPlans,
+            maxUploads: this.maxUploadFilesPerSync,
+            maxDownloads: this.maxDownloadFilesPerSync,
+            localFileCount: localFiles.length,
+            remoteFileCount: remoteMap.size,
+            knownFileCount: recordMap.size,
+        });
+        if (safetyTrip) {
+            console.error(`[SyncEngine][${this.mapping.mappingId}] ${safetyTrip.reason}`);
+            if (safetyTrip.samplePaths.length > 0) {
+                console.error(`[SyncEngine][${this.mapping.mappingId}] 异常批量路径样本(${safetyTrip.samplePaths.length}): ` +
+                    JSON.stringify(safetyTrip.samplePaths));
+            }
+            throw new syncSafety_1.MassSyncProtectionError(safetyTrip);
+        }
         // 1. 删除操作串行（避免竞态）
         await this.executePlansSerial(deletePlans, remoteMap);
         if (this.permanentFailure)
@@ -450,22 +491,17 @@ class SyncEngine {
         await this.pruneRemoteEmptyDirectories(prog);
         // 清理过期回收站（静默，不阻塞主流程）
         (0, trashBin_1.cleanupTrash)(this.mapping.mappingId).catch(() => { });
-        prog(`完成: ↑${this.stats.uploaded} ↓${this.stats.downloaded} ✗${this.stats.deleted}` +
-            ` 重命名:${this.stats.renamed ?? 0} 移动:${this.stats.moved ?? 0}` +
-            ` tombstone:${this.stats.localTombstoned ?? 0}` +
-            ` 空目录清理:${this.stats.prunedRemoteDirs ?? 0} fail:${this.stats.failed} skip:${this.stats.skipped}`);
-        await this.runFileIndexPublish(prog);
+        await this.runFileIndexPublish();
         return this.stats;
     }
     /** enableFileIndex + pull/bidirectional：同步开始前 consume 索引 */
-    async runFileIndexConsume(prog) {
+    async runFileIndexConsume() {
         if (!this.mapping.enableFileIndex)
             return;
         const syncDir = this.mapping.syncDirection ?? 'bidirectional';
         if (syncDir !== 'pull' && syncDir !== 'bidirectional')
             return;
         try {
-            prog('拉取映射索引文件...');
             await new fileIndexService_1.FileIndexService(this.db, this.remoteFs, this.localFs, this.mapping).consumeIndex();
         }
         catch (e) {
@@ -473,7 +509,7 @@ class SyncEngine {
         }
     }
     /** enableFileIndex + push/bidirectional + 主 sync 无失败：同步成功后 publish 索引 */
-    async runFileIndexPublish(prog) {
+    async runFileIndexPublish() {
         if (!this.mapping.enableFileIndex)
             return;
         if (this.stats.failed > 0)
@@ -482,7 +518,6 @@ class SyncEngine {
         if (syncDir !== 'push' && syncDir !== 'bidirectional')
             return;
         try {
-            prog('发布映射索引文件...');
             await new fileIndexService_1.FileIndexService(this.db, this.remoteFs, this.localFs, this.mapping).publishIndex();
         }
         catch (e) {
@@ -508,9 +543,8 @@ class SyncEngine {
         }
         const localDirEntries = cachedLocalDirs ?? await this.localFs.listDirectories();
         const localDirPaths = new Set(localDirEntries.map((d) => d.path));
-        // 补全/更新已有 folder 记录的 inode（确保下次 rename 检测有数据可用）
-        this.syncFolderInodes(localDirEntries);
-        const folderStates = this.db.getAllFolderStates(this.mapping.mappingId);
+        // 一次加载并批量更新 inode，避免对每个目录执行一次 SQLite 查询。
+        const folderStates = this.syncFolderInodes(localDirEntries, this.db.getAllFolderStates(this.mapping.mappingId));
         // 找出本地已删除但 DB 中有记录的目录
         const orphanFolders = folderStates
             .filter((fs) => !localDirPaths.has(fs.localPath))
@@ -519,6 +553,8 @@ class SyncEngine {
             return;
         let deleted = 0;
         let failed = 0;
+        let nonEmptySkipped = 0;
+        let emittedFailureLogs = 0;
         const errors = [];
         // 预加载文件状态（避免循环内重复查询）
         const allFileStates = this.db.getAllFileStates(this.mapping.mappingId);
@@ -543,13 +579,16 @@ class SyncEngine {
                 if (errors.length < constants_1.MAX_SYNC_ERROR_DETAILS)
                     errors.push(error);
                 this.capturePermanentFailure(childResult.error);
-                console.warn(`[SyncEngine] ${error}`);
+                if (emittedFailureLogs < 5) {
+                    console.warn(`[SyncEngine][${this.mapping.mappingId}] ${error}`);
+                    emittedFailureLogs++;
+                }
                 if (this.permanentFailure)
                     break;
                 continue;
             }
             if (childResult.value && childResult.value.length > 0) {
-                console.log(`[SyncEngine] 跳过远端非空目录: "${folder.localPath}" (${folder.remoteFolderId}) 远端有 ${childResult.value.length} 个子项`);
+                nonEmptySkipped++;
                 // 仅清理 DB 记录（本地已删，但远端有非同步内容，不删远端）
                 this.db.deleteFolderState(this.mapping.mappingId, folder.localPath);
                 continue;
@@ -558,7 +597,6 @@ class SyncEngine {
             if (result.ok) {
                 deleted++;
                 this.db.deleteFolderState(this.mapping.mappingId, folder.localPath);
-                console.log(`[SyncEngine] Pruned empty remote folder: "${folder.localPath}" (${folder.remoteFolderId})`);
             }
             else {
                 failed++;
@@ -566,7 +604,11 @@ class SyncEngine {
                     errors.push(`${folder.localPath}: ${result.error}`);
                 }
                 this.capturePermanentFailure(result.error);
-                console.warn(`[SyncEngine] 远端目录删除失败: "${folder.localPath}" (${folder.remoteFolderId}): ${result.error}`);
+                if (emittedFailureLogs < 5) {
+                    console.warn(`[SyncEngine][${this.mapping.mappingId}] 远端目录删除失败: ` +
+                        `"${folder.localPath}" (${folder.remoteFolderId}): ${result.error}`);
+                    emittedFailureLogs++;
+                }
                 if (this.permanentFailure)
                     break;
             }
@@ -576,58 +618,86 @@ class SyncEngine {
             this.stats.failed += failed;
             this.addErrorDetails(...errors);
         }
-        if (deleted > 0 || failed > 0) {
-            prog(`远端空目录清理: 删除=${deleted} 失败=${failed}`);
+        if (failed > emittedFailureLogs) {
+            console.warn(`[SyncEngine][${this.mapping.mappingId}] 远端空目录清理另有 ` +
+                `${failed - emittedFailureLogs} 条失败未逐条输出`);
+        }
+        if (deleted > 0 || failed > 0 || nonEmptySkipped > 0) {
+            prog(`远端空目录清理: 删除=${deleted} 非空保留=${nonEmptySkipped} 失败=${failed}`);
         }
     }
     /**
      * 将本地目录的 dev/ino 同步到 sync_folder_state（仅更新已有记录的 inode）。
      */
-    syncFolderInodes(localDirEntries) {
+    syncFolderInodes(localDirEntries, folderStates) {
+        const byPath = new Map(folderStates.map((state) => [state.localPath, state]));
         const updates = [];
         for (const dir of localDirEntries) {
             if (dir.dev === '0' && dir.ino === '0')
                 continue;
-            const existing = this.db.getFolderState(this.mapping.mappingId, dir.path);
+            const existing = byPath.get(dir.path);
             if (!existing)
                 continue;
             if (existing.localDev === dir.dev && existing.localIno === dir.ino)
                 continue;
-            updates.push({
+            const updated = {
                 ...existing,
                 localDev: dir.dev,
                 localIno: dir.ino,
-            });
+            };
+            updates.push(updated);
+            byPath.set(dir.path, updated);
         }
         if (updates.length > 0) {
             this.db.upsertFolderStateBatch(updates);
         }
+        return [...byPath.values()];
     }
     // ==================== 辅助工具 ====================
     /**
      * 从 DB 记录中构建「本地相对目录路径 → 远端 folderId」映射。
      * 用于 reconcileEngine 在生成 move-remote 计划时解析目标 folderId。
      */
-    /**
-     * 收集本地相对目录路径（不含文件名），用于补齐 folderPathToRemoteId。
-     */
-    collectLocalDirPaths(localFiles, records) {
-        const set = new Set();
-        const addFilePath = (filePath) => {
-            const idx = filePath.lastIndexOf('/');
-            if (idx <= 0)
-                return;
-            const dir = filePath.slice(0, idx);
-            const parts = dir.split('/');
-            for (let i = 1; i <= parts.length; i++) {
-                set.add(parts.slice(0, i).join('/'));
-            }
-        };
-        for (const f of localFiles)
-            addFilePath(f.path);
-        for (const r of records)
-            addFilePath(r.localPath);
-        return [...set].sort((a, b) => a.split('/').length - b.split('/').length);
+    /** 仅收集 inode 明确表明发生 move 的目标父目录；全新文件/目录不需要远端 folderId。 */
+    collectMovedTargetDirPaths(localFiles, localDirs, records, folderRecords) {
+        const result = new Set();
+        const currentFilesByInode = new Map();
+        const currentDirsByInode = new Map();
+        for (const file of localFiles) {
+            if (file.ino && file.ino !== '0')
+                currentFilesByInode.set(`${file.dev}:${file.ino}`, file);
+        }
+        for (const dir of localDirs) {
+            if (dir.ino && dir.ino !== '0')
+                currentDirsByInode.set(`${dir.dev}:${dir.ino}`, dir);
+        }
+        for (const record of records) {
+            if (!record.localDev || !record.localIno || record.localIno === '0')
+                continue;
+            const current = currentFilesByInode.get(`${record.localDev}:${record.localIno}`);
+            if (!current || current.path === record.localPath)
+                continue;
+            const oldParent = this.relativeParent(record.localPath);
+            const newParent = this.relativeParent(current.path);
+            if (newParent !== oldParent)
+                result.add(newParent);
+        }
+        for (const record of folderRecords) {
+            if (!record.localDev || !record.localIno || record.localIno === '0')
+                continue;
+            const current = currentDirsByInode.get(`${record.localDev}:${record.localIno}`);
+            if (!current || current.path === record.localPath)
+                continue;
+            const newParent = this.relativeParent(current.path);
+            // 目录同级 rename 也需要父目录 folderId；文件同级 rename 则不需要。
+            result.add(newParent);
+        }
+        result.delete(''); // mapping 根目录已由 rootFileId 提供，无需 API 解析。
+        return [...result];
+    }
+    relativeParent(relativePath) {
+        const idx = relativePath.lastIndexOf('/');
+        return idx > 0 ? relativePath.slice(0, idx) : '';
     }
     /**
      * 为 inode 对账补齐「本地目录 → 远端 folderId」。
@@ -638,12 +708,14 @@ class SyncEngine {
      * 由于 sync_folder_state 已被 buildFolderPathToRemoteId 优先加载，
      * 此方法仅在极少数情况（文件被移到全新目录）才调用 KB API。
      */
-    async enrichFolderPathToRemoteId(map, localFiles, records, prog) {
-        const dirs = this.collectLocalDirPaths(localFiles, records);
+    async enrichFolderPathToRemoteId(map, targetDirs, prog) {
+        const dirs = targetDirs.filter((dir) => !map.has(dir));
+        if (dirs.length > constants_1.MAX_FOLDER_ID_RESOLVES_PER_SYNC) {
+            prog(`inode move 目标目录 ${dirs.length} 个，超过单轮解析上限 ${constants_1.MAX_FOLDER_ID_RESOLVES_PER_SYNC}；` +
+                `仅解析前 ${constants_1.MAX_FOLDER_ID_RESOLVES_PER_SYNC} 个，其余保守降级`);
+        }
         let resolved = 0;
-        for (const dir of dirs) {
-            if (map.has(dir))
-                continue;
+        for (const dir of dirs.slice(0, constants_1.MAX_FOLDER_ID_RESOLVES_PER_SYNC)) {
             // 仅查找已存在的远端目录，不创建新目录。
             // 重命名/移动检测只需目标的父目录可解析即可；
             // 目录创建留给实际上传流程（uploadContent 自动建目录）。
@@ -657,7 +729,7 @@ class SyncEngine {
                 localPath: dir,
                 remoteFolderId: r.value,
             });
-            console.log(`[SyncEngine][${this.mapping.mappingId}] 目录 folderId 已解析并持久化: "${dir}" -> ${r.value}`);
+            this.persistedFolderPaths.add(dir);
         }
         if (resolved > 0) {
             prog(`已解析 ${resolved} 个本地目录的远端 folderId（供 move/rename 使用）`);
@@ -696,6 +768,7 @@ class SyncEngine {
                 inodeToEntry.set(`${f.dev}:${f.ino}`, f);
         }
         let gapCount = 0;
+        const samples = [];
         for (const rec of records) {
             if (!rec.localDev || !rec.localIno || rec.localIno === '0' || !rec.remoteFileId)
                 continue;
@@ -703,20 +776,19 @@ class SyncEngine {
             if (!entry || entry.path === rec.localPath)
                 continue;
             gapCount++;
-            if (gapCount <= 10) {
-                console.warn(`[SyncEngine][${this.mapping.mappingId}] inode 移动未生成计划（将走路径对账 upload/delete）: ` +
-                    `"${rec.localPath}" -> "${entry.path}" remoteFileId=${rec.remoteFileId}`);
+            if (samples.length < 5) {
+                samples.push(`${rec.localPath} -> ${entry.path} (fileId=${rec.remoteFileId})`);
             }
         }
-        if (gapCount > 10) {
-            console.warn(`[SyncEngine][${this.mapping.mappingId}] 另有 ${gapCount - 10} 条 inode 移动未生成计划`);
+        if (gapCount > 0) {
+            console.warn(`[SyncEngine][${this.mapping.mappingId}] ${gapCount} 条 inode 移动未生成计划，` +
+                `将走路径对账 upload/delete samples=${JSON.stringify(samples)}`);
         }
     }
-    buildFolderPathToRemoteId(records, rootFileId) {
+    buildFolderPathToRemoteId(records, rootFileId, folderStates) {
         const m = new Map();
         m.set('', rootFileId);
         // 优先从 sync_folder_state 加载（权威来源）
-        const folderStates = this.db.getAllFolderStates(this.mapping.mappingId);
         for (const fs of folderStates) {
             m.set(fs.localPath, fs.remoteFolderId);
         }
@@ -745,14 +817,14 @@ class SyncEngine {
             : '';
         if (!dir)
             return; // 根目录不记
-        const existing = this.db.getFolderState(this.mapping.mappingId, dir);
-        if (existing)
+        if (this.persistedFolderPaths.has(dir))
             return;
         this.db.upsertFolderState({
             mappingId: this.mapping.mappingId,
             localPath: dir,
             remoteFolderId,
         });
+        this.persistedFolderPaths.add(dir);
     }
     /**
      * 打印 inode 对账阶段生成的计划明细（用于排查目录被拆散、冲突自动改名等问题）。
@@ -760,7 +832,7 @@ class SyncEngine {
     logRenamePlans(plans) {
         if (plans.length === 0)
             return;
-        const maxPlanLogs = 30;
+        const maxPlanLogs = 10;
         const shown = plans.slice(0, maxPlanLogs);
         for (const [i, p] of shown.entries()) {
             const base = `[SyncEngine][${this.mapping.mappingId}] inode-plan#${i + 1}/${plans.length}` +
@@ -792,17 +864,11 @@ class SyncEngine {
             return this.fullRemoteMap();
         }
         if (lastSyncSince !== undefined) {
-            const sinceStr = new Date(lastSyncSince).toLocaleString('zh-CN');
-            prog(`增量模式: since=${lastSyncSince} (${sinceStr})`);
             const result = await this.tryIncrementalRemoteMap(lastSyncSince, prog);
             if (result) {
-                prog(`增量成功: 远端视图 ${result.map.size} 个文件`);
                 return result;
             }
             prog('增量降级: 执行全量扫描...');
-        }
-        else {
-            prog('无同步水位（首轮或上轮有失败），执行全量扫描...');
         }
         return this.fullRemoteMap();
     }
@@ -819,7 +885,6 @@ class SyncEngine {
         }
         const { items, serverTime } = changesResult.value;
         const newSince = serverTime ?? Date.now();
-        prog(`增量变更: ${items.length} 条`);
         const upsertById = new Map();
         const deleteIds = new Set();
         for (const item of items) {
@@ -841,7 +906,10 @@ class SyncEngine {
             else
                 unknownUpsertIds.push(id);
         }
-        prog(`变更分类: upsert已知=${knownUpsertIds.length} upsert新增=${unknownUpsertIds.length} delete=${deleteIds.size}`);
+        if (items.length > 0) {
+            prog(`增量分类: upsert已知=${knownUpsertIds.length}` +
+                ` upsert新增=${unknownUpsertIds.length} delete=${deleteIds.size}`);
+        }
         // 尝试路径重建：通过已知 folderId → 路径 映射
         const folderIdToPath = new Map();
         folderIdToPath.set(this.remoteFs.getRootFileId(), '');
@@ -878,7 +946,8 @@ class SyncEngine {
             prog(`跳过 ${skippedCount} 个不匹配 filePatterns 的远端文件`);
         }
         if (filteredNewFiles.length > 0) {
-            prog(`路径重建成功 ${filteredNewFiles.length} 个新文件: ${filteredNewFiles.map((f) => f.path).join(', ')}`);
+            const samples = filteredNewFiles.slice(0, 10).map((f) => f.path);
+            prog(`路径重建成功 ${filteredNewFiles.length} 个新文件 samples=${JSON.stringify(samples)}`);
         }
         // 构建最终 remoteMap
         const map = new Map();
@@ -982,7 +1051,6 @@ class SyncEngine {
         this.removePathsUnderFileNodes(map, (msg) => console.log(`[SyncEngine][${this.mapping.mappingId}] ${msg}`));
         // 全量扫描后批量持久化目录 → folderId 映射
         this.persistFolderStatesFromRemoteEntries(remoteResult.value);
-        console.log(`[SyncEngine][${this.mapping.mappingId}] 全量扫描完成: ${map.size} 个文件，新水位=${newSince}`);
         return { map, newSince, fullScan: true };
     }
     /**
@@ -1115,7 +1183,6 @@ class SyncEngine {
             });
         }
         this.db.upsertFolderStateBatch(states);
-        console.log(`[SyncEngine][${this.mapping.mappingId}] 全量扫描持久化 ${states.length} 条目录映射到 sync_folder_state`);
     }
     /**
      * 知识库允许「文件节点」下再挂文件；本地不能把同名路径既当文件又当目录。
@@ -1129,13 +1196,8 @@ class SyncEngine {
             map.delete(p);
         }
         prog(`跳过 ${shadowed.size} 条「父路径亦为文件」的子路径（无法在本地镜像，仅同步父文档）`);
-        const sample = [...shadowed].slice(0, 15);
-        for (const p of sample) {
-            console.warn(`[SyncEngine][${this.mapping.mappingId}]   ↳ ${p}`);
-        }
-        if (shadowed.size > sample.length) {
-            console.warn(`[SyncEngine][${this.mapping.mappingId}]   … 另有 ${shadowed.size - sample.length} 条未列出`);
-        }
+        const sample = [...shadowed].slice(0, 5);
+        console.warn(`[SyncEngine][${this.mapping.mappingId}] 父路径为文件的子路径样本=${JSON.stringify(sample)}`);
     }
     // ==================== 决策逻辑 ====================
     decide(path, local, remote, record) {
@@ -1159,6 +1221,15 @@ class SyncEngine {
     async executePlansInQueue(plans, concurrency, label, prog, probeFirst = false) {
         const total = plans.length;
         let startIndex = 0;
+        const progressStep = Math.max(1, Math.ceil(total / constants_1.SYNC_PROGRESS_LOG_MAX_STEPS));
+        let nextProgressAt = progressStep;
+        const logProgress = (done) => {
+            if (done < nextProgressAt && done < total)
+                return;
+            prog(`${label} ${done}/${total}...`);
+            while (nextProgressAt <= done)
+                nextProgressAt += progressStep;
+        };
         // 上传新文件可能先创建分片/resource，最终入库才暴露权限错误。
         // 串行到一次真实成功后再放开并发，可将权限错误配置的远端副作用限制为最多一次。
         if (probeFirst && total > 0) {
@@ -1167,7 +1238,7 @@ class SyncEngine {
                 const uploadedBefore = this.stats.uploaded;
                 await this.executePlan(plans[startIndex]);
                 startIndex++;
-                prog(`${label} ${startIndex}/${total}...`);
+                logProgress(startIndex);
                 if (this.permanentFailure) {
                     this.stats.skipped += total - startIndex;
                     return;
@@ -1186,7 +1257,7 @@ class SyncEngine {
             const chunk = plans.slice(i, i + concurrency);
             await Promise.all(chunk.map((p) => this.executePlan(p)));
             const done = i + chunk.length;
-            prog(`${label} ${done}/${total}...`);
+            logProgress(done);
             if (this.permanentFailure) {
                 this.stats.skipped += total - done;
                 break;
@@ -1627,10 +1698,6 @@ class SyncEngine {
         if (!remoteFolderFileId || !newName) {
             throw new Error('rename-remote(目录) 缺少 remoteFolderFileId 或 newName');
         }
-        console.log(`[SyncEngine][${this.mapping.mappingId}] dir-rename request:` +
-            ` fileId=${remoteFolderFileId} oldDir="${directoryOldPath}" newDir="${directoryNewPath}"` +
-            ` newName="${newName}" strategy=${this.resolveRenameConflictStrategy()}` +
-            ` affected=${affectedRecords.length}`);
         const result = await this.remoteFs.renameFile({
             fileId: remoteFolderFileId,
             newName,
@@ -1638,10 +1705,9 @@ class SyncEngine {
         });
         if (!result.ok)
             throw new Error(result.error);
-        console.log(`[SyncEngine][${this.mapping.mappingId}] dir-rename response:` +
-            ` fileId=${result.value.fileId} name="${result.value.name}"` +
-            ` relativePath="${result.value.relativePath ?? ''}" updateTime=${result.value.updateTime}` +
-            ` renamedDueToConflict=${result.value.renamedDueToConflict === true ? 'Y' : 'N'}`);
+        console.log(`[SyncEngine][${this.mapping.mappingId}] DIR_RENAME old="${directoryOldPath}"` +
+            ` new="${directoryNewPath}" fileId=${remoteFolderFileId}->${result.value.fileId}` +
+            ` affected=${affectedRecords.length} conflictRename=${result.value.renamedDueToConflict === true ? 'Y' : 'N'}`);
         if (result.value.renamedDueToConflict) {
             console.warn(`[SyncEngine][${this.mapping.mappingId}] 目录 rename-remote 因冲突自动改名: ` +
                 `请求=${newName} 实际=${result.value.name}`);
@@ -1750,7 +1816,6 @@ class SyncEngine {
         if (!targetParentId) {
             const targetDir = toPath.includes('/') ? toPath.slice(0, toPath.lastIndexOf('/')) : '';
             if (targetDir) {
-                console.log(`[SyncEngine][${this.mapping.mappingId}] move-remote: 目标目录不存在，尝试创建 "${targetDir}"`);
                 const resolveResult = await this.remoteFs.resolveFolderIdForLocalDir(targetDir, true);
                 if (resolveResult.ok) {
                     targetParentId = resolveResult.value;
@@ -1787,7 +1852,6 @@ class SyncEngine {
         const idMappings = this.collectMoveIdMappings(mv);
         if (idMappings.length > 0) {
             this.db.applyRemoteIdMappings(this.mapping.mappingId, idMappings);
-            console.log(`[SyncEngine][${this.mapping.mappingId}] move-remote 已应用 ${idMappings.length} 条 idMappings`);
         }
         let finalFileId = String(mv.fileId);
         let finalName = mv.name;
@@ -1848,10 +1912,6 @@ class SyncEngine {
         if (!remoteFolderFileId || !targetParentId) {
             throw new Error('move-remote(目录) 缺少 remoteFolderFileId 或 targetParentId');
         }
-        console.log(`[SyncEngine][${this.mapping.mappingId}] dir-move request:` +
-            ` fileId=${remoteFolderFileId} oldDir="${directoryOldPath}" newDir="${directoryNewPath}"` +
-            ` targetParentId=${targetParentId} strategy=${this.resolveMoveConflictStrategy()}` +
-            ` renameAfterMoveName="${renameAfterMoveName ?? ''}" affected=${affectedRecords.length}`);
         const moveResult = await this.remoteFs.moveFile({
             fileId: remoteFolderFileId,
             targetParentId,
@@ -1860,10 +1920,6 @@ class SyncEngine {
         if (!moveResult.ok)
             throw new Error(moveResult.error);
         const mv = moveResult.value;
-        console.log(`[SyncEngine][${this.mapping.mappingId}] dir-move response:` +
-            ` sourceFileId=${mv.sourceFileId} fileId=${mv.fileId} idChanged=${mv.idChanged ? 'Y' : 'N'}` +
-            ` name="${mv.name}" parentId="${mv.parentId}" relativePath="${mv.relativePath ?? ''}"` +
-            ` mainSkipped=${mv.mainSkipped === true ? 'Y' : 'N'} idMappings=${mv.idMappings?.length ?? 0}`);
         if (mv.mainSkipped === true) {
             const msg = `目录 move-remote 因冲突被跳过: ${directoryOldPath} → ${directoryNewPath}`;
             console.warn(`[SyncEngine][${this.mapping.mappingId}] ${msg}`);
@@ -1876,8 +1932,6 @@ class SyncEngine {
         }
         let folderFileId = String(mv.fileId);
         if (renameAfterMoveName) {
-            console.log(`[SyncEngine][${this.mapping.mappingId}] dir-move follow-up rename request:` +
-                ` fileId=${folderFileId} newName="${renameAfterMoveName}" strategy=${this.resolveRenameConflictStrategy()}`);
             const renameResult = await this.remoteFs.renameFile({
                 fileId: folderFileId,
                 newName: renameAfterMoveName,
@@ -1886,15 +1940,9 @@ class SyncEngine {
             if (!renameResult.ok)
                 throw new Error(renameResult.error);
             folderFileId = String(renameResult.value.fileId);
-            console.log(`[SyncEngine][${this.mapping.mappingId}] dir-move follow-up rename response:` +
-                ` fileId=${renameResult.value.fileId} name="${renameResult.value.name}"` +
-                ` relativePath="${renameResult.value.relativePath ?? ''}" updateTime=${renameResult.value.updateTime}` +
-                ` renamedDueToConflict=${renameResult.value.renamedDueToConflict === true ? 'Y' : 'N'}`);
         }
         const idLookup = new Map(idMappings.map((m) => [m.sourceFileId, m.targetFileId]));
         const now = Date.now();
-        let mappingLogCount = 0;
-        const maxMappingLogs = 20;
         for (const rec of affectedRecords) {
             const oldPath = rec.localPath;
             const suffix = directoryOldPath
@@ -1910,13 +1958,6 @@ class SyncEngine {
             const mappedFolderId = rec.remoteFolderId
                 ? idLookup.get(rec.remoteFolderId) ?? rec.remoteFolderId
                 : rec.remoteFolderId;
-            if (mappingLogCount < maxMappingLogs) {
-                console.log(`[SyncEngine][${this.mapping.mappingId}] dir-move map#${mappingLogCount + 1}/${affectedRecords.length}:` +
-                    ` old="${oldPath}" new="${newPath}"` +
-                    ` fileId=${rec.remoteFileId ?? ''}->${mappedRemoteId ?? ''}` +
-                    ` folderId=${rec.remoteFolderId ?? ''}->${mappedFolderId ?? ''}`);
-                mappingLogCount++;
-            }
             this.db.deleteFileState(this.mapping.mappingId, oldPath);
             this.db.upsertFileState({
                 ...rec,
@@ -1942,11 +1983,12 @@ class SyncEngine {
                 }
             }
         }
-        if (affectedRecords.length > maxMappingLogs) {
-            console.log(`[SyncEngine][${this.mapping.mappingId}] dir-move 文件映射日志已截断: 仅展示 ${maxMappingLogs}/${affectedRecords.length}`);
-        }
         // 更新 sync_folder_state：旧路径前缀 → 新路径前缀
         this.db.renameFolderPaths(this.mapping.mappingId, directoryOldPath, directoryNewPath);
+        console.log(`[SyncEngine][${this.mapping.mappingId}] DIR_MOVE old="${directoryOldPath}" new="${directoryNewPath}"` +
+            ` fileId=${remoteFolderFileId}->${folderFileId} idChanged=${mv.idChanged ? 'Y' : 'N'}` +
+            ` idMappings=${idMappings.length} affected=${affectedRecords.length}` +
+            ` followUpRename=${renameAfterMoveName ? 'Y' : 'N'}`);
         this.stats.moved = (this.stats.moved ?? 0) + 1;
         this.progress(`→ 远端移动目录 ${directoryOldPath} → ${directoryNewPath}（${affectedRecords.length} 个文件，1 次 moveFile）`);
     }

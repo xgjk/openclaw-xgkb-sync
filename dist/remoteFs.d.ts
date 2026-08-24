@@ -1,6 +1,8 @@
 import { KbApiClient } from './kbApi';
 import { ApiResult, FileListItem, FileMeta, ListChangesItem, MoveFileParams, MoveFileResult, RemoteFileEntry, UpdateFileNameParams, UpdateFileNameResult } from './types';
 export interface RemoteFsOptions {
+    /** 日志上下文；Scheduler 传入 mappingId，便于并发同步时归因。 */
+    mappingId?: string;
     /** Knowledge base project ID. If omitted, init() resolves the personal project ID. */
     projectId?: string;
     /**
@@ -50,6 +52,7 @@ export declare class RemoteFsAdapter {
     private resolvedRootFileId;
     private resolvedRootFolderPath;
     private readonly maxFileSizeBytes;
+    private readonly logPrefix;
     constructor(api: KbApiClient, opts: RemoteFsOptions);
     getRootFileId(): string;
     getProjectId(): string;

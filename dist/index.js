@@ -130,15 +130,15 @@ async function main() {
     }
     // 用可变引用包装 scheduler，reload 时替换其中的实例
     let centralReporter = null;
-    let handleMissingLocalRootDisable;
+    let handleMappingAutoDisable;
     function createScheduler(cfg) {
         return new scheduler_1.SyncScheduler(cfg, {
             onMappingSyncFinished: (result) => {
                 centralReporter?.reportExecutionLog(result);
             },
-            onMissingLocalRootDisable: async (mappingId, detail) => {
-                if (handleMissingLocalRootDisable) {
-                    await handleMissingLocalRootDisable(mappingId, detail);
+            onMappingAutoDisable: async (mappingId, detail, cause) => {
+                if (handleMappingAutoDisable) {
+                    await handleMappingAutoDisable(mappingId, detail, cause);
                 }
             },
         });
@@ -158,11 +158,11 @@ async function main() {
                 return { ok: false, error: e instanceof Error ? e.message : String(e) };
             }
             console.log('[OpenClaw Sync] 配置重载：停止旧调度器...');
-            const stopped = await schedulerRef.current.stop();
+            const stopped = await schedulerRef.current.stop({ resumeOnTimeout: true });
             if (!stopped) {
                 return {
                     ok: false,
-                    error: '旧调度器仍有同步未完成，已跳过重载以避免 Database already closed；请稍后重试或重启进程',
+                    error: '旧调度器仍有同步未完成，已跳过重载并恢复旧配置继续调度；请稍后重试重载或重启进程',
                 };
             }
             schedulerRef.current = createScheduler(newConfig);
@@ -178,8 +178,9 @@ async function main() {
             reloadInFlight = null;
         }
     }
-    handleMissingLocalRootDisable = async (mappingId, detail) => {
-        console.error(`[OpenClaw Sync] localRoot 缺失，自动禁用 mapping "${mappingId}": ${detail}`);
+    handleMappingAutoDisable = async (mappingId, detail, cause) => {
+        const causeLabel = cause === 'mass-sync-protection' ? '大批量同步保护' : 'localRoot 缺失';
+        console.error(`[OpenClaw Sync] ${causeLabel}，自动禁用 mapping "${mappingId}": ${detail}`);
         const writeResult = (0, config_1.setMappingEnabledInConfigFile)(absConfigPath, mappingId, false);
         if (!writeResult.ok) {
             throw new Error(writeResult.error);
@@ -192,7 +193,7 @@ async function main() {
         if (!reloadResult.ok) {
             throw new Error(`禁用后热重载失败: ${reloadResult.error}`);
         }
-        console.log(`[OpenClaw Sync] mapping "${mappingId}" 已禁用并完成热重载`);
+        console.log(`[OpenClaw Sync] mapping "${mappingId}" 已因${causeLabel}禁用并完成热重载`);
     };
     // 管理 API（HTTP 服务，port=0 时自动禁用）
     const managementApi = new managementApi_1.ManagementApi({

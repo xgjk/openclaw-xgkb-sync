@@ -1,20 +1,22 @@
 import * as assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, describe, it } from 'node:test';
 import { Database } from 'node-sqlite3-wasm';
 import { CentralReporter } from './centralReporter';
-import { boundedPositiveInteger } from './config';
+import { boundedPositiveInteger, parseSyncConfig } from './config';
 import {
   CENTRAL_EXECUTION_LOG_CONCURRENCY,
   CENTRAL_EXECUTION_LOG_MAX_PENDING,
+  MAX_PENDING_WATCH_PATHS,
 } from './constants';
+import { pruneOldLogSegments } from './consoleTee';
 import { compactWatchRoots, FileWatcher, SharedFileWatcherBackend } from './fileWatcher';
 import type { KbApiClient } from './kbApi';
 import { LocalFsAdapter } from './localFs';
 import { RemoteFsAdapter } from './remoteFs';
-import type { SyncScheduler } from './scheduler';
+import { SyncScheduler } from './scheduler';
 import { SyncEngine } from './syncEngine';
 import { SyncStateDb } from './syncStateDb';
 import {
@@ -22,6 +24,7 @@ import {
   permanentCircuitDelayMs,
 } from './syncErrorPolicy';
 import type { MappingSyncRunResult, SyncConfig } from './types';
+import { evaluateMassSyncProtection, MassSyncProtectionError } from './syncSafety';
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -39,6 +42,162 @@ describe('资源安全边界', () => {
     assert.equal(boundedPositiveInteger(-2, 3, 10, 'test'), 3);
     assert.equal(boundedPositiveInteger(4.9, 3, 10, 'test'), 4);
     assert.equal(boundedPositiveInteger(999, 3, 10, 'test'), 10);
+  });
+
+  it('单轮上传/下载超过阈值时生成 mapping 级保护原因和有限样本', () => {
+    const uploads = Array.from({ length: 1_501 }, (_, i) => ({
+      path: `vendor/repo-${i}.md`,
+      op: 'upload-new' as const,
+    }));
+    const trip = evaluateMassSyncProtection({
+      enabled: true,
+      uploadPlans: uploads,
+      downloadPlans: [],
+      maxUploads: 1_000,
+      maxDownloads: 1_000,
+      localFileCount: 1_600,
+      remoteFileCount: 100,
+      knownFileCount: 100,
+    });
+
+    assert.ok(trip);
+    assert.equal(trip.uploadCount, 1_501);
+    assert.equal(trip.samplePaths.length, 20);
+    assert.match(trip.reason, /mapping 将被自动禁用/);
+    assert.equal(
+      evaluateMassSyncProtection({
+        enabled: false,
+        uploadPlans: uploads,
+        downloadPlans: [],
+        maxUploads: 1_000,
+        maxDownloads: 1_000,
+        localFileCount: 1_600,
+        remoteFileCount: 100,
+        knownFileCount: 100,
+      }),
+      null,
+    );
+  });
+
+  it('批量保护配置支持全局默认和 mapping 覆盖', () => {
+    const config = parseSyncConfig({
+      serverUrl: 'http://kb.invalid/',
+      syncDirection: 'bidirectional',
+      autoSyncIntervalSec: 180,
+      massSyncProtectionEnabled: true,
+      maxUploadFilesPerSync: 2_000,
+      maxDownloadFilesPerSync: 3_000,
+      mappings: [
+        {
+          mappingId: 'mapping-1',
+          localRoot: process.cwd(),
+          massSyncProtectionEnabled: false,
+          maxUploadFilesPerSync: 5_000,
+        },
+      ],
+    });
+    assert.equal(config.maxUploadFilesPerSync, 2_000);
+    assert.equal(config.maxDownloadFilesPerSync, 3_000);
+    assert.equal(config.mappings[0].massSyncProtectionEnabled, false);
+    assert.equal(config.mappings[0].maxUploadFilesPerSync, 5_000);
+  });
+
+  it('刷新远端目录映射时保留已有 inode，避免全量扫描破坏 rename 检测', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'openclaw-folder-inode-'));
+    const db = new SyncStateDb(path.join(root, 'state.db'));
+    try {
+      db.upsertFolderState({
+        mappingId: 'mapping-1',
+        localPath: 'docs',
+        remoteFolderId: 'old-folder',
+        localDev: '10',
+        localIno: '20',
+      });
+      db.upsertFolderState({
+        mappingId: 'mapping-1',
+        localPath: 'docs',
+        remoteFolderId: 'new-folder',
+      });
+      assert.deepEqual(db.getFolderState('mapping-1', 'docs'), {
+        mappingId: 'mapping-1',
+        localPath: 'docs',
+        remoteFolderId: 'new-folder',
+        localDev: '10',
+        localIno: '20',
+      });
+    } finally {
+      db.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('热重载停止超时会恢复旧 scheduler，而不是永久停摆', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'openclaw-reload-rollback-'));
+    const scheduler = new SyncScheduler(
+      {
+        serverUrl: 'http://kb.invalid/',
+        syncDirection: 'push',
+        autoSyncIntervalSec: 0,
+        stateDbPath: path.join(root, 'state.db'),
+        startupJitterMaxSec: 0,
+        mappings: [],
+      },
+      { stopDrainTimeoutMs: 10 },
+    );
+    scheduler.start();
+    (scheduler as unknown as { activeSyncCount: number }).activeSyncCount = 1;
+    try {
+      assert.equal(await scheduler.stop({ resumeOnTimeout: true }), false);
+      assert.deepEqual(scheduler.getLifecycleStatus(), { running: true, dbClosed: false });
+    } finally {
+      (scheduler as unknown as { activeSyncCount: number }).activeSyncCount = 0;
+      await scheduler.stop();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('瞬时新增上万文件不会触发逐目录远端解析候选', () => {
+    const engine = Object.create(SyncEngine.prototype) as SyncEngine;
+    const localFiles = Array.from({ length: 10_000 }, (_, i) => ({
+      path: `vendor/repo-${i}/README.md`,
+      name: 'README.md',
+      mtime: 1,
+      size: 1,
+      dev: '1',
+      ino: String(i + 1),
+    }));
+    const targets = (
+      engine as unknown as {
+        collectMovedTargetDirPaths: (
+          files: typeof localFiles,
+          dirs: [],
+          records: [],
+          folderRecords: [],
+        ) => string[];
+      }
+    ).collectMovedTargetDirPaths(localFiles, [], [], []);
+    assert.deepEqual(targets, []);
+  });
+
+  it('日志总量清理只删除同前缀旧分段并保留当前文件', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'openclaw-log-prune-'));
+    const old0 = path.join(root, 'openclaw-sync-2026-01-01.log');
+    const old1 = path.join(root, 'openclaw-sync-2026-01-01.1.log');
+    const current = path.join(root, 'openclaw-sync-2026-01-02.log');
+    await writeFile(old0, 'a'.repeat(40));
+    await writeFile(old1, 'b'.repeat(40));
+    await writeFile(current, 'c'.repeat(40));
+    await writeFile(path.join(root, 'unrelated-2026-01-01.log'), 'keep');
+    try {
+      const result = pruneOldLogSegments(root, 'openclaw-sync', 50, current);
+      assert.equal(result.deletedFiles, 2);
+      assert.deepEqual((await readdir(root)).sort(), [
+        'openclaw-sync-2026-01-02.log',
+        'unrelated-2026-01-01.log',
+      ]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it('中心停服时 execution-log 仅保留有界数量', async () => {
@@ -226,12 +385,80 @@ describe('资源安全边界', () => {
       globalThis.fetch = originalFetch;
     }
   });
+
+  it('中心每次心跳都返回 config 时只记录一次忽略提示', async () => {
+    const originalFetch = globalThis.fetch;
+    const originalLog = console.log;
+    const logs: string[] = [];
+    console.log = (...args: unknown[]) => logs.push(args.map(String).join(' '));
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({ resultCode: 1, data: { config: { mappings: [] } } }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )) as typeof fetch;
+
+    const config: SyncConfig = {
+      serverUrl: 'http://kb.invalid/',
+      syncDirection: 'push',
+      autoSyncIntervalSec: 0,
+      centralManagerUrl: 'http://central.invalid',
+      autoUpgradeEnabled: false,
+      mappings: [],
+    };
+    const scheduler = {
+      getGlobalSyncPressure: () => ({ running: 0, max: 1 }),
+      getStatus: () => ({}),
+      isSyncIdle: () => true,
+    } as unknown as SyncScheduler;
+    const reporter = new CentralReporter({
+      getNodeIdentity: () => ({ nodeId: 'test-node', advertiseIp: '127.0.0.1' }),
+      configPath: 'unused',
+      projectRoot: process.cwd(),
+      appVersion: '1.0.0',
+      getConfig: () => config,
+      getScheduler: () => scheduler,
+      getEventLoopLagMs: () => 0,
+    });
+
+    try {
+      const invoke = reporter as unknown as { sendHeartbeat(): Promise<void> };
+      await invoke.sendHeartbeat();
+      await invoke.sendHeartbeat();
+      assert.equal(logs.filter((line) => line.includes('心跳响应含 config 字段')).length, 1);
+    } finally {
+      reporter.stop();
+      globalThis.fetch = originalFetch;
+      console.log = originalLog;
+    }
+  });
 });
 
 describe('共享文件监听语义', () => {
   const tempDirs: string[] = [];
   afterEach(async () => {
     await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  });
+
+  it('debounce 路径集合达到上限后只计数，不继续持有字符串', async () => {
+    const watcher = new FileWatcher({
+      mappingId: 'bounded-paths',
+      localRoot: process.cwd(),
+      scope: { filePatterns: ['**/*'], excludePatterns: [], syncDotFiles: true },
+      debounceMs: 60_000,
+      usePolling: false,
+      onBatchReady: () => undefined,
+    });
+    const internals = watcher as unknown as {
+      recordPendingPath: (relativePath: string) => void;
+      pendingPaths: Set<string>;
+      pendingPathOverflowCount: number;
+    };
+    for (let i = 0; i < MAX_PENDING_WATCH_PATHS + 5_000; i++) {
+      internals.recordPendingPath(`bulk/path-${i}.md`);
+    }
+    assert.equal(internals.pendingPaths.size, MAX_PENDING_WATCH_PATHS);
+    assert.equal(internals.pendingPathOverflowCount, 5_000);
+    await watcher.stop();
   });
 
   it('递归 watcher root 会合并重复和父子重叠目录', () => {
@@ -445,6 +672,28 @@ describe('远端正文内存边界', () => {
       globalThis.fetch = originalFetch;
     }
   });
+
+  it('批量下载失败日志带 mappingId 且只输出有界样本', async () => {
+    const adapter = new RemoteFsAdapter({} as KbApiClient, { mappingId: 'log-test' });
+    const fake = adapter as unknown as {
+      readFile(fileId: string): Promise<{ ok: false; error: string }>;
+    };
+    fake.readFile = async (fileId: string) => ({ ok: false, error: `failed-${fileId}` });
+
+    const originalWarn = console.warn;
+    const warnings: string[] = [];
+    console.warn = (...args: unknown[]) => warnings.push(args.map(String).join(' '));
+    try {
+      await adapter.readFilesBatch(Array.from({ length: 20 }, (_, i) => `file-${i}`));
+      assert.equal(warnings.length, 1);
+      assert.match(warnings[0], /\[RemoteFs\]\[log-test\]/);
+      assert.match(warnings[0], /failed=20\/20/);
+      assert.match(warnings[0], /file-4/);
+      assert.doesNotMatch(warnings[0], /file-5/);
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
 });
 
 describe('核心同步编排', () => {
@@ -497,6 +746,54 @@ describe('核心同步编排', () => {
       assert.equal(stats.failed, 0);
       assert.deepEqual(uploaded, bytes);
       assert.equal(db.getFileState('push-test', 'doc.md')?.remoteFileId, 'remote-1');
+    } finally {
+      db.close();
+    }
+  });
+
+  it('异常批量上传在首个远端写操作前中止', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'openclaw-mass-upload-stop-'));
+    tempDirs.push(root);
+    for (let i = 0; i < 4; i++) {
+      await writeFile(path.join(root, `bulk-${i}.md`), `file-${i}`);
+    }
+    const db = new SyncStateDb(path.join(root, 'state.db'));
+    let createCalls = 0;
+    const remote = {
+      getRootFileId: () => 'root',
+      listFiles: async () => ({ ok: true as const, value: [] }),
+      createFile: async () => {
+        createCalls++;
+        return {
+          ok: true as const,
+          value: { remoteFileId: 'unexpected', remoteFolderId: 'root' },
+        };
+      },
+    } as unknown as RemoteFsAdapter;
+    const local = new LocalFsAdapter(root, {
+      filePatterns: ['**/*.md'],
+      excludePatterns: ['state.db*'],
+      syncDotFiles: false,
+    });
+    const engine = new SyncEngine(
+      local,
+      remote,
+      db,
+      {
+        mappingId: 'mass-upload-stop-test',
+        enabled: true,
+        localRoot: root,
+        syncDirection: 'push',
+        filePatterns: ['**/*.md'],
+        excludePatterns: ['state.db*'],
+      },
+      { maxUploadFilesPerSync: 3 },
+    );
+
+    try {
+      await assert.rejects(() => engine.runSync(), MassSyncProtectionError);
+      assert.equal(createCalls, 0);
+      assert.equal(db.countFileStates('mass-upload-stop-test'), 0);
     } finally {
       db.close();
     }

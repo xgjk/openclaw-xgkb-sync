@@ -173,6 +173,9 @@ export const DEFAULT_LOG_BASE_NAME = 'openclaw-sync';
 /** 单个日志文件大小上限（字节），超出后同日递增段号 `.1`、`.2`… */
 export const MAX_LOG_FILE_BYTES = 10 * 1024 * 1024;
 
+/** 同一日志前缀的总磁盘上限；轮转时删除最旧分段，当前分段永不删除。 */
+export const MAX_LOG_TOTAL_BYTES = 512 * 1024 * 1024;
+
 /** 默认知识库 Open API 根地址（生产环境） */
 export const DEFAULT_SERVER_URL = 'https://sg-al-cwork-web.mediportal.com.cn/open-api/';
 
@@ -222,6 +225,21 @@ export const MAX_REQUESTS_PER_MINUTE_LIMIT = 60_000;
 
 /** 单轮仅保留有限数量错误明细；失败总数仍由 stats.failed 完整记录。 */
 export const MAX_SYNC_ERROR_DETAILS = 100;
+
+/** 单轮批量上传/下载保护：超过阈值时自动停用对应 mapping，避免异常目录风暴扩散。 */
+export const DEFAULT_MASS_SYNC_PROTECTION_ENABLED = true;
+export const DEFAULT_MAX_UPLOAD_FILES_PER_SYNC = 1_000;
+export const DEFAULT_MAX_DOWNLOAD_FILES_PER_SYNC = 1_000;
+export const MAX_FILES_PER_SYNC_LIMIT = 1_000_000;
+
+/** watcher debounce 期间最多保留的唯一路径；超出后只累计数量，不再持有路径字符串。 */
+export const MAX_PENDING_WATCH_PATHS = 1_024;
+
+/** 单轮目录 inode move 检测允许解析的目标父目录上限。 */
+export const MAX_FOLDER_ID_RESOLVES_PER_SYNC = 100;
+
+/** 单类批量操作每轮最多输出多少条进度日志，避免大 mapping 形成日志风暴。 */
+export const SYNC_PROGRESS_LOG_MAX_STEPS = 20;
 
 /** 单文件默认内存安全上限（文本知识库文件）；可通过配置降低或提高。 */
 export const DEFAULT_MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024;

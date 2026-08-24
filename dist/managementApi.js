@@ -71,6 +71,9 @@ const EDITABLE_CONFIG_FIELDS = [
     'downloadConcurrency',
     'uploadConcurrency',
     'maxFileSizeBytes',
+    'massSyncProtectionEnabled',
+    'maxUploadFilesPerSync',
+    'maxDownloadFilesPerSync',
     'startupJitterMaxSec',
     'managementPort',
     'managementHost',
@@ -121,24 +124,7 @@ class ManagementApi {
         }, 1000);
         this.eventLoopTimer.unref();
         this.server.listen(this.opts.port, this.opts.host, () => {
-            console.log(`[ManagementApi] 已启动，监听 http://${this.opts.host}:${this.opts.port}`);
-            console.log(`[ManagementApi] 可用接口:`);
-            console.log(`  GET    /health`);
-            console.log(`  GET    /status`);
-            console.log(`  GET    /mappings`);
-            console.log(`  POST   /mappings          新增 mapping`);
-            console.log(`  PUT    /mappings/:id       upsert mapping（存在则更新，不存在则创建）`);
-            console.log(`  DELETE /mappings/:id       删除 mapping`);
-            console.log(`  POST   /mappings/:id/enable  启用 mapping`);
-            console.log(`  POST   /mappings/:id/disable 禁用 mapping`);
-            console.log(`  POST   /mappings/disable-by-local-prefix  按 localRoot 前缀批量禁用`);
-            console.log(`  POST   /mappings/:id/reset 重置同步状态（清空 DB）`);
-            console.log(`  POST   /sync/:mappingId`);
-            console.log(`  POST   /sync  （触发所有）`);
-            console.log(`  POST   /reload`);
-            console.log(`  GET    /config`);
-            console.log(`  PUT    /config`);
-            console.log(`  GET    /          管理控制台（静态页面）`);
+            console.log(`[ManagementApi] 已启动 http://${this.opts.host}:${this.opts.port}（health/status/mappings/sync/reload/config/console）`);
         });
         this.server.on('error', (e) => {
             console.error('[ManagementApi] 服务器错误:', e);
@@ -247,6 +233,7 @@ class ManagementApi {
         const config = scheduler.getConfig();
         const enabledCount = config.mappings.filter((m) => m.enabled).length;
         const pressure = scheduler.getGlobalSyncPressure();
+        const lifecycle = scheduler.getLifecycleStatus();
         const watcherPressure = scheduler.getWatcherPressure();
         const circuitPressure = scheduler.getCircuitBreakerPressure();
         const memory = process.memoryUsage();
@@ -274,6 +261,7 @@ class ManagementApi {
             eventLoopLagMs: this.lastEventLoopLagMs,
             globalSyncRunning: pressure.running,
             globalSyncMax: pressure.max,
+            schedulerRunning: lifecycle.running,
             watcherMappings: watcherPressure.mappings,
             watcherBackends: watcherPressure.backends,
             watcherModes: watcherPressure.modes,
@@ -290,7 +278,11 @@ class ManagementApi {
                 external: memory.external,
                 arrayBuffers: memory.arrayBuffers,
             },
-            degraded: highLag || overloaded || watcherCapacityExceeded || circuitPressure.open > 0,
+            degraded: highLag ||
+                overloaded ||
+                watcherCapacityExceeded ||
+                circuitPressure.open > 0 ||
+                !lifecycle.running,
             ...(highLag && {
                 warn: 'event_loop_lag_high',
                 hint: '同步阻塞事件循环，HTTP 可能间歇超时；请调大黑盒 timeout 或降低并行同步',
@@ -302,6 +294,10 @@ class ManagementApi {
             ...(watcherCapacityExceeded && {
                 warn: 'watcher_capacity_exceeded',
                 hint: '部分根目录未启用实时监听，当前由定时同步兜底',
+            }),
+            ...(!lifecycle.running && {
+                warn: 'scheduler_not_running',
+                hint: '调度器未运行，定时与 watcher 触发不会执行；请检查热重载或重启服务',
             }),
         });
     }
@@ -322,6 +318,7 @@ class ManagementApi {
                     ? (0, watchHelpers_1.resolveWatchEnabled)(mapping, config)
                     : false,
                 watchActive: state.watchActive,
+                syncSuspended: state.syncSuspended,
                 circuitOpen: state.circuitOpen,
                 circuitUntil: state.circuitUntil ?? null,
                 circuitReason: state.circuitReason ?? null,
@@ -351,6 +348,9 @@ class ManagementApi {
                 maxConcurrentMappingsMode: config.maxConcurrentMappingsMode,
                 effectiveMaxConcurrentMappings: (0, scheduler_1.resolveMaxConcurrentMappings)(config),
                 maxRequestsPerMinute: config.maxRequestsPerMinute,
+                massSyncProtectionEnabled: config.massSyncProtectionEnabled,
+                maxUploadFilesPerSync: config.maxUploadFilesPerSync,
+                maxDownloadFilesPerSync: config.maxDownloadFilesPerSync,
                 mappingCount: config.mappings.length,
                 enabledMappingCount: config.mappings.filter((m) => m.enabled).length,
             },
@@ -503,6 +503,8 @@ class ManagementApi {
                     key === 'downloadConcurrency' ||
                     key === 'uploadConcurrency' ||
                     key === 'maxFileSizeBytes' ||
+                    key === 'maxUploadFilesPerSync' ||
+                    key === 'maxDownloadFilesPerSync' ||
                     key === 'startupJitterMaxSec') {
                     if (typeof val !== 'number' || val < 0) {
                         throw new Error(`${key} 必须是非负数`);
@@ -517,7 +519,10 @@ class ManagementApi {
                     raw.pushDebounceMs = val;
                     continue;
                 }
-                if (key === 'watchEnabled' || key === 'watchUsePolling' || key === 'syncDotFiles') {
+                if (key === 'watchEnabled' ||
+                    key === 'watchUsePolling' ||
+                    key === 'syncDotFiles' ||
+                    key === 'massSyncProtectionEnabled') {
                     if (typeof val !== 'boolean') {
                         throw new Error(`${key} 必须是 boolean`);
                     }
@@ -1287,6 +1292,12 @@ class ManagementApi {
             watchEnabled: m.watchEnabled,
             pushDebounceMs: m.pushDebounceMs,
             watchUsePolling: m.watchUsePolling,
+            massSyncProtectionEnabled: m.massSyncProtectionEnabled,
+            maxUploadFilesPerSync: m.maxUploadFilesPerSync,
+            maxDownloadFilesPerSync: m.maxDownloadFilesPerSync,
+            effectiveMassSyncProtectionEnabled: m.massSyncProtectionEnabled ?? cfg.massSyncProtectionEnabled,
+            effectiveMaxUploadFilesPerSync: m.maxUploadFilesPerSync ?? cfg.maxUploadFilesPerSync,
+            effectiveMaxDownloadFilesPerSync: m.maxDownloadFilesPerSync ?? cfg.maxDownloadFilesPerSync,
             watchEnabledEffective: (0, watchHelpers_1.resolveWatchEnabled)(m, cfg),
             effectivePushDebounceMs: (0, watchHelpers_1.resolvePushDebounceMs)(m, cfg),
             effectiveWatchUsePolling: (0, watchHelpers_1.resolveWatchUsePolling)(m, cfg),
@@ -1323,6 +1334,9 @@ class ManagementApi {
             downloadConcurrency: config.downloadConcurrency,
             uploadConcurrency: config.uploadConcurrency,
             maxFileSizeBytes: config.maxFileSizeBytes,
+            massSyncProtectionEnabled: config.massSyncProtectionEnabled,
+            maxUploadFilesPerSync: config.maxUploadFilesPerSync,
+            maxDownloadFilesPerSync: config.maxDownloadFilesPerSync,
             startupJitterMaxSec: config.startupJitterMaxSec,
             managementPort: config.managementPort,
             managementHost: config.managementHost,

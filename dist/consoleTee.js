@@ -33,6 +33,7 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.pruneOldLogSegments = pruneOldLogSegments;
 exports.installConsoleTee = installConsoleTee;
 exports.installConsoleTeeLegacy = installConsoleTeeLegacy;
 const fs = __importStar(require("fs"));
@@ -63,6 +64,7 @@ function parseLogFileName(fileName) {
 }
 function resolveTeeTarget(opts) {
     const maxFileBytes = opts.maxFileBytes ?? constants_1.MAX_LOG_FILE_BYTES;
+    const maxTotalBytes = opts.maxTotalBytes ?? constants_1.MAX_LOG_TOTAL_BYTES;
     if (opts.logFile?.trim()) {
         const abs = path.resolve(opts.logFile.trim());
         const fileName = path.basename(abs);
@@ -72,6 +74,7 @@ function resolveTeeTarget(opts) {
                 logDir: path.dirname(abs),
                 baseName: parsed.baseName,
                 maxFileBytes,
+                maxTotalBytes,
             };
         }
         const base = path.basename(abs, '.log');
@@ -79,13 +82,66 @@ function resolveTeeTarget(opts) {
             logDir: path.dirname(abs),
             baseName: base || constants_1.DEFAULT_LOG_BASE_NAME,
             maxFileBytes,
+            maxTotalBytes,
         };
     }
     return {
         logDir: path.resolve(opts.logDir?.trim() || constants_1.DEFAULT_LOG_DIR),
         baseName: opts.baseName?.trim() || constants_1.DEFAULT_LOG_BASE_NAME,
         maxFileBytes,
+        maxTotalBytes,
     };
+}
+/** 仅清理同一 baseName 的旧轮转分段；当前正在写入的文件始终保留。 */
+function pruneOldLogSegments(logDir, baseName, maxTotalBytes, protectedPath) {
+    const protectedAbs = protectedPath ? path.resolve(protectedPath) : undefined;
+    const files = [];
+    let entries = [];
+    try {
+        entries = fs.readdirSync(logDir, { withFileTypes: true });
+    }
+    catch {
+        return { deletedFiles: 0, deletedBytes: 0, remainingBytes: 0 };
+    }
+    for (const entry of entries) {
+        if (!entry.isFile())
+            continue;
+        const parsed = parseLogFileName(entry.name);
+        if (!parsed || parsed.baseName !== baseName)
+            continue;
+        const absPath = path.resolve(logDir, entry.name);
+        try {
+            files.push({
+                absPath,
+                date: parsed.date,
+                segment: parsed.segment,
+                size: fs.statSync(absPath).size,
+            });
+        }
+        catch {
+            // 文件可能正被外部轮转或删除，忽略。
+        }
+    }
+    files.sort((a, b) => a.date.localeCompare(b.date) || a.segment - b.segment);
+    let remainingBytes = files.reduce((sum, file) => sum + file.size, 0);
+    let deletedFiles = 0;
+    let deletedBytes = 0;
+    for (const file of files) {
+        if (remainingBytes <= maxTotalBytes)
+            break;
+        if (file.absPath === protectedAbs)
+            continue;
+        try {
+            fs.unlinkSync(file.absPath);
+            remainingBytes -= file.size;
+            deletedBytes += file.size;
+            deletedFiles++;
+        }
+        catch {
+            // 日志清理失败不影响同步主流程。
+        }
+    }
+    return { deletedFiles, deletedBytes, remainingBytes };
 }
 /** 选择今日可追加的日志段：未满的最后一段，或新建下一段。 */
 function pickInitialLogSegment(logDir, baseName, date, maxFileBytes) {
@@ -132,6 +188,7 @@ class RotatingLogWriter {
     logDir;
     baseName;
     maxFileBytes;
+    maxTotalBytes;
     currentDate;
     currentSegment;
     currentPath;
@@ -143,10 +200,11 @@ class RotatingLogWriter {
     backpressured = false;
     rotating = false;
     droppedLines = 0;
-    constructor(logDir, baseName, maxFileBytes) {
+    constructor(logDir, baseName, maxFileBytes, maxTotalBytes) {
         this.logDir = logDir;
         this.baseName = baseName;
         this.maxFileBytes = maxFileBytes;
+        this.maxTotalBytes = maxTotalBytes;
         this.currentDate = formatLogDate();
         fs.mkdirSync(this.logDir, { recursive: true });
         const initial = pickInitialLogSegment(this.logDir, this.baseName, this.currentDate, this.maxFileBytes);
@@ -154,6 +212,7 @@ class RotatingLogWriter {
         this.currentPath = initial.absPath;
         this.bytesInFile = initial.bytesInFile;
         this.stream = this.createStream(this.currentPath);
+        this.pruneOldSegments();
     }
     getCurrentPath() {
         return this.currentPath;
@@ -217,9 +276,17 @@ class RotatingLogWriter {
             this.currentPath = path.join(this.logDir, buildLogFileName(this.baseName, date, segment));
             this.bytesInFile = 0;
             this.stream = this.createStream(this.currentPath);
+            this.pruneOldSegments();
             this.rotating = false;
             this.pump();
         });
+    }
+    pruneOldSegments() {
+        const result = pruneOldLogSegments(this.logDir, this.baseName, this.maxTotalBytes, this.currentPath);
+        if (result.deletedFiles > 0) {
+            process.stderr.write(`[ConsoleTee] 日志保留上限清理：删除 ${result.deletedFiles} 个旧分段，` +
+                `${Math.round(result.deletedBytes / (1024 * 1024))} MiB\n`);
+        }
     }
     createStream(filePath) {
         const stream = fs.createWriteStream(filePath, { flags: 'a' });
@@ -236,8 +303,8 @@ class RotatingLogWriter {
  */
 function installConsoleTee(opts) {
     const options = typeof opts === 'string' ? { logFile: opts } : opts;
-    const { logDir, baseName, maxFileBytes } = resolveTeeTarget(options);
-    const writer = new RotatingLogWriter(logDir, baseName, maxFileBytes);
+    const { logDir, baseName, maxFileBytes, maxTotalBytes } = resolveTeeTarget(options);
+    const writer = new RotatingLogWriter(logDir, baseName, maxFileBytes, maxTotalBytes);
     const origLog = console.log.bind(console);
     const origWarn = console.warn.bind(console);
     const origErr = console.error.bind(console);
@@ -258,7 +325,8 @@ function installConsoleTee(opts) {
         writeLine('ERROR', args);
     };
     const maxMb = Math.round(maxFileBytes / (1024 * 1024));
-    origLog(`[OpenClaw Sync] 日志已双写: ${writer.getCurrentPath()}（按日切割，单文件 ≤${maxMb}MB）`);
+    origLog(`[OpenClaw Sync] 日志已双写: ${writer.getCurrentPath()}（按日切割，单文件 ≤${maxMb}MB，` +
+        `总量 ≤${Math.round(maxTotalBytes / (1024 * 1024))}MB）`);
     writer.write(`[${new Date().toISOString()}] [INFO] [OpenClaw Sync] 日志目录=${logDir} base=${baseName} maxFileBytes=${maxFileBytes}\n`);
 }
 /** @deprecated 使用 installConsoleTee({ logFile }) */

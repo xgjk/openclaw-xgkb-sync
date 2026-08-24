@@ -116,6 +116,8 @@ function detectFolderRenames(
   }
 
   const candidates: Candidate[] = [];
+  let unresolvedParentCount = 0;
+  const unresolvedParentSamples: string[] = [];
 
   for (const fr of folderRecords) {
     if (!fr.localDev || !fr.localIno || fr.localIno === '0') continue;
@@ -136,10 +138,10 @@ function detectFolderRenames(
     // 目标父目录须可解析
     const targetParent = dirOf(currentDir.path);
     if (!folderPathToRemoteId.has(targetParent)) {
-      console.warn(
-        `[reconcileEngine] 文件夹 rename/move 跳过: 无法解析目标父目录 folderId` +
-          ` parent="${targetParent}" oldDir="${fr.localPath}" newDir="${currentDir.path}"`,
-      );
+      unresolvedParentCount++;
+      if (unresolvedParentSamples.length < 5) {
+        unresolvedParentSamples.push(`${fr.localPath} -> ${currentDir.path} (parent=${targetParent})`);
+      }
       continue;
     }
 
@@ -148,6 +150,12 @@ function detectFolderRenames(
       newDir: currentDir.path,
       remoteFolderId: fr.remoteFolderId,
     });
+  }
+  if (unresolvedParentCount > 0) {
+    console.warn(
+      `[reconcileEngine] ${unresolvedParentCount} 个文件夹 rename/move 因目标父目录无法解析而跳过` +
+        ` samples=${JSON.stringify(unresolvedParentSamples)}`,
+    );
   }
 
   // 去重：只保留最外层目录
@@ -279,11 +287,6 @@ function detectSingleFileMoves(
       });
     } else {
       const targetParentId = folderPathToRemoteId.get(newDir) ?? '';
-      if (!targetParentId) {
-        console.log(
-          `[reconcileEngine] 单文件 move-remote: 目标目录待创建 newDir="${newDir}" from="${record.localPath}" to="${currentEntry.path}"`,
-        );
-      }
 
       const oldBase = baseName(record.localPath);
       plans.push({

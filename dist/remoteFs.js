@@ -21,10 +21,12 @@ class RemoteFsAdapter {
     resolvedRootFileId = null;
     resolvedRootFolderPath = null;
     maxFileSizeBytes;
+    logPrefix;
     constructor(api, opts) {
         this.api = api;
         this.uploader = new fileUploader_1.FileUploader(api);
         this.opts = opts;
+        this.logPrefix = opts.mappingId ? `[RemoteFs][${opts.mappingId}]` : '[RemoteFs]';
         this.syncScope = {
             filePatterns: opts.filePatterns ?? constants_1.DEFAULT_FILE_PATTERNS,
             excludePatterns: opts.excludePatterns ?? constants_1.DEFAULT_EXCLUDE_PATTERNS,
@@ -53,29 +55,29 @@ class RemoteFsAdapter {
         // 1. projectId: explicit config, then cache, then personal project API.
         let projectId = this.opts.projectId ?? this.opts.cachedProjectId ?? null;
         if (!projectId) {
-            console.log('[RemoteFs] projectId missing; calling getPersonalProjectId()...');
+            console.log(`${this.logPrefix} projectId missing; calling getPersonalProjectId()...`);
             const r = await this.api.getPersonalProjectId();
             if (!r.ok)
                 return { ok: false, error: `Failed to get personal project ID: ${r.error}` };
             projectId = r.value;
-            console.log(`[RemoteFs] Resolved personal project ID: ${projectId}`);
+            console.log(`${this.logPrefix} Resolved personal project ID: ${projectId}`);
         }
         this.resolvedProjectId = projectId;
         // 2. rootFileId: explicit config, then cache, then path resolution or project root.
         let rootFileId = this.opts.remoteRootFileId ?? this.opts.cachedRootFileId ?? null;
         if (!rootFileId) {
             if (this.opts.remoteRootFolderPath) {
-                console.log(`[RemoteFs] remoteRootFileId missing; resolving path: "${this.opts.remoteRootFolderPath}"`);
+                console.log(`${this.logPrefix} remoteRootFileId missing; resolving path: "${this.opts.remoteRootFolderPath}"`);
                 const r = await this.resolveFileIdFromPath(this.opts.remoteRootFolderPath, projectId);
                 if (!r.ok)
                     return r;
                 rootFileId = r.value;
-                console.log(`[RemoteFs] Path resolved: rootFileId=${rootFileId}`);
+                console.log(`${this.logPrefix} Path resolved: rootFileId=${rootFileId}`);
             }
             else {
                 // Both root fields omitted: target the project root.
                 rootFileId = '0';
-                console.log('[RemoteFs] remote root not configured; using project root (rootFileId=0)');
+                console.log(`${this.logPrefix} remote root not configured; using project root (rootFileId=0)`);
             }
         }
         this.resolvedRootFileId = rootFileId;
@@ -87,12 +89,12 @@ class RemoteFsAdapter {
             this.resolvedRootFolderPath = '';
         }
         else if (!this.resolvedRootFolderPath) {
-            console.log('[RemoteFs] remoteRootFolderPath missing; resolving path with batchGetMeta...');
+            console.log(`${this.logPrefix} remoteRootFolderPath missing; resolving path with batchGetMeta...`);
             const r = await this.resolvePathFromFileId(rootFileId);
             if (!r.ok)
                 return r;
             this.resolvedRootFolderPath = r.value;
-            console.log(`[RemoteFs] Reverse path resolved: "${this.resolvedRootFolderPath}"`);
+            console.log(`${this.logPrefix} Reverse path resolved: "${this.resolvedRootFolderPath}"`);
         }
         return {
             ok: true,
@@ -123,13 +125,11 @@ class RemoteFsAdapter {
         const firstSeg = segments[0];
         let firstFolder = folders.find((f) => f.name === firstSeg && f.type === 1);
         if (!firstFolder) {
-            console.log(`[RemoteFs] Level-1 folder "${firstSeg}" not found; creating it...`);
             const createResult = await this.api.createFolder({ projectId, parentId: '0', name: firstSeg });
             if (!createResult.ok) {
                 return { ok: false, error: `Failed to create level-1 folder "${firstSeg}": ${createResult.error}` };
             }
             firstFolder = { id: Number(createResult.value), name: firstSeg, type: 1 };
-            console.log(`[RemoteFs] Created level-1 folder "${firstSeg}" (id=${createResult.value})`);
         }
         let currentId = String(firstFolder.id);
         for (let i = 1; i < segments.length; i++) {
@@ -142,12 +142,10 @@ class RemoteFsAdapter {
             const found = children.find((f) => f.name === seg);
             if (!found) {
                 const parentPath = segments.slice(0, i).join('/');
-                console.log(`[RemoteFs] Folder "${seg}" not found under "${parentPath}"; creating it...`);
                 const createResult = await this.api.createFolder({ projectId, parentId: currentId, name: seg });
                 if (!createResult.ok) {
                     return { ok: false, error: `Failed to create folder "${seg}" under "${parentPath}": ${createResult.error}` };
                 }
-                console.log(`[RemoteFs] Created folder "${seg}" under "${parentPath}" (id=${createResult.value})`);
                 currentId = String(createResult.value);
             }
             else {
@@ -185,7 +183,6 @@ class RemoteFsAdapter {
                 if (!createIfMissing) {
                     return { ok: false, error: `folder "${seg}" not found (lookup-only mode)` };
                 }
-                console.log(`[RemoteFs] resolveFolderIdForLocalDir: create "${seg}" under parentId=${currentId}`);
                 const createResult = await this.api.createFolder({
                     projectId: this.resolvedProjectId,
                     parentId: currentId,
@@ -228,7 +225,7 @@ class RemoteFsAdapter {
             currentId = parentId;
         }
         if (reachedMaxDepth) {
-            console.warn(`[RemoteFs] resolvePathFromFileId reached max depth (${MAX_DEPTH}); path may be incomplete: "${segments.join('/')}"`);
+            console.warn(`${this.logPrefix} resolvePathFromFileId reached max depth (${MAX_DEPTH}); path may be incomplete: "${segments.join('/')}"`);
         }
         return { ok: true, value: segments.join('/') };
     }
@@ -242,7 +239,6 @@ class RemoteFsAdapter {
         let cursor;
         let page = 0;
         const apiSuffix = (0, constants_1.buildListDescendantFilesSuffix)(this.syncScope.filePatterns);
-        console.log(`[RemoteFs] listDescendantFiles API suffix=${apiSuffix}`);
         do {
             page++;
             const r = await this.api.listDescendantFiles({
@@ -256,7 +252,6 @@ class RemoteFsAdapter {
             if (!r.ok)
                 return { ok: false, error: r.error };
             const pageItems = r.value.files ?? [];
-            console.log(`[RemoteFs] listDescendantFiles page ${page}: ${pageItems.length} items, nextCursor=${r.value.nextCursor ?? 'null'}`);
             for (const item of pageItems) {
                 const rawPath = item.relativePath ?? item.name;
                 const safePath = (0, pathSanitize_1.canonicalizeRelativeSyncPath)(rawPath);
@@ -274,7 +269,7 @@ class RemoteFsAdapter {
             }
             cursor = r.value.nextCursor ?? undefined;
         } while (cursor);
-        console.log(`[RemoteFs] listDescendantFiles done: ${entries.length} files in ${page} pages`);
+        console.log(`${this.logPrefix} listDescendantFiles done: files=${entries.length} pages=${page} suffix=${apiSuffix}`);
         return { ok: true, value: entries };
     }
     /**
@@ -326,7 +321,7 @@ class RemoteFsAdapter {
                 clearTimeout(timeout);
             }
         }
-        console.warn(`[RemoteFs] getDownloadInfo falling back to getFullFileContent (fileId=${fileId}): ` +
+        console.warn(`${this.logPrefix} getDownloadInfo falling back to getFullFileContent (fileId=${fileId}): ` +
             `${infoResult.ok ? 'no downloadUrl' : infoResult.error}`);
         const fallback = await this.api.getFullFileContent(fileId);
         if (!fallback.ok)
@@ -381,19 +376,26 @@ class RemoteFsAdapter {
     async readFilesBatch(fileIds) {
         const out = new Map();
         const unique = [...new Set(fileIds.filter(Boolean))];
+        let failureCount = 0;
+        const failureSamples = [];
         const downloadOne = async (fileId) => {
             const r = await this.readFile(fileId);
             if (r.ok) {
                 out.set(fileId, r.value ?? '');
             }
             else {
-                console.warn(`[RemoteFs] Download failed fileId=${fileId}: ${r.error}`);
+                failureCount++;
+                if (failureSamples.length < 5)
+                    failureSamples.push(`${fileId}: ${r.error}`);
             }
         };
         for (let i = 0; i < unique.length; i += constants_1.DOWNLOAD_CONCURRENCY) {
             const chunk = unique.slice(i, i + constants_1.DOWNLOAD_CONCURRENCY);
             await Promise.all(chunk.map(downloadOne));
-            console.log(`[RemoteFs] Download progress: ${Math.min(i + constants_1.DOWNLOAD_CONCURRENCY, unique.length)}/${unique.length}`);
+        }
+        if (failureCount > 0) {
+            console.warn(`${this.logPrefix} batch download failed=${failureCount}/${unique.length}` +
+                ` samples=${JSON.stringify(failureSamples)}`);
         }
         return out;
     }
@@ -594,7 +596,6 @@ class RemoteFsAdapter {
                 errors: [...errors, `${relPath}: delete empty folder failed: ${deleteResult.error}`],
             };
         }
-        console.log(`[RemoteFs] Pruned empty remote folder: ${relPath} (${folderId})`);
         return { existsAfter: false, deleted: deleted + 1, failed, errors };
     }
     /**
@@ -602,8 +603,6 @@ class RemoteFsAdapter {
      * @param since Last successful sync watermark.
      */
     async listAllChanges(since) {
-        const sinceStr = new Date(since).toLocaleString('zh-CN');
-        console.log(`[RemoteFs] listChanges: since=${since} (${sinceStr}), rootId=${this.resolvedRootFileId}`);
         const allItems = [];
         let cursor;
         let serverTime;
@@ -621,14 +620,22 @@ class RemoteFsAdapter {
             if (!r.ok)
                 return { ok: false, error: r.error };
             const pageItems = r.value.items ?? [];
-            console.log(`[RemoteFs] listChanges page ${page}: ${pageItems.length} items, nextCursor=${r.value.nextCursor ?? 'null'}, serverTime=${r.value.serverTime ?? '-'}`);
             allItems.push(...pageItems);
             serverTime = r.value.serverTime ?? serverTime;
             cursor = r.value.nextCursor ?? undefined;
         } while (cursor);
-        const upsertCount = allItems.filter((i) => i.event !== 'delete').length;
-        const deleteCount = allItems.filter((i) => i.event === 'delete').length;
-        console.log(`[RemoteFs] listChanges done: ${allItems.length} items (upsert:${upsertCount} delete:${deleteCount}), serverTime=${serverTime}`);
+        let upsertCount = 0;
+        let deleteCount = 0;
+        for (const item of allItems) {
+            if (item.event === 'delete')
+                deleteCount++;
+            else
+                upsertCount++;
+        }
+        if (allItems.length > 0 || page > 1) {
+            console.log(`${this.logPrefix} listChanges done: items=${allItems.length}` +
+                ` upsert=${upsertCount} delete=${deleteCount} pages=${page} serverTime=${serverTime}`);
+        }
         return { ok: true, value: { items: allItems, serverTime } };
     }
     /**
@@ -638,25 +645,31 @@ class RemoteFsAdapter {
     async batchGetMetaAll(fileIds) {
         const out = new Map();
         const unique = [...new Set(fileIds.filter(Boolean))];
-        console.log(`[RemoteFs] batchGetMeta: ${unique.length} fileIds, ${Math.ceil(unique.length / constants_1.BATCH_GET_META_MAX)} batches`);
+        let failedBatches = 0;
+        let deletedTotal = 0;
         for (let i = 0; i < unique.length; i += constants_1.BATCH_GET_META_MAX) {
             const chunk = unique.slice(i, i + constants_1.BATCH_GET_META_MAX);
             const r = await this.api.batchGetMeta(chunk, this.resolvedProjectId);
             if (!r.ok) {
-                console.warn('[RemoteFs] batchGetMeta batch failed:', r.error);
+                failedBatches++;
+                if (failedBatches <= 3) {
+                    console.warn(`${this.logPrefix} batchGetMeta batch=${Math.floor(i / constants_1.BATCH_GET_META_MAX) + 1} failed: ${r.error}`);
+                }
                 continue;
             }
-            let deletedCount = 0;
             for (const item of r.value ?? []) {
                 out.set(String(item.fileId), item);
                 if (item.deleted)
-                    deletedCount++;
+                    deletedTotal++;
             }
-            console.log(`[RemoteFs] batchGetMeta batch[${Math.floor(i / constants_1.BATCH_GET_META_MAX) + 1}]: requested ${chunk.length}, hit ${r.value?.length ?? 0} (deleted:${deletedCount})`);
         }
         const missingCount = unique.length - out.size;
-        if (missingCount > 0) {
-            console.log(`[RemoteFs] batchGetMeta done: hit ${out.size}, missing ${missingCount}`);
+        if (unique.length >= constants_1.BATCH_GET_META_MAX || missingCount > 0 || failedBatches > 0) {
+            console.log(`${this.logPrefix} batchGetMeta done: requested=${unique.length} hit=${out.size}` +
+                ` missing=${missingCount} deleted=${deletedTotal} failedBatches=${failedBatches}`);
+        }
+        if (failedBatches > 3) {
+            console.warn(`${this.logPrefix} batchGetMeta 另有 ${failedBatches - 3} 个失败批次未逐条输出`);
         }
         return out;
     }

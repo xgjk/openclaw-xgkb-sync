@@ -16,6 +16,10 @@
   "downloadConcurrency": 5,
   "uploadConcurrency": 3,
   "maxFileSizeBytes": 104857600,
+  "_comment_massSyncProtection": "单轮计划严格超过阈值时，在传输前自动禁用对应 mapping；可在 mapping 内覆盖",
+  "massSyncProtectionEnabled": true,
+  "maxUploadFilesPerSync": 1000,
+  "maxDownloadFilesPerSync": 1000,
   "startupJitterMaxSec": 20,
 
   "managementPort": 9090,
@@ -64,7 +68,9 @@
       "remoteRootFileId": "11111",
       "remoteRootFolderPath": "OpenClaw/Research",
       "filePatterns": ["**/*.md"],
-      "excludePatterns": ["**/_conflict_*", "**/.tmp/**", "**/draft/**"]
+      "excludePatterns": ["**/_conflict_*", "**/.tmp/**", "**/draft/**", "**/vendor-audit/**"],
+      "maxUploadFilesPerSync": 5000,
+      "maxDownloadFilesPerSync": 5000
     },
     {
       "_comment": "指定空间 + 子目录：projectId + 路径，不填 remoteRootFileId（自动解析路径→ID）",

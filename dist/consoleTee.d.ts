@@ -8,7 +8,15 @@ export interface ConsoleTeeOptions {
     logFile?: string;
     baseName?: string;
     maxFileBytes?: number;
+    maxTotalBytes?: number;
 }
+export interface LogPruneResult {
+    deletedFiles: number;
+    deletedBytes: number;
+    remainingBytes: number;
+}
+/** 仅清理同一 baseName 的旧轮转分段；当前正在写入的文件始终保留。 */
+export declare function pruneOldLogSegments(logDir: string, baseName: string, maxTotalBytes: number, protectedPath?: string): LogPruneResult;
 /**
  * 将 console.log / warn / error 同时追加写入日志文件（UTF-8，带时间戳）。
  * 按自然日切割；单日单文件超过 maxFileBytes 时递增段号（.1、.2…）。

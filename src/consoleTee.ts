@@ -5,6 +5,7 @@ import {
   DEFAULT_LOG_BASE_NAME,
   DEFAULT_LOG_DIR,
   MAX_LOG_FILE_BYTES,
+  MAX_LOG_TOTAL_BYTES,
 } from './constants';
 
 export interface ConsoleTeeOptions {
@@ -17,6 +18,7 @@ export interface ConsoleTeeOptions {
   logFile?: string;
   baseName?: string;
   maxFileBytes?: number;
+  maxTotalBytes?: number;
 }
 
 function formatLogDate(d = new Date()): string {
@@ -51,8 +53,10 @@ function resolveTeeTarget(opts: ConsoleTeeOptions): {
   logDir: string;
   baseName: string;
   maxFileBytes: number;
+  maxTotalBytes: number;
 } {
   const maxFileBytes = opts.maxFileBytes ?? MAX_LOG_FILE_BYTES;
+  const maxTotalBytes = opts.maxTotalBytes ?? MAX_LOG_TOTAL_BYTES;
 
   if (opts.logFile?.trim()) {
     const abs = path.resolve(opts.logFile.trim());
@@ -63,6 +67,7 @@ function resolveTeeTarget(opts: ConsoleTeeOptions): {
         logDir: path.dirname(abs),
         baseName: parsed.baseName,
         maxFileBytes,
+        maxTotalBytes,
       };
     }
     const base = path.basename(abs, '.log');
@@ -70,6 +75,7 @@ function resolveTeeTarget(opts: ConsoleTeeOptions): {
       logDir: path.dirname(abs),
       baseName: base || DEFAULT_LOG_BASE_NAME,
       maxFileBytes,
+      maxTotalBytes,
     };
   }
 
@@ -77,7 +83,66 @@ function resolveTeeTarget(opts: ConsoleTeeOptions): {
     logDir: path.resolve(opts.logDir?.trim() || DEFAULT_LOG_DIR),
     baseName: opts.baseName?.trim() || DEFAULT_LOG_BASE_NAME,
     maxFileBytes,
+    maxTotalBytes,
   };
+}
+
+export interface LogPruneResult {
+  deletedFiles: number;
+  deletedBytes: number;
+  remainingBytes: number;
+}
+
+/** 仅清理同一 baseName 的旧轮转分段；当前正在写入的文件始终保留。 */
+export function pruneOldLogSegments(
+  logDir: string,
+  baseName: string,
+  maxTotalBytes: number,
+  protectedPath?: string,
+): LogPruneResult {
+  const protectedAbs = protectedPath ? path.resolve(protectedPath) : undefined;
+  const files: Array<{ absPath: string; date: string; segment: number; size: number }> = [];
+  let entries: fs.Dirent[] = [];
+  try {
+    entries = fs.readdirSync(logDir, { withFileTypes: true });
+  } catch {
+    return { deletedFiles: 0, deletedBytes: 0, remainingBytes: 0 };
+  }
+
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    const parsed = parseLogFileName(entry.name);
+    if (!parsed || parsed.baseName !== baseName) continue;
+    const absPath = path.resolve(logDir, entry.name);
+    try {
+      files.push({
+        absPath,
+        date: parsed.date,
+        segment: parsed.segment,
+        size: fs.statSync(absPath).size,
+      });
+    } catch {
+      // 文件可能正被外部轮转或删除，忽略。
+    }
+  }
+
+  files.sort((a, b) => a.date.localeCompare(b.date) || a.segment - b.segment);
+  let remainingBytes = files.reduce((sum, file) => sum + file.size, 0);
+  let deletedFiles = 0;
+  let deletedBytes = 0;
+  for (const file of files) {
+    if (remainingBytes <= maxTotalBytes) break;
+    if (file.absPath === protectedAbs) continue;
+    try {
+      fs.unlinkSync(file.absPath);
+      remainingBytes -= file.size;
+      deletedBytes += file.size;
+      deletedFiles++;
+    } catch {
+      // 日志清理失败不影响同步主流程。
+    }
+  }
+  return { deletedFiles, deletedBytes, remainingBytes };
 }
 
 /** 选择今日可追加的日志段：未满的最后一段，或新建下一段。 */
@@ -130,6 +195,7 @@ class RotatingLogWriter {
   private readonly logDir: string;
   private readonly baseName: string;
   private readonly maxFileBytes: number;
+  private readonly maxTotalBytes: number;
   private currentDate: string;
   private currentSegment: number;
   private currentPath: string;
@@ -142,10 +208,11 @@ class RotatingLogWriter {
   private rotating = false;
   private droppedLines = 0;
 
-  constructor(logDir: string, baseName: string, maxFileBytes: number) {
+  constructor(logDir: string, baseName: string, maxFileBytes: number, maxTotalBytes: number) {
     this.logDir = logDir;
     this.baseName = baseName;
     this.maxFileBytes = maxFileBytes;
+    this.maxTotalBytes = maxTotalBytes;
     this.currentDate = formatLogDate();
 
     fs.mkdirSync(this.logDir, { recursive: true });
@@ -160,6 +227,7 @@ class RotatingLogWriter {
     this.currentPath = initial.absPath;
     this.bytesInFile = initial.bytesInFile;
     this.stream = this.createStream(this.currentPath);
+    this.pruneOldSegments();
   }
 
   getCurrentPath(): string {
@@ -237,9 +305,25 @@ class RotatingLogWriter {
       );
       this.bytesInFile = 0;
       this.stream = this.createStream(this.currentPath);
+      this.pruneOldSegments();
       this.rotating = false;
       this.pump();
     });
+  }
+
+  private pruneOldSegments(): void {
+    const result = pruneOldLogSegments(
+      this.logDir,
+      this.baseName,
+      this.maxTotalBytes,
+      this.currentPath,
+    );
+    if (result.deletedFiles > 0) {
+      process.stderr.write(
+        `[ConsoleTee] 日志保留上限清理：删除 ${result.deletedFiles} 个旧分段，` +
+          `${Math.round(result.deletedBytes / (1024 * 1024))} MiB\n`,
+      );
+    }
   }
 
   private createStream(filePath: string): fs.WriteStream {
@@ -259,8 +343,8 @@ class RotatingLogWriter {
 export function installConsoleTee(opts: ConsoleTeeOptions | string): void {
   const options: ConsoleTeeOptions =
     typeof opts === 'string' ? { logFile: opts } : opts;
-  const { logDir, baseName, maxFileBytes } = resolveTeeTarget(options);
-  const writer = new RotatingLogWriter(logDir, baseName, maxFileBytes);
+  const { logDir, baseName, maxFileBytes, maxTotalBytes } = resolveTeeTarget(options);
+  const writer = new RotatingLogWriter(logDir, baseName, maxFileBytes, maxTotalBytes);
 
   const origLog = console.log.bind(console);
   const origWarn = console.warn.bind(console);
@@ -286,7 +370,8 @@ export function installConsoleTee(opts: ConsoleTeeOptions | string): void {
 
   const maxMb = Math.round(maxFileBytes / (1024 * 1024));
   origLog(
-    `[OpenClaw Sync] 日志已双写: ${writer.getCurrentPath()}（按日切割，单文件 ≤${maxMb}MB）`,
+    `[OpenClaw Sync] 日志已双写: ${writer.getCurrentPath()}（按日切割，单文件 ≤${maxMb}MB，` +
+      `总量 ≤${Math.round(maxTotalBytes / (1024 * 1024))}MB）`,
   );
   writer.write(
     `[${new Date().toISOString()}] [INFO] [OpenClaw Sync] 日志目录=${logDir} base=${baseName} maxFileBytes=${maxFileBytes}\n`,

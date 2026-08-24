@@ -339,9 +339,13 @@ class SyncStateDb {
         return rows.length > 0 ? rowToFolderState(rows[0]) : undefined;
     }
     upsertFolderState(state) {
-        this.db.run(`INSERT OR REPLACE INTO sync_folder_state
+        this.db.run(`INSERT INTO sync_folder_state
          (mapping_id, local_path, remote_folder_id, local_dev, local_ino)
-       VALUES (?, ?, ?, ?, ?)`, [
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(mapping_id, local_path) DO UPDATE SET
+         remote_folder_id = excluded.remote_folder_id,
+         local_dev = COALESCE(excluded.local_dev, sync_folder_state.local_dev),
+         local_ino = COALESCE(excluded.local_ino, sync_folder_state.local_ino)`, [
             state.mappingId,
             state.localPath,
             state.remoteFolderId,

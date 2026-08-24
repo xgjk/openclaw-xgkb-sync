@@ -4,6 +4,7 @@ import chokidar, { FSWatcher } from 'chokidar';
 import {
   FILE_INDEX_NAME,
   MAX_NATIVE_RECURSIVE_WATCH_ROOTS,
+  MAX_PENDING_WATCH_PATHS,
   WATCH_AWAIT_WRITE_POLL_MS,
   WATCH_AWAIT_WRITE_STABILITY_MS,
   WATCH_PULL_IGNORE_TAIL_MS,
@@ -237,6 +238,7 @@ export class FileWatcher {
   private readonly ignoreSet = new Set<string>();
   private watcher: FSWatcher | null = null;
   private pendingPaths = new Set<string>();
+  private pendingPathOverflowCount = 0;
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
   private ignoreTailTimer: ReturnType<typeof setTimeout> | null = null;
   private paused = false;
@@ -311,6 +313,7 @@ export class FileWatcher {
     }
     this.ignoreSet.clear();
     this.pendingPaths.clear();
+    this.pendingPathOverflowCount = 0;
     if (this.sharedBackend) {
       this.sharedBackend.unregister(this.opts.mappingId);
       return;
@@ -386,7 +389,7 @@ export class FileWatcher {
   handleSharedUnknownFsEvent(watchedRoot: string): void {
     if (!this.started || this.paused) return;
     if (!isPathWithin(this.getResolvedRoot(), watchedRoot)) return;
-    this.pendingPaths.add('[unknown-native-event]');
+    this.recordPendingPath('[unknown-native-event]');
     this.scheduleDebounce();
   }
 
@@ -419,8 +422,23 @@ export class FileWatcher {
         : !isInSyncScope(rel, this.opts.scope, kind)
     ) return;
 
-    this.pendingPaths.add(rel);
+    this.recordPendingPath(rel);
     this.scheduleDebounce();
+  }
+
+  private recordPendingPath(relativePath: string): void {
+    if (this.pendingPaths.has(relativePath)) return;
+    if (this.pendingPaths.size < MAX_PENDING_WATCH_PATHS) {
+      this.pendingPaths.add(relativePath);
+      return;
+    }
+    this.pendingPathOverflowCount++;
+    if (this.pendingPathOverflowCount === 1) {
+      console.warn(
+        `[FileWatcher][${this.opts.mappingId}] debounce 路径超过 ${MAX_PENDING_WATCH_PATHS}，` +
+          `后续仅累计数量，不再保留路径字符串`,
+      );
+    }
   }
 
   private scheduleDebounce(): void {
@@ -428,8 +446,9 @@ export class FileWatcher {
     this.debounceTimer = setTimeout(() => {
       this.debounceTimer = null;
       if (this.paused || this.pendingPaths.size === 0) return;
-      const count = this.pendingPaths.size;
+      const count = this.pendingPaths.size + this.pendingPathOverflowCount;
       this.pendingPaths.clear();
+      this.pendingPathOverflowCount = 0;
       this.opts.onBatchReady(count);
     }, this.opts.debounceMs);
   }
@@ -440,6 +459,7 @@ export class FileWatcher {
       this.debounceTimer = null;
     }
     this.pendingPaths.clear();
+    this.pendingPathOverflowCount = 0;
   }
 
   private toRelativePath(absPath: string, root: string): string | null {

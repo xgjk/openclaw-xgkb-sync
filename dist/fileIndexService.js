@@ -54,7 +54,6 @@ class FileIndexService {
             const readResult = await this.remoteFs.readFile(remoteId);
             if (readResult.ok) {
                 await this.localFs.writeFile(constants_1.FILE_INDEX_NAME, readResult.value);
-                this.log(`consume ok → local ${constants_1.FILE_INDEX_NAME} (${readResult.value.length} bytes)`);
                 this.syncIndexHashFromRemote(readResult.value);
                 return;
             }
@@ -72,7 +71,6 @@ class FileIndexService {
         const contentHash = hashFilesMapping(files);
         const mappingState = this.db.getMappingState(this.mapping.mappingId);
         if (mappingState?.indexContentHash === contentHash) {
-            this.log('publish skipped: index content unchanged');
             return;
         }
         if (!mappingState?.indexContentHash) {
@@ -123,7 +121,6 @@ class FileIndexService {
                 mappingId: this.mapping.mappingId,
                 indexContentHash: localHash,
             });
-            this.log(`consume synced index hash (${Object.keys(doc.files).length} files)`);
         }
         catch {
             // 远端索引格式异常时不阻断主 sync

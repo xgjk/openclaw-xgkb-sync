@@ -13,7 +13,10 @@ import {
   DEFAULT_FULL_RECONCILE_INTERVAL_SEC,
   DEFAULT_MANAGEMENT_HOST,
   DEFAULT_MANAGEMENT_PORT,
+  DEFAULT_MASS_SYNC_PROTECTION_ENABLED,
+  DEFAULT_MAX_DOWNLOAD_FILES_PER_SYNC,
   DEFAULT_MAX_FILE_SIZE_BYTES,
+  DEFAULT_MAX_UPLOAD_FILES_PER_SYNC,
   DEFAULT_MAX_CONCURRENT_MAPPINGS,
   DEFAULT_MAX_REQUESTS_PER_MINUTE,
   DEFAULT_RATE_LIMIT_BURST,
@@ -26,6 +29,7 @@ import {
   MAX_CONCURRENT_MAPPINGS_LIMIT,
   MAX_DOWNLOAD_CONCURRENCY,
   MAX_FILE_SIZE_BYTES_LIMIT,
+  MAX_FILES_PER_SYNC_LIMIT,
   MAX_RATE_LIMIT_BURST,
   MAX_REQUESTS_PER_MINUTE_LIMIT,
   MAX_UPLOAD_CONCURRENCY,
@@ -82,6 +86,9 @@ export function getDefaultConfigRaw(): Record<string, unknown> {
     downloadConcurrency: DOWNLOAD_CONCURRENCY,
     uploadConcurrency: UPLOAD_CONCURRENCY,
     maxFileSizeBytes: DEFAULT_MAX_FILE_SIZE_BYTES,
+    massSyncProtectionEnabled: DEFAULT_MASS_SYNC_PROTECTION_ENABLED,
+    maxUploadFilesPerSync: DEFAULT_MAX_UPLOAD_FILES_PER_SYNC,
+    maxDownloadFilesPerSync: DEFAULT_MAX_DOWNLOAD_FILES_PER_SYNC,
     startupJitterMaxSec: STARTUP_JITTER_MAX_MS / 1000,
     managementPort: DEFAULT_MANAGEMENT_PORT,
     managementHost: DEFAULT_MANAGEMENT_HOST,
@@ -112,6 +119,9 @@ export function configToRaw(config: SyncConfig): Record<string, unknown> {
     downloadConcurrency: config.downloadConcurrency,
     uploadConcurrency: config.uploadConcurrency,
     maxFileSizeBytes: config.maxFileSizeBytes,
+    massSyncProtectionEnabled: config.massSyncProtectionEnabled,
+    maxUploadFilesPerSync: config.maxUploadFilesPerSync,
+    maxDownloadFilesPerSync: config.maxDownloadFilesPerSync,
     startupJitterMaxSec: config.startupJitterMaxSec,
     managementPort: config.managementPort,
     managementHost: config.managementHost,
@@ -546,6 +556,24 @@ function validateConfig(
         MAX_FILE_SIZE_BYTES_LIMIT,
         'maxFileSizeBytes',
       ),
+    massSyncProtectionEnabled:
+      typeof obj.massSyncProtectionEnabled === 'boolean'
+        ? obj.massSyncProtectionEnabled
+        : DEFAULT_MASS_SYNC_PROTECTION_ENABLED,
+    maxUploadFilesPerSync:
+      boundedPositiveInteger(
+        obj.maxUploadFilesPerSync,
+        DEFAULT_MAX_UPLOAD_FILES_PER_SYNC,
+        MAX_FILES_PER_SYNC_LIMIT,
+        'maxUploadFilesPerSync',
+      ),
+    maxDownloadFilesPerSync:
+      boundedPositiveInteger(
+        obj.maxDownloadFilesPerSync,
+        DEFAULT_MAX_DOWNLOAD_FILES_PER_SYNC,
+        MAX_FILES_PER_SYNC_LIMIT,
+        'maxDownloadFilesPerSync',
+      ),
     startupJitterMaxSec:
       typeof obj.startupJitterMaxSec === 'number'
         ? obj.startupJitterMaxSec
@@ -664,6 +692,20 @@ export function validateMapping(raw: unknown, idx: number, filePath: string): Sy
   if (m.syncDotFiles !== undefined && typeof m.syncDotFiles !== 'boolean') {
     throw new Error(`${loc}.syncDotFiles 必须是 boolean: ${filePath}`);
   }
+  if (
+    m.massSyncProtectionEnabled !== undefined &&
+    typeof m.massSyncProtectionEnabled !== 'boolean'
+  ) {
+    throw new Error(`${loc}.massSyncProtectionEnabled 必须是 boolean: ${filePath}`);
+  }
+
+  const parseMappingLimit = (value: unknown, field: string): number | undefined => {
+    if (value === undefined) return undefined;
+    if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+      throw new Error(`${loc}.${field} 必须是正数: ${filePath}`);
+    }
+    return Math.min(Math.floor(value), MAX_FILES_PER_SYNC_LIMIT);
+  };
 
   return {
     mappingId: m.mappingId as string,
@@ -683,6 +725,15 @@ export function validateMapping(raw: unknown, idx: number, filePath: string): Sy
     pushDebounceMs: typeof m.pushDebounceMs === 'number' ? m.pushDebounceMs : undefined,
     watchUsePolling: typeof m.watchUsePolling === 'boolean' ? m.watchUsePolling : undefined,
     syncDotFiles: typeof m.syncDotFiles === 'boolean' ? m.syncDotFiles : undefined,
+    massSyncProtectionEnabled:
+      typeof m.massSyncProtectionEnabled === 'boolean'
+        ? m.massSyncProtectionEnabled
+        : undefined,
+    maxUploadFilesPerSync: parseMappingLimit(m.maxUploadFilesPerSync, 'maxUploadFilesPerSync'),
+    maxDownloadFilesPerSync: parseMappingLimit(
+      m.maxDownloadFilesPerSync,
+      'maxDownloadFilesPerSync',
+    ),
   };
 }
 

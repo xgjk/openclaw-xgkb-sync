@@ -224,6 +224,7 @@ class FileWatcher {
     ignoreSet = new Set();
     watcher = null;
     pendingPaths = new Set();
+    pendingPathOverflowCount = 0;
     debounceTimer = null;
     ignoreTailTimer = null;
     paused = false;
@@ -282,6 +283,7 @@ class FileWatcher {
         }
         this.ignoreSet.clear();
         this.pendingPaths.clear();
+        this.pendingPathOverflowCount = 0;
         if (this.sharedBackend) {
             this.sharedBackend.unregister(this.opts.mappingId);
             return;
@@ -356,7 +358,7 @@ class FileWatcher {
             return;
         if (!isPathWithin(this.getResolvedRoot(), watchedRoot))
             return;
-        this.pendingPaths.add('[unknown-native-event]');
+        this.recordPendingPath('[unknown-native-event]');
         this.scheduleDebounce();
     }
     /** backend 的 ignored 回调：不属于本 mapping 时视为 ignore；属于时应用 mapping scope。 */
@@ -384,8 +386,21 @@ class FileWatcher {
                 !(0, pathSyncScope_1.isInSyncScope)(rel, this.opts.scope, 'directory')
             : !(0, pathSyncScope_1.isInSyncScope)(rel, this.opts.scope, kind))
             return;
-        this.pendingPaths.add(rel);
+        this.recordPendingPath(rel);
         this.scheduleDebounce();
+    }
+    recordPendingPath(relativePath) {
+        if (this.pendingPaths.has(relativePath))
+            return;
+        if (this.pendingPaths.size < constants_1.MAX_PENDING_WATCH_PATHS) {
+            this.pendingPaths.add(relativePath);
+            return;
+        }
+        this.pendingPathOverflowCount++;
+        if (this.pendingPathOverflowCount === 1) {
+            console.warn(`[FileWatcher][${this.opts.mappingId}] debounce 路径超过 ${constants_1.MAX_PENDING_WATCH_PATHS}，` +
+                `后续仅累计数量，不再保留路径字符串`);
+        }
     }
     scheduleDebounce() {
         if (this.debounceTimer)
@@ -394,8 +409,9 @@ class FileWatcher {
             this.debounceTimer = null;
             if (this.paused || this.pendingPaths.size === 0)
                 return;
-            const count = this.pendingPaths.size;
+            const count = this.pendingPaths.size + this.pendingPathOverflowCount;
             this.pendingPaths.clear();
+            this.pendingPathOverflowCount = 0;
             this.opts.onBatchReady(count);
         }, this.opts.debounceMs);
     }
@@ -405,6 +421,7 @@ class FileWatcher {
             this.debounceTimer = null;
         }
         this.pendingPaths.clear();
+        this.pendingPathOverflowCount = 0;
     }
     toRelativePath(absPath, root) {
         const rel = path.relative(root, absPath);

@@ -10,8 +10,11 @@ import { SyncConfig, SyncMapping, MappingSyncRunResult, SyncStats, SyncTriggerRe
 import {
   DEFAULT_DB_PATH,
   DEFAULT_FULL_RECONCILE_INTERVAL_SEC,
+  DEFAULT_MASS_SYNC_PROTECTION_ENABLED,
   DEFAULT_MAX_CONCURRENT_MAPPINGS,
+  DEFAULT_MAX_DOWNLOAD_FILES_PER_SYNC,
   DEFAULT_MAX_REQUESTS_PER_MINUTE,
+  DEFAULT_MAX_UPLOAD_FILES_PER_SYNC,
   DEFAULT_RATE_LIMIT_BURST,
   DOWNLOAD_CONCURRENCY,
   MAX_CONCURRENT_MAPPINGS_LIMIT,
@@ -35,6 +38,7 @@ import {
   classifyPermanentSyncFailure,
   permanentCircuitDelayMs,
 } from './syncErrorPolicy';
+import { isMassSyncProtectionError } from './syncSafety';
 
 let schedulerInstanceSeq = 0;
 
@@ -55,6 +59,7 @@ interface DoSyncResult {
   errorMsg?: string;
   /** localRoot 从有到无：已挂起，待写 config 禁用 mapping */
   shouldDisableMapping?: boolean;
+  disableCause?: 'missing-local-root' | 'mass-sync-protection';
   /** 明确的鉴权/权限/参数类远端错误，触发 mapping 级熔断。 */
   permanentError?: string;
 }
@@ -69,8 +74,14 @@ interface MappingCircuitBreaker {
 
 export interface SyncSchedulerOptions {
   onMappingSyncFinished?: (result: MappingSyncRunResult) => void;
-  /** localRoot 被删且曾有同步历史：写 config 禁用并触发热重载 */
-  onMissingLocalRootDisable?: (mappingId: string, detail: string) => Promise<void>;
+  /** 安全保护触发后写 config 禁用 mapping，并触发热重载。 */
+  onMappingAutoDisable?: (
+    mappingId: string,
+    detail: string,
+    cause: 'missing-local-root' | 'mass-sync-protection',
+  ) => Promise<void>;
+  /** 仅用于测试或特殊部署；生产默认 5 分钟。 */
+  stopDrainTimeoutMs?: number;
 }
 
 export function resolveMaxConcurrentMappings(config: SyncConfig): number {
@@ -123,19 +134,22 @@ export class SyncScheduler {
   private running = false;
   private dbClosed = false;
   private readonly onMappingSyncFinished?: (result: MappingSyncRunResult) => void;
-  private readonly onMissingLocalRootDisable?: (
+  private readonly onMappingAutoDisable?: (
     mappingId: string,
     detail: string,
+    cause: 'missing-local-root' | 'mass-sync-protection',
   ) => Promise<void>;
+  private readonly stopDrainTimeoutMs: number;
   /** localRoot 缺失后即时挂起，阻止 timer/watch 继续触发（热重载前） */
   private readonly suspendedMappingIds = new Set<string>();
-  private readonly missingRootDisableInFlight = new Set<string>();
+  private readonly autoDisableInFlight = new Set<string>();
   private readonly circuitBreakers = new Map<string, MappingCircuitBreaker>();
 
   constructor(config: SyncConfig, opts?: SyncSchedulerOptions) {
     this.config = config;
     this.onMappingSyncFinished = opts?.onMappingSyncFinished;
-    this.onMissingLocalRootDisable = opts?.onMissingLocalRootDisable;
+    this.onMappingAutoDisable = opts?.onMappingAutoDisable;
+    this.stopDrainTimeoutMs = opts?.stopDrainTimeoutMs ?? STOP_DRAIN_TIMEOUT_MS;
     this.maxGlobalRunningSyncs = resolveMaxConcurrentMappings(config);
     const dbPath = config.stateDbPath ?? DEFAULT_DB_PATH;
     this.db = new SyncStateDb(dbPath);
@@ -211,6 +225,10 @@ export class SyncScheduler {
       this.triggerAll('启动后初始同步', 'startup');
     }
 
+    this.registerIntervalTimer();
+  }
+
+  private registerIntervalTimer(): void {
     const intervalSec = this.config.autoSyncIntervalSec;
     if (intervalSec > 0) {
       const timer = setInterval(() => {
@@ -225,7 +243,7 @@ export class SyncScheduler {
    * 停止调度器：取消未执行的延迟任务，等待进行中的 sync 结束，再关闭 DB。
    * @returns true 表示已安全停止并关闭 DB；false 表示仍有同步未完成（未关 DB，避免 Database already closed）
    */
-  async stop(): Promise<boolean> {
+  async stop(opts?: { resumeOnTimeout?: boolean }): Promise<boolean> {
     if (this.dbClosed) return true;
 
     console.log(`[Scheduler] 实例#${this.instanceId} 正在停止...`);
@@ -236,16 +254,28 @@ export class SyncScheduler {
 
     if (this.activeSyncCount > 0) {
       console.log(
-        `[Scheduler] 等待 ${this.activeSyncCount} 个进行中的同步结束（最多 ${STOP_DRAIN_TIMEOUT_MS / 1000}s）...`,
+        `[Scheduler] 等待 ${this.activeSyncCount} 个进行中的同步结束（最多 ${this.stopDrainTimeoutMs / 1000}s）...`,
       );
       try {
-        await this.waitForActiveSyncs(STOP_DRAIN_TIMEOUT_MS);
+        await this.waitForActiveSyncs(this.stopDrainTimeoutMs);
       } catch (e) {
         console.warn(
           '[Scheduler] 等待同步结束超时:',
           e instanceof Error ? e.message : String(e),
         );
       }
+    }
+
+    if (this.activeSyncCount > 0 && opts?.resumeOnTimeout) {
+      // reload 失败必须回滚为“旧 scheduler 继续服务”；watcher 此时尚未停止。
+      this.running = true;
+      this.registerIntervalTimer();
+      console.error(
+        `[Scheduler] 实例#${this.instanceId} 停止超时，已恢复旧调度器的定时与 watcher 调度，` +
+          `避免热重载失败后永久停止同步`,
+      );
+      this.triggerAll('热重载超时后恢复旧调度器', 'timer');
+      return false;
     }
 
     await this.stopWatchers();
@@ -317,9 +347,6 @@ export class SyncScheduler {
       runState.pendingSync = false;
       const reason = runState.pendingReason ?? 'manual';
       runState.pendingReason = undefined;
-      console.log(
-        `[Scheduler][${mappingId}] 全局限流空位，开始排队中的同步 (${formatSyncTriggerReason(reason)})`,
-      );
       this.scheduleMapping(mapping, reason);
       return;
     }
@@ -328,6 +355,10 @@ export class SyncScheduler {
   /** 供探针判断负载：全局并行同步数 / 上限 */
   getGlobalSyncPressure(): { running: number; max: number } {
     return { running: this.globalRunningSyncs, max: this.maxGlobalRunningSyncs };
+  }
+
+  getLifecycleStatus(): { running: boolean; dbClosed: boolean } {
+    return { running: this.running, dbClosed: this.dbClosed };
   }
 
   getWatcherPressure(): {
@@ -401,10 +432,7 @@ export class SyncScheduler {
         scope,
         debounceMs: resolvePushDebounceMs(mapping, this.config),
         usePolling,
-        onBatchReady: (pathCount) => {
-          console.log(
-            `[FileWatcher][${mapping.mappingId}] batch ${pathCount} path(s) → trigger sync`,
-          );
+        onBatchReady: () => {
           this.scheduleMapping(mapping, 'watch');
         },
       }, backend);
@@ -452,21 +480,10 @@ export class SyncScheduler {
     );
     console.log(`[Scheduler] 触发全部同步（${reason}），共 ${enabledMappings.length} 条`);
 
-    const maxConcurrent = resolveMaxConcurrentMappings(this.config);
-
-    // 按并发度批次触发
-    let queued = 0;
+    // 立即登记到有界的 per-mapping pending 状态；真正启动受 globalRunningSyncs 限制。
+    // 不再为数百个 mapping 创建逐个 setTimeout，避免热重载时残留大量延迟任务。
     for (const mapping of enabledMappings) {
-      queued++;
-      if (queued <= maxConcurrent) {
-        this.scheduleMapping(mapping, trigger);
-      } else {
-        // 超出并发限制的，稍后触发
-        this.scheduleDelayed(
-          () => this.scheduleMapping(mapping, trigger),
-          (queued - maxConcurrent) * 500,
-        );
-      }
+      this.scheduleMapping(mapping, trigger);
     }
   }
 
@@ -492,24 +509,30 @@ export class SyncScheduler {
     }
 
     if (state.isSyncing) {
+      const wasPending = state.pendingSync;
       state.pendingSync = true;
       if (reason === 'watch' || state.pendingReason !== 'watch') {
         state.pendingReason = reason;
       }
-      console.log(
-        `[Scheduler][${mapping.mappingId}] 已在同步中，标记为待执行 (${formatSyncTriggerReason(reason)})`,
-      );
+      if (!wasPending) {
+        console.log(
+          `[Scheduler][${mapping.mappingId}] 同步中收到新触发，已合并为下一轮 (${formatSyncTriggerReason(reason)})`,
+        );
+      }
       return;
     }
 
     if (this.globalRunningSyncs >= this.maxGlobalRunningSyncs) {
+      const wasPending = state.pendingSync;
       state.pendingSync = true;
       if (reason === 'watch' || state.pendingReason !== 'watch') {
         state.pendingReason = reason;
       }
-      console.log(
-        `[Scheduler][${mapping.mappingId}] 全局限流 (${this.globalRunningSyncs}/${this.maxGlobalRunningSyncs})，排队 (${formatSyncTriggerReason(reason)})`,
-      );
+      if (!wasPending) {
+        console.log(
+          `[Scheduler][${mapping.mappingId}] 全局限流 ${this.globalRunningSyncs}/${this.maxGlobalRunningSyncs}，已排队 (${formatSyncTriggerReason(reason)})`,
+        );
+      }
       return;
     }
 
@@ -541,10 +564,12 @@ export class SyncScheduler {
     const startTime = Date.now();
     let syncResult: DoSyncResult = { pullTouchPaths: [] };
     let shouldDisableMapping = false;
+    let disableCause: DoSyncResult['disableCause'];
     let circuitTripped = false;
     try {
       syncResult = await this.doSync(mapping, reason);
       shouldDisableMapping = syncResult.shouldDisableMapping === true;
+      disableCause = syncResult.disableCause;
       if (syncResult.permanentError) {
         this.tripCircuit(mapping.mappingId, syncResult.permanentError);
         circuitTripped = true;
@@ -568,6 +593,15 @@ export class SyncScheduler {
       if (!errorMsg && stats && stats.failed > 0) {
         errorMsg = stats.errors.slice(0, 3).join('; ');
       }
+      console.log(
+        `[Scheduler][${mapping.mappingId}] END status=${errorMsg ? 'failed' : 'ok'}` +
+          ` durationMs=${endTime - startTime}` +
+          ` upload=${stats?.uploaded ?? 0} download=${stats?.downloaded ?? 0}` +
+          ` delete=${stats?.deleted ?? 0} rename=${stats?.renamed ?? 0} move=${stats?.moved ?? 0}` +
+          ` skip=${stats?.skipped ?? 0} failed=${stats?.failed ?? 0}` +
+          ` scan=${stats ? (stats.fullScan ? 'full' : 'incremental') : 'unknown'}` +
+          ` watermark=${stats?.newSince ?? '-'}`,
+      );
       this.onMappingSyncFinished?.({
         mappingId: mapping.mappingId,
         triggerReason: reason,
@@ -593,9 +627,6 @@ export class SyncScheduler {
         const pendingReason = state.pendingReason ?? 'manual';
         state.pendingSync = false;
         state.pendingReason = undefined;
-        console.log(
-          `[Scheduler][${mapping.mappingId}] 执行待挂起的同步 (${formatSyncTriggerReason(pendingReason)})`,
-        );
         this.scheduleDelayed(() => this.scheduleMapping(mapping, pendingReason), 0);
       } else if (state.pendingSync || shouldDisableMapping || circuitTripped) {
         state.pendingSync = false;
@@ -604,9 +635,10 @@ export class SyncScheduler {
     }
 
     if (shouldDisableMapping) {
-      await this.disableMappingForMissingLocalRoot(
+      await this.disableMappingAfterSafetyStop(
         mapping.mappingId,
-        syncResult.errorMsg ?? 'localRoot 缺失',
+        syncResult.errorMsg ?? '安全保护触发',
+        disableCause ?? 'missing-local-root',
       );
     }
   }
@@ -614,7 +646,7 @@ export class SyncScheduler {
   /**
    * localRoot 从有到无：即时挂起（停 watch、清排队），随后写 config 禁用 mapping。
    */
-  private suspendMappingForMissingLocalRoot(mappingId: string): void {
+  private suspendMapping(mappingId: string, reason: string): void {
     if (this.suspendedMappingIds.has(mappingId)) return;
     this.suspendedMappingIds.add(mappingId);
 
@@ -630,30 +662,31 @@ export class SyncScheduler {
       this.watchers.delete(mappingId);
     }
 
-    console.warn(`[Scheduler][${mappingId}] 已挂起同步（localRoot 缺失）`);
+    console.warn(`[Scheduler][${mappingId}] 已挂起同步（${reason}）`);
   }
 
-  private async disableMappingForMissingLocalRoot(
+  private async disableMappingAfterSafetyStop(
     mappingId: string,
     detail: string,
+    cause: 'missing-local-root' | 'mass-sync-protection',
   ): Promise<void> {
-    if (!this.onMissingLocalRootDisable) {
+    if (!this.onMappingAutoDisable) {
       console.warn(
-        `[Scheduler][${mappingId}] localRoot 缺失但未配置 onMissingLocalRootDisable，仅保持挂起`,
+        `[Scheduler][${mappingId}] ${cause} 但未配置 onMappingAutoDisable，仅保持挂起`,
       );
       return;
     }
-    if (this.missingRootDisableInFlight.has(mappingId)) return;
-    this.missingRootDisableInFlight.add(mappingId);
+    if (this.autoDisableInFlight.has(mappingId)) return;
+    this.autoDisableInFlight.add(mappingId);
     try {
-      await this.onMissingLocalRootDisable(mappingId, detail);
+      await this.onMappingAutoDisable(mappingId, detail, cause);
     } catch (e) {
       console.error(
         `[Scheduler][${mappingId}] 自动禁用 mapping 失败:`,
         e instanceof Error ? e.message : String(e),
       );
     } finally {
-      this.missingRootDisableInFlight.delete(mappingId);
+      this.autoDisableInFlight.delete(mappingId);
     }
   }
 
@@ -663,10 +696,10 @@ export class SyncScheduler {
     }
 
     console.log(
-      `[Scheduler][${mapping.mappingId}] ===== 开始同步 (${formatSyncTriggerReason(reason)}) =====`,
+      `[Scheduler][${mapping.mappingId}] START trigger=${formatSyncTriggerReason(reason)}` +
+        ` direction=${mapping.syncDirection ?? this.config.syncDirection ?? 'bidirectional'}` +
+        ` localRoot="${mapping.localRoot}" projectId=${mapping.projectId ?? '-'} rootFileId=${mapping.remoteRootFileId ?? '-'}`,
     );
-    console.log(`  localRoot: ${mapping.localRoot}`);
-    console.log(`  projectId: ${mapping.projectId}  remoteRootFileId: ${mapping.remoteRootFileId}`);
 
     const mappingState = this.db.getMappingState(mapping.mappingId);
     const fileRecordCount = this.db.countFileStates(mapping.mappingId);
@@ -677,7 +710,7 @@ export class SyncScheduler {
         rootCheck.reason === 'missing' &&
         hasMappingSyncHistory(mappingState, fileRecordCount)
       ) {
-        this.suspendMappingForMissingLocalRoot(mapping.mappingId);
+        this.suspendMapping(mapping.mappingId, 'localRoot 缺失');
         const msg =
           `${rootCheck.detail}；localRoot 从有到无，已挂起同步并将自动禁用 mapping`;
         console.error(`[Scheduler][${mapping.mappingId}] ${msg}`);
@@ -685,7 +718,12 @@ export class SyncScheduler {
           mappingId: mapping.mappingId,
           lastError: msg,
         });
-        return { pullTouchPaths: [], errorMsg: msg, shouldDisableMapping: true };
+        return {
+          pullTouchPaths: [],
+          errorMsg: msg,
+          shouldDisableMapping: true,
+          disableCause: 'missing-local-root',
+        };
       }
 
       const msg = `${rootCheck.detail}（已跳过本轮同步，避免误删远端知识库）`;
@@ -704,25 +742,14 @@ export class SyncScheduler {
     const fullReconcileIntervalSec =
       this.config.fullReconcileIntervalSec ?? DEFAULT_FULL_RECONCILE_INTERVAL_SEC;
     const forceFullScan = this.shouldForceFullScan(mappingState, fullReconcileIntervalSec);
-    const isIncremental = lastSyncSince !== undefined && !forceFullScan.force;
-    const sinceStr = lastSyncSince
-      ? new Date(lastSyncSince).toLocaleString('zh-CN')
-      : '无（首次全量）';
-    console.log(`[Scheduler][${mapping.mappingId}] 模式=${isIncremental ? '增量' : '全量'} lastSyncSince=${sinceStr}`);
-    if (forceFullScan.force) {
-      console.log(`[Scheduler][${mapping.mappingId}] 强制全量对账原因: ${forceFullScan.reason}`);
-    }
-
     const effectiveAppKey = (mapping.appKey ?? this.config.appKey ?? '').trim();
     const limiter = this.getLimiter(effectiveAppKey);
     const api = new KbApiClient(this.config.serverUrl, effectiveAppKey, limiter);
-    if (mapping.appKey?.trim()) {
-      console.log(`[Scheduler][${mapping.mappingId}] 使用 mapping 独立 appKey（身份隔离），独立限速器`);
-    }
     const scope = resolveSyncScopeOptions(mapping, this.config);
     const localFs = new LocalFsAdapter(mapping.localRoot, scope);
 
     const remoteFs = new RemoteFsAdapter(api, {
+      mappingId: mapping.mappingId,
       projectId: mapping.projectId,
       remoteRootFileId: mapping.remoteRootFileId,
       remoteRootFolderPath: mapping.remoteRootFolderPath,
@@ -754,9 +781,15 @@ export class SyncScheduler {
       resolvedRootFileId: resolved.rootFileId,
       resolvedProjectId: resolved.projectId,
     });
-    console.log(
-      `[Scheduler][${mapping.mappingId}] 远端初始化完成: projectId=${resolved.projectId} rootFileId=${resolved.rootFileId} path="${resolved.rootFolderPath}"`,
-    );
+    if (
+      mappingState?.resolvedProjectId !== resolved.projectId ||
+      mappingState?.resolvedRootFileId !== resolved.rootFileId
+    ) {
+      console.log(
+        `[Scheduler][${mapping.mappingId}] REMOTE_RESOLVED projectId=${resolved.projectId}` +
+          ` rootFileId=${resolved.rootFileId} path="${resolved.rootFolderPath}"`,
+      );
+    }
 
     const engine = new SyncEngine(
       localFs,
@@ -767,6 +800,18 @@ export class SyncScheduler {
         downloadConcurrency: this.config.downloadConcurrency ?? DOWNLOAD_CONCURRENCY,
         uploadConcurrency: this.config.uploadConcurrency ?? UPLOAD_CONCURRENCY,
         maxFileSizeBytes: this.config.maxFileSizeBytes,
+        massSyncProtectionEnabled:
+          mapping.massSyncProtectionEnabled ??
+          this.config.massSyncProtectionEnabled ??
+          DEFAULT_MASS_SYNC_PROTECTION_ENABLED,
+        maxUploadFilesPerSync:
+          mapping.maxUploadFilesPerSync ??
+          this.config.maxUploadFilesPerSync ??
+          DEFAULT_MAX_UPLOAD_FILES_PER_SYNC,
+        maxDownloadFilesPerSync:
+          mapping.maxDownloadFilesPerSync ??
+          this.config.maxDownloadFilesPerSync ??
+          DEFAULT_MAX_DOWNLOAD_FILES_PER_SYNC,
       },
     );
 
@@ -789,6 +834,27 @@ export class SyncScheduler {
         mappingId: mapping.mappingId,
         lastError: msg,
       });
+      if (isMassSyncProtectionError(e)) {
+        this.suspendMapping(mapping.mappingId, '大批量同步保护');
+        const stats: SyncStats = {
+          uploaded: 0,
+          downloaded: 0,
+          deleted: 0,
+          skipped: e.trip.uploadCount + e.trip.downloadCount,
+          failed: 1,
+          errors: [msg],
+          renamed: 0,
+          moved: 0,
+          localTombstoned: 0,
+        };
+        return {
+          pullTouchPaths,
+          stats,
+          errorMsg: msg,
+          shouldDisableMapping: true,
+          disableCause: 'mass-sync-protection',
+        };
+      }
       return {
         pullTouchPaths,
         errorMsg: msg,
@@ -811,9 +877,6 @@ export class SyncScheduler {
         lastError: guardWarning,
         lastStats: stats,
       });
-      console.log(
-        `[Scheduler][${mapping.mappingId}] 水位已推进: ${stats.newSince} (${new Date(stats.newSince).toLocaleString('zh-CN')})`,
-      );
     } else if (stats.failed > 0) {
       const errSummary = stats.errors.slice(0, 3).join('; ');
       this.db.upsertMappingState({
@@ -826,9 +889,6 @@ export class SyncScheduler {
       );
     }
 
-    console.log(
-      `[Scheduler][${mapping.mappingId}] ===== 同步完成 ↑${stats.uploaded} ↓${stats.downloaded} ✗${stats.deleted} fail:${stats.failed} =====`,
-    );
     return {
       pullTouchPaths,
       stats,

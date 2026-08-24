@@ -1,8 +1,10 @@
 import { SyncConfig, MappingSyncRunResult, SyncTriggerReason } from './types';
 export interface SyncSchedulerOptions {
     onMappingSyncFinished?: (result: MappingSyncRunResult) => void;
-    /** localRoot 被删且曾有同步历史：写 config 禁用并触发热重载 */
-    onMissingLocalRootDisable?: (mappingId: string, detail: string) => Promise<void>;
+    /** 安全保护触发后写 config 禁用 mapping，并触发热重载。 */
+    onMappingAutoDisable?: (mappingId: string, detail: string, cause: 'missing-local-root' | 'mass-sync-protection') => Promise<void>;
+    /** 仅用于测试或特殊部署；生产默认 5 分钟。 */
+    stopDrainTimeoutMs?: number;
 }
 export declare function resolveMaxConcurrentMappings(config: SyncConfig): number;
 /**
@@ -32,10 +34,11 @@ export declare class SyncScheduler {
     private running;
     private dbClosed;
     private readonly onMappingSyncFinished?;
-    private readonly onMissingLocalRootDisable?;
+    private readonly onMappingAutoDisable?;
+    private readonly stopDrainTimeoutMs;
     /** localRoot 缺失后即时挂起，阻止 timer/watch 继续触发（热重载前） */
     private readonly suspendedMappingIds;
-    private readonly missingRootDisableInFlight;
+    private readonly autoDisableInFlight;
     private readonly circuitBreakers;
     constructor(config: SyncConfig, opts?: SyncSchedulerOptions);
     /**
@@ -45,11 +48,14 @@ export declare class SyncScheduler {
     private getLimiter;
     /** 启动调度器：注册定时器，并立即触发一轮全量对账 */
     start(): void;
+    private registerIntervalTimer;
     /**
      * 停止调度器：取消未执行的延迟任务，等待进行中的 sync 结束，再关闭 DB。
      * @returns true 表示已安全停止并关闭 DB；false 表示仍有同步未完成（未关 DB，避免 Database already closed）
      */
-    stop(): Promise<boolean>;
+    stop(opts?: {
+        resumeOnTimeout?: boolean;
+    }): Promise<boolean>;
     private scheduleDelayed;
     private clearPendingTimers;
     private waitForActiveSyncs;
@@ -60,6 +66,10 @@ export declare class SyncScheduler {
     getGlobalSyncPressure(): {
         running: number;
         max: number;
+    };
+    getLifecycleStatus(): {
+        running: boolean;
+        dbClosed: boolean;
     };
     getWatcherPressure(): {
         mappings: number;
@@ -86,8 +96,8 @@ export declare class SyncScheduler {
     /**
      * localRoot 从有到无：即时挂起（停 watch、清排队），随后写 config 禁用 mapping。
      */
-    private suspendMappingForMissingLocalRoot;
-    private disableMappingForMissingLocalRoot;
+    private suspendMapping;
+    private disableMappingAfterSafetyStop;
     private doSync;
     private shouldSkipForCircuit;
     private tripCircuit;

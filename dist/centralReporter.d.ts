@@ -46,6 +46,8 @@ export declare class CentralReporter {
     private executionDrainTimer;
     /** stop/restart 后，旧异步回调不得再修改新一代 reporter 状态。 */
     private lifecycleGeneration;
+    private loggedIgnoredCentralConfig;
+    private lastAnnouncedLatestVersion;
     constructor(opts: CentralReporterOptions);
     /** 资源诊断/测试：中心停服时可观察有界队列是否生效。 */
     getExecutionLogPressure(): {

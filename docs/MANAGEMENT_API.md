@@ -142,6 +142,7 @@
 | `syncDirection` | `string` | 本条或回退到全局 |
 | `watchEnabledEffective` | `boolean` | 本条是否实际启用 watch（综合全局/本条配置与 sync 方向） |
 | `watchActive` | `boolean` | 本条 mapping 的 watcher 是否已启动且覆盖其 root |
+| `syncSuspended` | `boolean` | 是否已因 localRoot 缺失或异常批量保护在当前进程内挂起 |
 | `circuitOpen` | `boolean` | 是否因明确的永久远端错误处于自动同步冷却期 |
 | `circuitUntil` | `number` \| `null` | 冷却截止时间戳（毫秒）；手动同步不受此限制 |
 | `circuitReason` | `string` \| `null` | 首个触发熔断的错误摘要 |
@@ -224,6 +225,9 @@
 | `watchEnabled` | `boolean` \| 省略 | 覆盖全局 watch 开关 |
 | `pushDebounceMs` | `number` \| 省略 | 覆盖全局 debounce（毫秒） |
 | `watchUsePolling` | `boolean` \| 省略 | 覆盖全局轮询模式 |
+| `massSyncProtectionEnabled` | `boolean` \| 省略 | 覆盖全局异常批量保护开关 |
+| `maxUploadFilesPerSync` | `number` \| 省略 | 覆盖全局单轮上传阈值 |
+| `maxDownloadFilesPerSync` | `number` \| 省略 | 覆盖全局单轮下载阈值 |
 | `watchEnabledEffective` | `boolean` | 实际是否启用 watch（只读，列表响应） |
 | `effectivePushDebounceMs` | `number` | 实际 debounce（只读） |
 | `effectiveWatchUsePolling` | `boolean` | 实际是否轮询（只读） |
@@ -265,6 +269,9 @@
 | `watchEnabled` | 否 | 继承全局（默认 `true`） | push/bidirectional 是否启用 chokidar 即时 push |
 | `pushDebounceMs` | 否 | 继承全局（默认 `1500`） | watch debounce 毫秒 |
 | `watchUsePolling` | 否 | 继承全局（默认 `false`） | NFS/Docker 卷轮询监听 |
+| `massSyncProtectionEnabled` | 否 | 继承全局（默认 `true`） | 单轮异常批量上传/下载保护；触发后自动禁用本 mapping |
+| `maxUploadFilesPerSync` | 否 | 继承全局（默认 `1000`） | 单轮最大上传文件数 |
+| `maxDownloadFilesPerSync` | 否 | 继承全局（默认 `1000`） | 单轮最大下载文件数 |
 
 #### 默认 glob 常量（与 `src/constants.ts` 一致，省略 `filePatterns` / `excludePatterns` 时生效）
 
@@ -617,6 +624,9 @@ curl -X POST http://127.0.0.1:9090/mappings/disable-by-local-prefix \
 | `rateLimitCooldownSec` | `number` | 429 冷却秒数 |
 | `downloadConcurrency` | `number` | 下载并发 |
 | `uploadConcurrency` | `number` | 上传并发 |
+| `massSyncProtectionEnabled` | `boolean` | 是否启用单轮异常批量保护 |
+| `maxUploadFilesPerSync` | `number` | 单轮最大上传文件数 |
+| `maxDownloadFilesPerSync` | `number` | 单轮最大下载文件数 |
 | `startupJitterMaxSec` | `number` | 启动抖动上限 |
 | `managementPort` | `number` | 管理 API 端口 |
 | `managementHost` | `string` | 管理 API 监听地址 |
@@ -637,7 +647,7 @@ curl -X POST http://127.0.0.1:9090/mappings/disable-by-local-prefix \
 
 ### 请求体（JSON 对象，至少一个字段）
 
-可修改字段：`serverUrl`、`appKey`（传空字符串或 `null` 清除）、`syncDirection`、`autoSyncIntervalSec`、`fullReconcileIntervalSec`、`stateDbPath`、`maxConcurrentMappingsMode`（`auto` \| `manual`）、`maxConcurrentMappings`、`maxRequestsPerMinute`、`rateLimitBurst`、`rateLimitCooldownSec`、`downloadConcurrency`、`uploadConcurrency`、`startupJitterMaxSec`、`managementPort`、`managementHost`、`watchEnabled`、`pushDebounceMs`（≥100）、`watchUsePolling`。
+可修改字段：`serverUrl`、`appKey`（传空字符串或 `null` 清除）、`syncDirection`、`autoSyncIntervalSec`、`fullReconcileIntervalSec`、`stateDbPath`、`maxConcurrentMappingsMode`（`auto` \| `manual`）、`maxConcurrentMappings`、`maxRequestsPerMinute`、`rateLimitBurst`、`rateLimitCooldownSec`、`downloadConcurrency`、`uploadConcurrency`、`massSyncProtectionEnabled`、`maxUploadFilesPerSync`、`maxDownloadFilesPerSync`、`startupJitterMaxSec`、`managementPort`、`managementHost`、`watchEnabled`、`pushDebounceMs`（≥100）、`watchUsePolling`。
 
 > **注意**：`managementPort` 与 `managementHost` 写入磁盘后**需重启进程**才会改变 HTTP 监听；响应中可能带 `warnings` 提示。
 
