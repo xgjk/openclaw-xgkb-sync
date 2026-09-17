@@ -1,4 +1,9 @@
 import { SyncConfig, MappingSyncRunResult, SyncTriggerReason } from './types';
+type ConfiguredSyncDirection = 'bidirectional' | 'push' | 'pull';
+type EffectiveSyncDirection = ConfiguredSyncDirection | 'none';
+export declare function remoteWriteProbeDelayMs(failureCount: number): number;
+export declare function resolveEffectiveSyncDirection(configured: ConfiguredSyncDirection, remoteWriteSuppressed: boolean): EffectiveSyncDirection;
+export declare function mergeSyncTriggerReason(current: SyncTriggerReason | undefined, incoming: SyncTriggerReason): SyncTriggerReason;
 export interface SyncSchedulerOptions {
     onMappingSyncFinished?: (result: MappingSyncRunResult) => void;
     /** 安全保护触发后写 config 禁用 mapping，并触发热重载。 */
@@ -21,6 +26,7 @@ export declare class SyncScheduler {
     /** 按 appKey 分组的限速器，每个 appKey 独享自己的令牌桶 */
     private readonly limiters;
     private readonly runStates;
+    private readonly remoteWriteSuppressedMappingIds;
     private readonly watchers;
     private readonly watcherBackends;
     private timers;
@@ -83,12 +89,16 @@ export declare class SyncScheduler {
         open: number;
         total: number;
     };
+    getRemoteWriteSuppressionCount(): number;
     /** 无进行中的 mapping 同步（供自动升级等场景） */
     isSyncIdle(): boolean;
     private startWatchers;
     private stopWatchers;
     /** 手动触发指定 mapping 同步 */
     triggerMapping(mappingId: string): void;
+    /** 供受信任的调用方显式复测；管理 API 是否暴露该能力由鉴权层决定。 */
+    triggerRemoteWriteProbe(mappingId: string): boolean;
+    private resolveAutomaticTrigger;
     /** 触发所有已启用 mapping */
     private triggerAll;
     private scheduleMapping;
@@ -102,6 +112,7 @@ export declare class SyncScheduler {
     private shouldSkipForCircuit;
     private tripCircuit;
     private clearCircuit;
+    private suppressRemoteWrite;
     /** 获取当前生效的配置（供 ManagementApi 读取） */
     getConfig(): SyncConfig;
     private shouldForceFullScan;
@@ -122,7 +133,15 @@ export declare class SyncScheduler {
         circuitOpen: boolean;
         circuitUntil?: number;
         circuitReason?: string;
+        effectiveSyncDirection: EffectiveSyncDirection;
+        remoteWriteSuppressed: boolean;
+        remoteWriteSuppressedAt?: number;
+        remoteWriteSuppressedReason?: string;
+        remoteWriteProbeFailures?: number;
+        remoteWriteNextProbeAt?: number;
+        remoteWriteLastProbeAt?: number;
         lastState: unknown;
     }>;
 }
+export {};
 //# sourceMappingURL=scheduler.d.ts.map

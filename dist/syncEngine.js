@@ -68,6 +68,7 @@ class SyncEngine {
     massSyncProtectionEnabled;
     maxUploadFilesPerSync;
     maxDownloadFilesPerSync;
+    protectLocalChangesInPull;
     persistedFolderPaths = new Set();
     /** pull/bidirectional 本轮 sync 写入本地的路径，供 FileWatcher resume 后 echo 过滤 */
     pullLocalTouchPaths = new Set();
@@ -82,6 +83,7 @@ class SyncEngine {
     remoteFileIdOwners = new Map();
     /** 本轮首次明确的鉴权/权限/参数类永久错误；一旦出现便停止剩余远端写操作。 */
     permanentFailure = null;
+    permanentFailureOp = null;
     constructor(localFs, remoteFs, db, mapping, opts) {
         this.localFs = localFs;
         this.remoteFs = remoteFs;
@@ -103,6 +105,7 @@ class SyncEngine {
             opts?.maxUploadFilesPerSync ?? constants_1.DEFAULT_MAX_UPLOAD_FILES_PER_SYNC;
         this.maxDownloadFilesPerSync =
             opts?.maxDownloadFilesPerSync ?? constants_1.DEFAULT_MAX_DOWNLOAD_FILES_PER_SYNC;
+        this.protectLocalChangesInPull = opts?.protectLocalChangesInPull ?? false;
         this.stats = this.emptyStats();
         this.progress = () => undefined;
     }
@@ -126,7 +129,10 @@ class SyncEngine {
     getPermanentFailure() {
         return this.permanentFailure;
     }
-    capturePermanentFailure(message) {
+    getPermanentFailureOp() {
+        return this.permanentFailureOp;
+    }
+    capturePermanentFailure(message, op) {
         if (this.permanentFailure)
             return;
         const failure = (0, syncErrorPolicy_1.classifyPermanentSyncFailure)(message);
@@ -136,6 +142,7 @@ class SyncEngine {
         if (failure.category === 'validation')
             return;
         this.permanentFailure = failure;
+        this.permanentFailureOp = op ?? null;
         console.error(`[SyncEngine][${this.mapping.mappingId}] 检测到永久远端错误 category=${failure.category}，` +
             `本轮停止剩余远端操作: ${failure.message}`);
     }
@@ -169,6 +176,7 @@ class SyncEngine {
             errors: [],
             renamed: 0,
             moved: 0,
+            remoteWritesSucceeded: 0,
             localTombstoned: 0,
         };
     }
@@ -194,6 +202,7 @@ class SyncEngine {
         this.progress = onProgress ?? (() => undefined);
         this.pullLocalTouchPaths.clear();
         this.permanentFailure = null;
+        this.permanentFailureOp = null;
         this.persistedFolderPaths.clear();
         const prog = (msg) => {
             console.log(`[SyncEngine][${this.mapping.mappingId}] ${msg}`);
@@ -603,7 +612,7 @@ class SyncEngine {
                 if (errors.length < constants_1.MAX_SYNC_ERROR_DETAILS) {
                     errors.push(`${folder.localPath}: ${result.error}`);
                 }
-                this.capturePermanentFailure(result.error);
+                this.capturePermanentFailure(result.error, 'delete-remote');
                 if (emittedFailureLogs < 5) {
                     console.warn(`[SyncEngine][${this.mapping.mappingId}] 远端目录删除失败: ` +
                         `"${folder.localPath}" (${folder.remoteFolderId}): ${result.error}`);
@@ -614,6 +623,7 @@ class SyncEngine {
             }
         }
         this.stats.prunedRemoteDirs = (this.stats.prunedRemoteDirs ?? 0) + deleted;
+        this.stats.remoteWritesSucceeded = (this.stats.remoteWritesSucceeded ?? 0) + deleted;
         if (failed > 0) {
             this.stats.failed += failed;
             this.addErrorDetails(...errors);
@@ -1208,6 +1218,7 @@ class SyncEngine {
             record,
             syncDirection: this.mapping.syncDirection ?? 'bidirectional',
             conflictStrategy: this.mapping.conflictStrategy,
+            protectLocalChanges: this.protectLocalChangesInPull,
             workspaceAnomaly: this.remoteDeleteGuardActive,
             tombstonedRemoteFileIds: this.tombstonedRemoteFileIds,
             remoteFileIdOwners: this.remoteFileIdOwners,
@@ -1359,7 +1370,7 @@ class SyncEngine {
         }
         catch (e) {
             const msg = e instanceof Error ? e.message : String(e);
-            this.capturePermanentFailure(msg);
+            this.capturePermanentFailure(msg, op);
             const errno = e instanceof Error && 'code' in e ? String(e.code) : '';
             const localAbsPath = nodePath.join(this.localFs.getRoot(), nodePath.normalize(path.replace(/\//g, nodePath.sep)));
             this.stats.failed++;
@@ -1408,6 +1419,7 @@ class SyncEngine {
         });
         this.persistFileFolderState(path, result.value.remoteFolderId);
         this.stats.uploaded++;
+        this.stats.remoteWritesSucceeded = (this.stats.remoteWritesSucceeded ?? 0) + 1;
         this.progress(`↑ ${path}`);
     }
     async doUploadUpdate(path, local, record, remote) {
@@ -1458,6 +1470,7 @@ class SyncEngine {
         this.db.upsertFileState(next);
         this.persistFileFolderState(path, folderId);
         this.stats.uploaded++;
+        this.stats.remoteWritesSucceeded = (this.stats.remoteWritesSucceeded ?? 0) + 1;
         this.progress(`↑ ${path}`);
     }
     async doDownloadNew(path, remote) {
@@ -1641,6 +1654,7 @@ class SyncEngine {
             throw new Error(result.error);
         this.db.deleteFileState(this.mapping.mappingId, path);
         this.stats.deleted++;
+        this.stats.remoteWritesSucceeded = (this.stats.remoteWritesSucceeded ?? 0) + 1;
         this.progress(`✗ 远端删除 ${path}`);
     }
     /**
@@ -1739,6 +1753,7 @@ class SyncEngine {
         // 更新 sync_folder_state：重命名旧路径前缀为新路径
         this.db.renameFolderPaths(this.mapping.mappingId, directoryOldPath, directoryNewPath);
         this.stats.renamed = (this.stats.renamed ?? 0) + 1;
+        this.stats.remoteWritesSucceeded = (this.stats.remoteWritesSucceeded ?? 0) + 1;
         this.progress(`↻ 远端重命名目录 ${directoryOldPath} → ${directoryNewPath}（${affectedRecords.length} 个文件，1 次 updateFileName）`);
     }
     /**
@@ -1800,6 +1815,7 @@ class SyncEngine {
             console.warn(`[SyncEngine][${this.mapping.mappingId}] rename-remote 因冲突自动改名: 请求=${newName} 实际=${result.value.name}`);
         }
         this.stats.renamed = (this.stats.renamed ?? 0) + 1;
+        this.stats.remoteWritesSucceeded = (this.stats.remoteWritesSucceeded ?? 0) + 1;
         this.progress(`↻ 远端重命名 ${fromPath} → ${toPath}`);
     }
     /**
@@ -1902,6 +1918,7 @@ class SyncEngine {
             }
         }
         this.stats.moved = (this.stats.moved ?? 0) + 1;
+        this.stats.remoteWritesSucceeded = (this.stats.remoteWritesSucceeded ?? 0) + 1;
         this.progress(`→ 远端移动 ${fromPath} → ${toPath}`);
     }
     /**
@@ -1990,6 +2007,7 @@ class SyncEngine {
             ` idMappings=${idMappings.length} affected=${affectedRecords.length}` +
             ` followUpRename=${renameAfterMoveName ? 'Y' : 'N'}`);
         this.stats.moved = (this.stats.moved ?? 0) + 1;
+        this.stats.remoteWritesSucceeded = (this.stats.remoteWritesSucceeded ?? 0) + 1;
         this.progress(`→ 远端移动目录 ${directoryOldPath} → ${directoryNewPath}（${affectedRecords.length} 个文件，1 次 moveFile）`);
     }
     /** 拉取单个文件内容，由 KbApiClient 内置限速器控制请求速率 */

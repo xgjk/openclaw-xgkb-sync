@@ -8,6 +8,8 @@ export interface DecideSyncOpInput {
     syncDirection: string;
     /** local-wins | remote-wins；仅双向冲突时使用 */
     conflictStrategy?: string | null;
+    /** 权限降级成 pull 时，双方均有本地变化则保留本地，避免静默覆盖待上传内容。 */
+    protectLocalChanges?: boolean;
     /**
      * 本地工作区相对历史记录异常偏空（迁移/挂载丢失等）。
      * 此时禁止批量写成 tombstone（否则恢复挂载后也无法对账），也禁止 download 拉回。

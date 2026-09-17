@@ -6,7 +6,7 @@ import { RemoteFsAdapter, RemoteFsInitResult } from './remoteFs';
 import { SyncEngine } from './syncEngine';
 import { SyncStateDb } from './syncStateDb';
 import { isMappingEffectiveEnabled } from './config';
-import { SyncConfig, SyncMapping, MappingSyncRunResult, SyncStats, SyncTriggerReason } from './types';
+import { SyncConfig, SyncMapping, MappingSyncRunResult, SyncOp, SyncStats, SyncTriggerReason } from './types';
 import {
   DEFAULT_DB_PATH,
   DEFAULT_FULL_RECONCILE_INTERVAL_SEC,
@@ -36,6 +36,8 @@ import { inspectLocalRoot, hasMappingSyncHistory } from './localRootGuard';
 import { resolveSyncScopeOptions } from './pathSyncScope';
 import {
   classifyPermanentSyncFailure,
+  isLegacyRemoteWritePermissionReason,
+  isRemoteWritePermissionFailure,
   permanentCircuitDelayMs,
 } from './syncErrorPolicy';
 import { isMassSyncProtectionError } from './syncSafety';
@@ -62,6 +64,62 @@ interface DoSyncResult {
   disableCause?: 'missing-local-root' | 'mass-sync-protection';
   /** 明确的鉴权/权限/参数类远端错误，触发 mapping 级熔断。 */
   permanentError?: string;
+  permanentErrorOp?: SyncOp | null;
+  remoteWriteProbe?: boolean;
+}
+
+type ConfiguredSyncDirection = 'bidirectional' | 'push' | 'pull';
+type EffectiveSyncDirection = ConfiguredSyncDirection | 'none';
+
+const REMOTE_WRITE_PROBE_DELAYS_MS = [
+  30 * 60_000,
+  2 * 60 * 60_000,
+  6 * 60 * 60_000,
+  24 * 60 * 60_000,
+];
+
+export function remoteWriteProbeDelayMs(failureCount: number): number {
+  const index = Math.min(Math.max(0, Math.floor(failureCount)), REMOTE_WRITE_PROBE_DELAYS_MS.length - 1);
+  return REMOTE_WRITE_PROBE_DELAYS_MS[index];
+}
+
+export function resolveEffectiveSyncDirection(
+  configured: ConfiguredSyncDirection,
+  remoteWriteSuppressed: boolean,
+): EffectiveSyncDirection {
+  if (!remoteWriteSuppressed || configured === 'pull') return configured;
+  return configured === 'bidirectional' ? 'pull' : 'none';
+}
+
+const TRIGGER_PRIORITY: Record<SyncTriggerReason, number> = {
+  timer: 0,
+  startup: 0,
+  watch: 1,
+  manual: 2,
+  'permission-probe': 3,
+};
+
+export function mergeSyncTriggerReason(
+  current: SyncTriggerReason | undefined,
+  incoming: SyncTriggerReason,
+): SyncTriggerReason {
+  if (!current) return incoming;
+  return TRIGGER_PRIORITY[incoming] > TRIGGER_PRIORITY[current] ? incoming : current;
+}
+
+function emptySyncStats(): SyncStats {
+  return {
+    uploaded: 0,
+    downloaded: 0,
+    deleted: 0,
+    skipped: 0,
+    failed: 0,
+    errors: [],
+    renamed: 0,
+    moved: 0,
+    remoteWritesSucceeded: 0,
+    localTombstoned: 0,
+  };
 }
 
 interface MappingCircuitBreaker {
@@ -121,6 +179,7 @@ export class SyncScheduler {
   /** 按 appKey 分组的限速器，每个 appKey 独享自己的令牌桶 */
   private readonly limiters = new Map<string, RateLimiter>();
   private readonly runStates = new Map<string, MappingRunState>();
+  private readonly remoteWriteSuppressedMappingIds = new Set<string>();
   private readonly watchers = new Map<string, FileWatcher>();
   private readonly watcherBackends: SharedFileWatcherBackend[] = [];
   private timers: NodeJS.Timeout[] = [];
@@ -196,11 +255,49 @@ export class SyncScheduler {
     for (const mapping of enabledMappings) {
       this.runStates.set(mapping.mappingId, { isSyncing: false, pendingSync: false });
       const persisted = this.db.getMappingState(mapping.mappingId);
+      const configuredDirection = mapping.syncDirection ?? this.config.syncDirection ?? 'bidirectional';
+      if (persisted?.remoteWriteSuppressedAt) {
+        this.remoteWriteSuppressedMappingIds.add(mapping.mappingId);
+        if (!persisted.remoteWriteNextProbeAt) {
+          this.db.setRemoteWriteSuppression(
+            mapping.mappingId,
+            persisted.remoteWriteSuppressedAt,
+            persisted.remoteWriteSuppressedReason ?? '远端写权限不足',
+            persisted.remoteWriteProbeFailures ?? 0,
+            Date.now() + remoteWriteProbeDelayMs(persisted.remoteWriteProbeFailures ?? 0),
+            persisted.remoteWriteLastProbeAt,
+          );
+        }
+        if (persisted.lastError && isLegacyRemoteWritePermissionReason(persisted.lastError)) {
+          this.db.upsertMappingState({ mappingId: mapping.mappingId, lastError: null });
+        }
+      }
       if (
         persisted?.circuitBreakerLevel &&
         persisted.circuitBreakerUntil &&
         persisted.circuitBreakerReason
       ) {
+        if (
+          configuredDirection !== 'pull' &&
+          isLegacyRemoteWritePermissionReason(persisted.circuitBreakerReason)
+        ) {
+          const now = Date.now();
+          this.db.setRemoteWriteSuppression(
+            mapping.mappingId,
+            now,
+            persisted.circuitBreakerReason.slice(0, 800),
+            0,
+            now + remoteWriteProbeDelayMs(0),
+          );
+          this.remoteWriteSuppressedMappingIds.add(mapping.mappingId);
+          this.db.clearMappingCircuitBreaker(mapping.mappingId);
+          this.db.upsertMappingState({ mappingId: mapping.mappingId, lastError: null });
+          console.warn(
+            `[Scheduler][${mapping.mappingId}] 已将历史远端写权限熔断迁移为临时只读能力限制；` +
+              ` configured=${configuredDirection} effective=${resolveEffectiveSyncDirection(configuredDirection, true)}`,
+          );
+          continue;
+        }
         this.circuitBreakers.set(mapping.mappingId, {
           level: persisted.circuitBreakerLevel,
           trippedAt: 0,
@@ -402,6 +499,10 @@ export class SyncScheduler {
     return { open, total: this.circuitBreakers.size };
   }
 
+  getRemoteWriteSuppressionCount(): number {
+    return this.dbClosed ? 0 : this.remoteWriteSuppressedMappingIds.size;
+  }
+
   /** 无进行中的 mapping 同步（供自动升级等场景） */
   isSyncIdle(): boolean {
     return this.activeSyncCount === 0 && this.globalRunningSyncs === 0;
@@ -471,6 +572,37 @@ export class SyncScheduler {
     this.scheduleMapping(mapping, 'manual');
   }
 
+  /** 供受信任的调用方显式复测；管理 API 是否暴露该能力由鉴权层决定。 */
+  triggerRemoteWriteProbe(mappingId: string): boolean {
+    if (!this.running || this.dbClosed) return false;
+    const mapping = this.config.mappings.find(
+      (item) => item.mappingId === mappingId && isMappingEffectiveEnabled(item, this.config.mappings),
+    );
+    const state = mapping ? this.db.getMappingState(mappingId) : undefined;
+    if (!mapping || !state?.remoteWriteSuppressedAt) return false;
+    const configured = mapping.syncDirection ?? this.config.syncDirection ?? 'bidirectional';
+    if (configured === 'pull') return false;
+    this.scheduleMapping(mapping, 'permission-probe');
+    return true;
+  }
+
+  private resolveAutomaticTrigger(
+    mapping: SyncMapping,
+    trigger: SyncTriggerReason,
+  ): SyncTriggerReason {
+    if (trigger !== 'timer') return trigger;
+    const state = this.db.getMappingState(mapping.mappingId);
+    const configured = mapping.syncDirection ?? this.config.syncDirection ?? 'bidirectional';
+    if (
+      configured !== 'pull' &&
+      state?.remoteWriteSuppressedAt &&
+      (state.remoteWriteNextProbeAt ?? Number.POSITIVE_INFINITY) <= Date.now()
+    ) {
+      return 'permission-probe';
+    }
+    return trigger;
+  }
+
   /** 触发所有已启用 mapping */
   private triggerAll(reason: string, trigger: SyncTriggerReason): void {
     if (!this.running || this.dbClosed) return;
@@ -483,7 +615,7 @@ export class SyncScheduler {
     // 立即登记到有界的 per-mapping pending 状态；真正启动受 globalRunningSyncs 限制。
     // 不再为数百个 mapping 创建逐个 setTimeout，避免热重载时残留大量延迟任务。
     for (const mapping of enabledMappings) {
-      this.scheduleMapping(mapping, trigger);
+      this.scheduleMapping(mapping, this.resolveAutomaticTrigger(mapping, trigger));
     }
   }
 
@@ -493,6 +625,13 @@ export class SyncScheduler {
   ): void {
     if (!this.running || this.dbClosed) return;
 
+    if (
+      reason === 'watch' &&
+      this.db.getMappingState(mapping.mappingId)?.remoteWriteSuppressedAt
+    ) {
+      return;
+    }
+
     if (this.suspendedMappingIds.has(mapping.mappingId)) {
       console.log(
         `[Scheduler][${mapping.mappingId}] 已挂起（localRoot 缺失），跳过同步 (${formatSyncTriggerReason(reason)})`,
@@ -500,7 +639,11 @@ export class SyncScheduler {
       return;
     }
 
-    if (reason !== 'manual' && this.shouldSkipForCircuit(mapping.mappingId)) return;
+    if (
+      reason !== 'manual' &&
+      reason !== 'permission-probe' &&
+      this.shouldSkipForCircuit(mapping.mappingId)
+    ) return;
 
     let state = this.runStates.get(mapping.mappingId);
     if (!state) {
@@ -511,9 +654,7 @@ export class SyncScheduler {
     if (state.isSyncing) {
       const wasPending = state.pendingSync;
       state.pendingSync = true;
-      if (reason === 'watch' || state.pendingReason !== 'watch') {
-        state.pendingReason = reason;
-      }
+      state.pendingReason = mergeSyncTriggerReason(state.pendingReason, reason);
       if (!wasPending) {
         console.log(
           `[Scheduler][${mapping.mappingId}] 同步中收到新触发，已合并为下一轮 (${formatSyncTriggerReason(reason)})`,
@@ -525,9 +666,7 @@ export class SyncScheduler {
     if (this.globalRunningSyncs >= this.maxGlobalRunningSyncs) {
       const wasPending = state.pendingSync;
       state.pendingSync = true;
-      if (reason === 'watch' || state.pendingReason !== 'watch') {
-        state.pendingReason = reason;
-      }
+      state.pendingReason = mergeSyncTriggerReason(state.pendingReason, reason);
       if (!wasPending) {
         console.log(
           `[Scheduler][${mapping.mappingId}] 全局限流 ${this.globalRunningSyncs}/${this.maxGlobalRunningSyncs}，已排队 (${formatSyncTriggerReason(reason)})`,
@@ -571,10 +710,41 @@ export class SyncScheduler {
       shouldDisableMapping = syncResult.shouldDisableMapping === true;
       disableCause = syncResult.disableCause;
       if (syncResult.permanentError) {
-        this.tripCircuit(mapping.mappingId, syncResult.permanentError);
-        circuitTripped = true;
+        const failure = classifyPermanentSyncFailure(syncResult.permanentError);
+        if (isRemoteWritePermissionFailure(failure, syncResult.permanentErrorOp)) {
+          this.suppressRemoteWrite(
+            mapping.mappingId,
+            syncResult.permanentError,
+            syncResult.remoteWriteProbe === true,
+          );
+        } else {
+          this.tripCircuit(mapping.mappingId, syncResult.permanentError);
+          circuitTripped = true;
+          if (syncResult.remoteWriteProbe) {
+            const now = Date.now();
+            this.db.deferRemoteWriteProbe(mapping.mappingId, now, now + remoteWriteProbeDelayMs(3));
+          }
+        }
       } else if (syncResult.stats && syncResult.stats.failed === 0) {
         this.clearCircuit(mapping.mappingId);
+        if (syncResult.remoteWriteProbe) {
+          if ((syncResult.stats.remoteWritesSucceeded ?? 0) > 0) {
+            this.db.clearRemoteWriteSuppression(mapping.mappingId);
+            this.remoteWriteSuppressedMappingIds.delete(mapping.mappingId);
+            console.log(
+              `[Scheduler][${mapping.mappingId}] 写能力复测完成真实远端写入，已恢复配置方向`,
+            );
+          } else {
+            const now = Date.now();
+            this.db.deferRemoteWriteProbe(mapping.mappingId, now, now + remoteWriteProbeDelayMs(3));
+            console.log(
+              `[Scheduler][${mapping.mappingId}] 写能力复测未执行真实远端写入，保留只读限制并延后复测`,
+            );
+          }
+        }
+      } else if (syncResult.remoteWriteProbe) {
+        const now = Date.now();
+        this.db.deferRemoteWriteProbe(mapping.mappingId, now, now + remoteWriteProbeDelayMs(2));
       }
     } finally {
       if (!shouldDisableMapping) {
@@ -695,14 +865,23 @@ export class SyncScheduler {
       return { pullTouchPaths: [] };
     }
 
-    console.log(
-      `[Scheduler][${mapping.mappingId}] START trigger=${formatSyncTriggerReason(reason)}` +
-        ` direction=${mapping.syncDirection ?? this.config.syncDirection ?? 'bidirectional'}` +
-        ` localRoot="${mapping.localRoot}" projectId=${mapping.projectId ?? '-'} rootFileId=${mapping.remoteRootFileId ?? '-'}`,
-    );
-
     const mappingState = this.db.getMappingState(mapping.mappingId);
     const fileRecordCount = this.db.countFileStates(mapping.mappingId);
+    const configuredDirection = mapping.syncDirection ?? this.config.syncDirection ?? 'bidirectional';
+    const remoteWriteSuppressed = !!mappingState?.remoteWriteSuppressedAt;
+    const remoteWriteProbe =
+      reason === 'permission-probe' && remoteWriteSuppressed && configuredDirection !== 'pull';
+    const effectiveDirection = resolveEffectiveSyncDirection(
+      configuredDirection,
+      remoteWriteSuppressed && !remoteWriteProbe,
+    );
+
+    console.log(
+      `[Scheduler][${mapping.mappingId}] START trigger=${formatSyncTriggerReason(reason)}` +
+        ` configuredDirection=${configuredDirection} effectiveDirection=${effectiveDirection}` +
+        ` remoteWriteSuppressed=${remoteWriteSuppressed ? 'Y' : 'N'}` +
+        ` localRoot="${mapping.localRoot}" projectId=${mapping.projectId ?? '-'} rootFileId=${mapping.remoteRootFileId ?? '-'}`,
+    );
 
     const rootCheck = inspectLocalRoot(mapping.localRoot);
     if (!rootCheck.ok) {
@@ -733,6 +912,10 @@ export class SyncScheduler {
         lastError: msg,
       });
       return { pullTouchPaths: [], errorMsg: msg };
+    }
+
+    if (effectiveDirection === 'none') {
+      return { pullTouchPaths: [], stats: emptySyncStats(), remoteWriteProbe };
     }
 
     // 读取上次同步状态（含水位 + 已缓存的远端 ID，一次查询复用）
@@ -773,6 +956,7 @@ export class SyncScheduler {
         pullTouchPaths: [],
         errorMsg: msg,
         permanentError: classifyPermanentSyncFailure(msg)?.message,
+        remoteWriteProbe,
       };
     }
     const resolved: RemoteFsInitResult = initResult.value;
@@ -795,7 +979,7 @@ export class SyncScheduler {
       localFs,
       remoteFs,
       this.db,
-      { ...mapping, syncDirection: mapping.syncDirection ?? this.config.syncDirection, syncDotFiles: scope.syncDotFiles },
+      { ...mapping, syncDirection: effectiveDirection, syncDotFiles: scope.syncDotFiles },
       {
         downloadConcurrency: this.config.downloadConcurrency ?? DOWNLOAD_CONCURRENCY,
         uploadConcurrency: this.config.uploadConcurrency ?? UPLOAD_CONCURRENCY,
@@ -812,6 +996,7 @@ export class SyncScheduler {
           mapping.maxDownloadFilesPerSync ??
           this.config.maxDownloadFilesPerSync ??
           DEFAULT_MAX_DOWNLOAD_FILES_PER_SYNC,
+        protectLocalChangesInPull: remoteWriteSuppressed && !remoteWriteProbe,
       },
     );
 
@@ -845,6 +1030,7 @@ export class SyncScheduler {
           errors: [msg],
           renamed: 0,
           moved: 0,
+          remoteWritesSucceeded: 0,
           localTombstoned: 0,
         };
         return {
@@ -853,12 +1039,14 @@ export class SyncScheduler {
           errorMsg: msg,
           shouldDisableMapping: true,
           disableCause: 'mass-sync-protection',
+          remoteWriteProbe,
         };
       }
       return {
         pullTouchPaths,
         errorMsg: msg,
         permanentError: classifyPermanentSyncFailure(msg)?.message,
+        remoteWriteProbe,
       };
     }
 
@@ -893,6 +1081,8 @@ export class SyncScheduler {
       pullTouchPaths,
       stats,
       permanentError: engine.getPermanentFailure()?.message,
+      permanentErrorOp: engine.getPermanentFailureOp(),
+      remoteWriteProbe,
     };
   }
 
@@ -938,6 +1128,33 @@ export class SyncScheduler {
     console.log(`[Scheduler][${mappingId}] 同步成功，永久错误熔断已解除`);
   }
 
+  private suppressRemoteWrite(mappingId: string, reason: string, wasProbe: boolean): void {
+    const now = Date.now();
+    const previous = this.db.getMappingState(mappingId);
+    const failures = previous?.remoteWriteSuppressedAt
+      ? (previous.remoteWriteProbeFailures ?? 0) + (wasProbe ? 1 : 0)
+      : 0;
+    this.db.setRemoteWriteSuppression(
+      mappingId,
+      now,
+      reason.slice(0, 800),
+      failures,
+      now + remoteWriteProbeDelayMs(failures),
+      wasProbe ? now : previous?.remoteWriteLastProbeAt,
+    );
+    this.remoteWriteSuppressedMappingIds.add(mappingId);
+    this.circuitBreakers.delete(mappingId);
+    this.db.clearMappingCircuitBreaker(mappingId);
+    this.db.upsertMappingState({ mappingId, lastError: null });
+    const mapping = this.config.mappings.find((item) => item.mappingId === mappingId);
+    const configured = mapping?.syncDirection ?? this.config.syncDirection ?? 'bidirectional';
+    console.warn(
+      `[Scheduler][${mappingId}] 远端写操作被拒绝，已临时停止自动写入；` +
+        ` configured=${configured} effective=${resolveEffectiveSyncDirection(configured, true)}` +
+        ` nextProbe=${new Date(now + remoteWriteProbeDelayMs(failures)).toLocaleString('zh-CN')}`,
+    );
+  }
+
   /** 获取当前生效的配置（供 ManagementApi 读取） */
   getConfig(): SyncConfig {
     return this.config;
@@ -973,6 +1190,7 @@ export class SyncScheduler {
     if (this.dbClosed) return;
     this.db.resetMappingState(mappingId);
     this.circuitBreakers.delete(mappingId);
+    this.remoteWriteSuppressedMappingIds.delete(mappingId);
     console.log(`[Scheduler] 已重置 mapping 同步状态: ${mappingId}`);
   }
 
@@ -989,6 +1207,13 @@ export class SyncScheduler {
       circuitOpen: boolean;
       circuitUntil?: number;
       circuitReason?: string;
+      effectiveSyncDirection: EffectiveSyncDirection;
+      remoteWriteSuppressed: boolean;
+      remoteWriteSuppressedAt?: number;
+      remoteWriteSuppressedReason?: string;
+      remoteWriteProbeFailures?: number;
+      remoteWriteNextProbeAt?: number;
+      remoteWriteLastProbeAt?: number;
       lastState: unknown;
     }
   > {
@@ -1004,11 +1229,22 @@ export class SyncScheduler {
         circuitOpen: boolean;
         circuitUntil?: number;
         circuitReason?: string;
+        effectiveSyncDirection: EffectiveSyncDirection;
+        remoteWriteSuppressed: boolean;
+        remoteWriteSuppressedAt?: number;
+        remoteWriteSuppressedReason?: string;
+        remoteWriteProbeFailures?: number;
+        remoteWriteNextProbeAt?: number;
+        remoteWriteLastProbeAt?: number;
         lastState: unknown;
       }
     > = {};
     for (const [mappingId, runState] of this.runStates) {
       const breaker = this.circuitBreakers.get(mappingId);
+      const mappingState = this.dbClosed ? undefined : this.db.getMappingState(mappingId);
+      const mapping = this.config.mappings.find((item) => item.mappingId === mappingId);
+      const configuredDirection = mapping?.syncDirection ?? this.config.syncDirection ?? 'bidirectional';
+      const remoteWriteSuppressed = !!mappingState?.remoteWriteSuppressedAt;
       result[mappingId] = {
         isSyncing: runState.isSyncing,
         pendingSync: runState.pendingSync,
@@ -1019,7 +1255,17 @@ export class SyncScheduler {
         circuitOpen: (breaker?.until ?? 0) > Date.now(),
         circuitUntil: breaker?.until,
         circuitReason: breaker?.reason,
-        lastState: this.dbClosed ? null : this.db.getMappingState(mappingId),
+        effectiveSyncDirection: resolveEffectiveSyncDirection(
+          configuredDirection,
+          remoteWriteSuppressed,
+        ),
+        remoteWriteSuppressed,
+        remoteWriteSuppressedAt: mappingState?.remoteWriteSuppressedAt ?? undefined,
+        remoteWriteSuppressedReason: mappingState?.remoteWriteSuppressedReason ?? undefined,
+        remoteWriteProbeFailures: mappingState?.remoteWriteProbeFailures ?? undefined,
+        remoteWriteNextProbeAt: mappingState?.remoteWriteNextProbeAt ?? undefined,
+        remoteWriteLastProbeAt: mappingState?.remoteWriteLastProbeAt ?? undefined,
+        lastState: mappingState ?? null,
       };
     }
     return result;

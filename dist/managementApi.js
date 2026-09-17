@@ -34,6 +34,7 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ManagementApi = void 0;
+exports.isLoopbackAddress = isLoopbackAddress;
 const http = __importStar(require("http"));
 const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
@@ -54,6 +55,11 @@ function maskSecret(value) {
     if (secret.length <= 8)
         return `${secret[0] ?? ''}${'•'.repeat(Math.max(secret.length - 2, 1))}${secret.slice(-1)}`;
     return `${secret.slice(0, 4)}${'•'.repeat(Math.min(secret.length - 8, 24))}${secret.slice(-4)}`;
+}
+function isLoopbackAddress(address) {
+    if (!address)
+        return false;
+    return address === '::1' || address.startsWith('127.') || address.startsWith('::ffff:127.');
 }
 /** 可通过 PUT /config 修改的全局字段（managementPort/Host 需重启进程才生效） */
 const EDITABLE_CONFIG_FIELDS = [
@@ -181,6 +187,17 @@ class ManagementApi {
         if (method === 'POST' && syncMatch) {
             return this.handleSyncOne(res, decodeURIComponent(syncMatch[1]));
         }
+        // 该接口会绕过写入抑制并执行真实远端写探测，仅允许服务器本机调用。
+        const recheckWriteMatch = urlPath.match(/^\/mappings\/([^/]+)\/recheck-write$/);
+        if (method === 'POST' && recheckWriteMatch) {
+            if (!isLoopbackAddress(req.socket.remoteAddress)) {
+                return this.sendJson(res, 403, {
+                    ok: false,
+                    error: '写权限复测仅允许从服务器本机调用',
+                });
+            }
+            return this.handleRecheckRemoteWrite(res, decodeURIComponent(recheckWriteMatch[1]));
+        }
         // GET /config
         if (method === 'GET' && urlPath === '/config') {
             return this.handleGetConfig(res);
@@ -236,6 +253,7 @@ class ManagementApi {
         const lifecycle = scheduler.getLifecycleStatus();
         const watcherPressure = scheduler.getWatcherPressure();
         const circuitPressure = scheduler.getCircuitBreakerPressure();
+        const remoteWriteSuppressedMappings = scheduler.getRemoteWriteSuppressionCount();
         const memory = process.memoryUsage();
         const activeResources = process.getActiveResourcesInfo().reduce((counts, resource) => {
             counts[resource] = (counts[resource] ?? 0) + 1;
@@ -270,6 +288,8 @@ class ManagementApi {
             droppedWatcherRoots: watcherPressure.droppedRoots,
             openCircuitBreakers: circuitPressure.open,
             trackedCircuitBreakers: circuitPressure.total,
+            remoteWriteSuppressedMappings,
+            writeCapabilityDegraded: remoteWriteSuppressedMappings > 0,
             activeResources,
             memory: {
                 rss: memory.rss,
@@ -282,7 +302,12 @@ class ManagementApi {
                 overloaded ||
                 watcherCapacityExceeded ||
                 circuitPressure.open > 0 ||
+                remoteWriteSuppressedMappings > 0 ||
                 !lifecycle.running,
+            ...(remoteWriteSuppressedMappings > 0 && {
+                writeCapabilityHint: `${remoteWriteSuppressedMappings} 条映射的配置方向与实际写能力不一致；` +
+                    '服务会按退避计划自动复测，期间本地待上传内容保留',
+            }),
             ...(highLag && {
                 warn: 'event_loop_lag_high',
                 hint: '同步阻塞事件循环，HTTP 可能间歇超时；请调大黑盒 timeout 或降低并行同步',
@@ -314,6 +339,13 @@ class ManagementApi {
                 localRoot: mapping?.localRoot,
                 remoteRootFolderPath: mapping?.remoteRootFolderPath,
                 syncDirection: mapping?.syncDirection ?? config.syncDirection,
+                effectiveSyncDirection: state.effectiveSyncDirection,
+                remoteWriteSuppressed: state.remoteWriteSuppressed,
+                remoteWriteSuppressedAt: state.remoteWriteSuppressedAt ?? null,
+                remoteWriteSuppressedReason: state.remoteWriteSuppressedReason ?? null,
+                remoteWriteProbeFailures: state.remoteWriteProbeFailures ?? 0,
+                remoteWriteNextProbeAt: state.remoteWriteNextProbeAt ?? null,
+                remoteWriteLastProbeAt: state.remoteWriteLastProbeAt ?? null,
                 watchEnabledEffective: mapping
                     ? (0, watchHelpers_1.resolveWatchEnabled)(mapping, config)
                     : false,
@@ -408,6 +440,19 @@ class ManagementApi {
         }
         scheduler.triggerMapping(mappingId);
         this.sendJson(res, 200, { ok: true, message: `已触发同步: ${mappingId}` });
+    }
+    handleRecheckRemoteWrite(res, mappingId) {
+        const triggered = this.opts.getScheduler().triggerRemoteWriteProbe(mappingId);
+        if (!triggered) {
+            return this.sendJson(res, 409, {
+                ok: false,
+                error: `mapping "${mappingId}" 未启用、未运行或当前没有远端写能力限制`,
+            });
+        }
+        this.sendJson(res, 202, {
+            ok: true,
+            message: `已触发远端写能力复测: ${mappingId}`,
+        });
     }
     // ==================== 全局配置 ====================
     handleGetConfig(res) {

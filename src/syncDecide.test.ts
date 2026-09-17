@@ -42,6 +42,45 @@ function record(
 const emptyIds = new Set<string>();
 const emptyOwners = new Map<string, FileState>();
 
+describe('decideSyncOp — 权限降级本地保护', () => {
+  it('双端都有变化时保留本地，仅远端变化时仍下载', () => {
+    const base = {
+      path: 'a.md',
+      record: record('a.md'),
+      syncDirection: 'pull',
+      protectLocalChanges: true,
+      workspaceAnomaly: false,
+      tombstonedRemoteFileIds: emptyIds,
+      remoteFileIdOwners: emptyOwners,
+    };
+    assert.equal(
+      decideSyncOp({ ...base, local: local('a.md', 5000), remote: remote('a.md', 'rid-1', 5000) }),
+      'skip',
+    );
+    assert.equal(
+      decideSyncOp({ ...base, local: local('a.md', 1000), remote: remote('a.md', 'rid-1', 5000) }),
+      'download-update',
+    );
+  });
+
+  it('首次对账同路径冲突时不覆盖本地', () => {
+    assert.equal(
+      decideSyncOp({
+        path: 'a.md',
+        local: local('a.md', 2000),
+        remote: remote('a.md', 'rid-1', 2000),
+        record: undefined,
+        syncDirection: 'pull',
+        protectLocalChanges: true,
+        workspaceAnomaly: false,
+        tombstonedRemoteFileIds: emptyIds,
+        remoteFileIdOwners: emptyOwners,
+      }),
+      'skip',
+    );
+  });
+});
+
 describe('decideSyncOp — 本地删除 tombstone', () => {
   it('本地缺 + 远端在 + 有记录 → tombstone-local（各方向）', () => {
     for (const syncDirection of ['push', 'pull', 'bidirectional']) {

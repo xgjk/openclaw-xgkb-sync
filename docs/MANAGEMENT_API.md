@@ -85,9 +85,11 @@
 | `watchedDirectories` | `number` | 是 | chokidar 已索引目录数；原生递归模式为 `0` |
 | `droppedWatcherRoots` | `number` | 是 | 超过安全上限、仅靠定时同步兜底的 root 数 |
 | `openCircuitBreakers` | `number` | 是 | 当前处于永久错误冷却期的 mapping 数 |
+| `remoteWriteSuppressedMappings` | `number` | 是 | 远端写权限受限、当前降级运行的 mapping 数 |
+| `writeCapabilityDegraded` | `boolean` | 是 | 是否存在配置方向与实际写能力不一致 |
 | `activeResources` | `object` | 是 | Node 活跃资源类型计数，用于诊断 `FSEventWrap` 等资源 |
 | `memory` | `object` | 是 | Node RSS、heap、external、arrayBuffers 字节数 |
-| `degraded` | `boolean` | 是 | 事件循环高延迟、同步饱和、watch root 丢弃或存在熔断时为 `true` |
+| `degraded` | `boolean` | 是 | 事件循环高延迟、同步饱和、watch root 丢弃、存在熔断或写能力降级时为 `true` |
 
 ---
 
@@ -140,6 +142,12 @@
 | `localRoot` | `string` | 本地根路径 |
 | `remoteRootFolderPath` | `string` \| 省略 | 远端路径 |
 | `syncDirection` | `string` | 本条或回退到全局 |
+| `effectiveSyncDirection` | `string` | 结合当前远端写能力后的实际方向；可能为 `none` |
+| `remoteWriteSuppressed` | `boolean` | 是否因明确的远端写权限拒绝而降级 |
+| `remoteWriteSuppressedAt` | `number` \| `null` | 首次写权限拒绝的毫秒时间戳 |
+| `remoteWriteSuppressedReason` | `string` \| `null` | 脱敏的远端拒绝原因 |
+| `remoteWriteProbeFailures` | `number` | 自动复测连续失败次数 |
+| `remoteWriteNextProbeAt` | `number` \| `null` | 下次自动复测的毫秒时间戳 |
 | `watchEnabledEffective` | `boolean` | 本条是否实际启用 watch（综合全局/本条配置与 sync 方向） |
 | `watchActive` | `boolean` | 本条 mapping 的 watcher 是否已启动且覆盖其 root |
 | `syncSuspended` | `boolean` | 是否已因 localRoot 缺失或异常批量保护在当前进程内挂起 |
@@ -563,6 +571,16 @@ curl -X POST http://127.0.0.1:9090/mappings/disable-by-local-prefix \
 | `availableMappings` | `array` | 当前存在的 `mappingId` 列表 |
 
 ---
+
+## 11a. `POST /mappings/:mappingId/recheck-write`
+
+对已因明确远端写权限拒绝而降级的 mapping 立即执行一次写能力复测。只有至少一次真实远端写 API 成功才解除限制；空跑不会解除。
+
+该接口会绕过当前写入抑制，**仅允许从服务器回环地址调用**；非本机请求返回 `403`。常规定时器也会按 30 分钟、2 小时、6 小时、24 小时的退避计划自动复测。
+
+- 成功接受：`202`
+- mapping 未受限或未运行：`409`
+- 非本机调用：`403`
 
 ## 12. `POST /reload`
 

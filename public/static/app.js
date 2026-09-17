@@ -163,6 +163,7 @@
   }
 
   function syncStatsSummary(st) {
+    if (st?.remoteWriteSuppressed) return '云端写入受限，本地待上传内容已保留';
     const stats = st?.lastState?.lastStats;
     if (!stats) return '暂无同步统计';
     const parts = [
@@ -186,12 +187,15 @@
         return '启动';
       case 'manual':
         return '手动';
+      case 'permission-probe':
+        return '写权限复测';
       default:
         return '—';
     }
   }
 
   function watchStatusText(st, mappingSummary) {
+    if (st?.remoteWriteSuppressed) return '已抑制写入';
     const effective =
       st?.watchEnabledEffective ??
       mappingSummary?.watchEnabledEffective ??
@@ -238,7 +242,12 @@
   }
 
   function syncDirectionLabel(dir) {
-    const map = { bidirectional: '双向', push: '推送', pull: '拉取' };
+    const map = {
+      bidirectional: '双向',
+      push: '推送',
+      pull: '拉取',
+      none: '暂停远端写入',
+    };
     return map[dir] || dir || '—';
   }
 
@@ -502,6 +511,7 @@
                 ${m.localRootConflict ? '<span class="badge badge-conflict" title="与其他映射共用同一 localRoot">localRoot 冲突</span>' : ''}
                 ${m.enabled && m.localRootConflict && m.syncEffective === false ? '<span class="badge badge-off" title="已启用但因冲突未参与同步">未参与同步</span>' : ''}
                 ${!m.activeInScheduler && m.activeInScheduler !== undefined ? '<span class="badge badge-off" title="尚未热重载生效">未加载</span>' : ''}
+                ${st?.remoteWriteSuppressed ? `<span class="badge badge-conflict" title="${escapeHtml(st.remoteWriteSuppressedReason || '云端写入权限不足')}">云端写入受限</span>` : ''}
                 ${syncBadge || syncResultBadge(st)}
               </div>
             </div>
@@ -528,7 +538,7 @@
             </div>
             <div>
               <dt>同步方向</dt>
-              <dd>${syncDirectionLabel(m.syncDirection || statusCache?.config?.syncDirection)}</dd>
+              <dd>${syncDirectionLabel(m.syncDirection || statusCache?.config?.syncDirection)}${st?.remoteWriteSuppressed ? `（实际：${syncDirectionLabel(st.effectiveSyncDirection)}）` : ''}</dd>
             </div>
             <div>
               <dt>映射索引</dt>
@@ -552,6 +562,7 @@
                 ${syncResultBadge(st)}
                 <div class="sync-summary">${escapeHtml(syncStatsSummary(st))}</div>
                 ${lastError ? `<div class="cell-error" title="${escapeHtml(lastError)}">${escapeHtml(lastError)}</div>` : ''}
+                ${st?.remoteWriteSuppressed ? `<div class="muted">下次自动复测：${formatDateTime(st.remoteWriteNextProbeAt)}。复测前本地修改不会上传。</div>` : ''}
               </dd>
             </div>
           </dl>
@@ -1045,6 +1056,7 @@
     const syncingCount = mappingEntries.filter(([, st]) => st.isSyncing).length;
     const pendingCount = mappingEntries.filter(([, st]) => st.pendingSync).length;
     const errorCount = mappingEntries.filter(([, st]) => st.lastState?.lastError).length;
+    const readOnlyFallbackCount = mappingEntries.filter(([, st]) => st.remoteWriteSuppressed).length;
     const refreshedAt = new Date().toLocaleString();
 
     const overview = `<div class="status-overview">
@@ -1053,6 +1065,7 @@
       <div class="status-metric"><span>同步中</span><strong>${syncingCount}</strong></div>
       <div class="status-metric"><span>排队</span><strong>${pendingCount}</strong></div>
       <div class="status-metric ${errorCount ? 'metric-danger' : ''}"><span>异常</span><strong>${errorCount}</strong></div>
+      <div class="status-metric ${readOnlyFallbackCount ? 'metric-danger' : ''}"><span>写入受限</span><strong>${readOnlyFallbackCount}</strong></div>
       <div class="status-metric"><span>定时兜底</span><strong>${cfg.autoSyncIntervalSec ?? '—'}s</strong></div>
       <div class="status-metric"><span>文件监听</span><strong>${cfg.watchEnabled === false ? '关' : '开'}</strong></div>
       <div class="status-metric"><span>监听防抖</span><strong>${cfg.pushDebounceMs ?? 1500}ms</strong></div>
@@ -1074,6 +1087,8 @@
             <dt>同步结果</dt><dd>${escapeHtml(syncStatsSummary(st))}</dd>
             <dt>最后同步</dt><dd>${formatDateTime(ls.lastSuccessAt)}</dd>
             <dt>同步方向</dt><dd>${syncDirectionLabel(st.syncDirection)}</dd>
+            <dt>实际方向</dt><dd>${syncDirectionLabel(st.effectiveSyncDirection)}</dd>
+            <dt>下次写权限复测</dt><dd>${formatDateTime(st.remoteWriteNextProbeAt)}</dd>
             <dt>文件监听</dt><dd>${escapeHtml(watchStatusText(st))}</dd>
             <dt>最近触发</dt><dd>${st.lastTriggerReason ? escapeHtml(syncTriggerLabel(st.lastTriggerReason)) : '—'}</dd>
             <dt>最近 watch</dt><dd>${formatDateTime(st.lastWatchTriggerAt)}</dd>
@@ -1084,6 +1099,7 @@
             <dt>同步水位</dt><dd>${formatDateTime(ls.lastServerTime || ls.lastSyncSince)}</dd>
           </dl>
           ${lastErr && !st.isSyncing ? `<div class="error">${escapeHtml(lastErr)}</div>` : ''}
+          ${st.remoteWriteSuppressed ? `<div class="config-conflict-banner">云端写入权限不足，当前按${syncDirectionLabel(st.effectiveSyncDirection)}运行，服务将按退避计划自动复测。</div>` : ''}
         </div>`;
       })
       .join('');

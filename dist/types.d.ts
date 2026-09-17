@@ -80,7 +80,7 @@ export interface SyncMapping {
     maxDownloadFilesPerSync?: number;
 }
 /** 同步触发来源（日志与诊断） */
-export type SyncTriggerReason = 'watch' | 'timer' | 'startup' | 'manual';
+export type SyncTriggerReason = 'watch' | 'timer' | 'startup' | 'manual' | 'permission-probe';
 /** 单轮 mapping 同步结束结果（供 sync-manage execution-log 上报） */
 export interface MappingSyncRunResult {
     mappingId: string;
@@ -526,6 +526,13 @@ export interface MappingState {
     circuitBreakerLevel?: number | null;
     circuitBreakerUntil?: number | null;
     circuitBreakerReason?: string | null;
+    /** 明确的远端写权限拒绝；配置方向保留，调度器据此计算实际方向。 */
+    remoteWriteSuppressedAt?: number | null;
+    remoteWriteSuppressedReason?: string | null;
+    /** 自动写能力复测的连续失败次数与时间安排。 */
+    remoteWriteProbeFailures?: number | null;
+    remoteWriteNextProbeAt?: number | null;
+    remoteWriteLastProbeAt?: number | null;
 }
 /** 映射索引 JSON 文档（根目录全量表） */
 export interface FileIndexDocument {
@@ -640,6 +647,8 @@ export interface SyncStats {
     renamed?: number;
     /** 本轮执行的远端移动操作数（moveFile） */
     moved?: number;
+    /** 仅统计真实成功的远端写 API；不得包含远端变化导致的本地操作。 */
+    remoteWritesSucceeded?: number;
     /** 本地删除后写入 tombstone（远端保留、不再拉回）的路径数 */
     localTombstoned?: number;
     /** 因本地工作区异常而被阻断并改为拉取的远端删除计划数 */

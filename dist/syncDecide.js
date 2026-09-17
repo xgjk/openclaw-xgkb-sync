@@ -9,7 +9,7 @@ const constants_1 = require("./constants");
  * 产品规则：本地→知识库不做删除；本地删除后记 tombstone，后续不从 KB 拉回。
  */
 function decideSyncOp(input) {
-    const { path, local, remote, record, syncDirection, conflictStrategy, workspaceAnomaly, tombstonedRemoteFileIds, remoteFileIdOwners, } = input;
+    const { path, local, remote, record, syncDirection, conflictStrategy, protectLocalChanges = false, workspaceAnomaly, tombstonedRemoteFileIds, remoteFileIdOwners, } = input;
     const dir = syncDirection || 'bidirectional';
     // 无历史记录：首次碰到
     if (!record) {
@@ -28,7 +28,7 @@ function decideSyncOp(input) {
         }
         if (local && remote) {
             if (dir === 'pull')
-                return 'download-update';
+                return protectLocalChanges ? 'skip' : 'download-update';
             if (dir === 'push')
                 return 'upload-update';
             const conflictWinner = conflictStrategy ?? 'local-wins';
@@ -85,7 +85,7 @@ function decideSyncOp(input) {
         if (!localChanged && remoteChanged)
             return dir === 'push' ? 'skip' : 'download-update';
         if (dir === 'pull')
-            return 'download-update';
+            return protectLocalChanges ? 'skip' : 'download-update';
         if (dir === 'push')
             return 'upload-update';
         const conflictWinner = conflictStrategy ?? 'local-wins';

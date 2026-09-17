@@ -15,12 +15,20 @@ import { pruneOldLogSegments } from './consoleTee';
 import { compactWatchRoots, FileWatcher, SharedFileWatcherBackend } from './fileWatcher';
 import type { KbApiClient } from './kbApi';
 import { LocalFsAdapter } from './localFs';
+import { isLoopbackAddress } from './managementApi';
 import { RemoteFsAdapter } from './remoteFs';
-import { SyncScheduler } from './scheduler';
+import {
+  mergeSyncTriggerReason,
+  remoteWriteProbeDelayMs,
+  resolveEffectiveSyncDirection,
+  SyncScheduler,
+} from './scheduler';
 import { SyncEngine } from './syncEngine';
 import { SyncStateDb } from './syncStateDb';
 import {
   classifyPermanentSyncFailure,
+  isLegacyRemoteWritePermissionReason,
+  isRemoteWritePermissionFailure,
   permanentCircuitDelayMs,
 } from './syncErrorPolicy';
 import type { MappingSyncRunResult, SyncConfig } from './types';
@@ -37,6 +45,69 @@ async function waitFor(predicate: () => boolean, timeoutMs = 3_000): Promise<voi
 }
 
 describe('资源安全边界', () => {
+  it('写权限上限与配置方向取安全交集', () => {
+    assert.equal(resolveEffectiveSyncDirection('bidirectional', false), 'bidirectional');
+    assert.equal(resolveEffectiveSyncDirection('bidirectional', true), 'pull');
+    assert.equal(resolveEffectiveSyncDirection('push', true), 'none');
+    assert.equal(resolveEffectiveSyncDirection('pull', true), 'pull');
+  });
+
+  it('只把明确的远端写权限拒绝降级为只读', () => {
+    const permission = classifyPermanentSyncFailure(
+      'saveFileByPath failed: API error 0: 权限不足',
+    );
+    assert.equal(isRemoteWritePermissionFailure(permission, 'upload-new'), true);
+    assert.equal(isRemoteWritePermissionFailure(permission, 'download-new'), false);
+    assert.equal(
+      isLegacyRemoteWritePermissionReason('saveFileByPath failed: API error 0: 权限不足'),
+      true,
+    );
+    assert.equal(isLegacyRemoteWritePermissionReason('远端初始化失败: API error 0: 权限不足'), false);
+  });
+
+  it('复测优先级不会被定时或 watch 覆盖', () => {
+    assert.equal(mergeSyncTriggerReason('permission-probe', 'timer'), 'permission-probe');
+    assert.equal(mergeSyncTriggerReason('timer', 'permission-probe'), 'permission-probe');
+    assert.equal(mergeSyncTriggerReason('watch', 'manual'), 'manual');
+    assert.equal(mergeSyncTriggerReason('timer', 'watch'), 'watch');
+  });
+
+  it('写权限复测按有上限的退避计划执行', () => {
+    assert.equal(remoteWriteProbeDelayMs(0), 30 * 60_000);
+    assert.equal(remoteWriteProbeDelayMs(1), 2 * 60 * 60_000);
+    assert.equal(remoteWriteProbeDelayMs(2), 6 * 60 * 60_000);
+    assert.equal(remoteWriteProbeDelayMs(3), 24 * 60 * 60_000);
+    assert.equal(remoteWriteProbeDelayMs(99), 24 * 60 * 60_000);
+  });
+
+  it('绕过写入抑制的复测接口只允许回环地址', () => {
+    assert.equal(isLoopbackAddress('127.0.0.1'), true);
+    assert.equal(isLoopbackAddress('127.1.2.3'), true);
+    assert.equal(isLoopbackAddress('::1'), true);
+    assert.equal(isLoopbackAddress('::ffff:127.0.0.1'), true);
+    assert.equal(isLoopbackAddress('192.168.12.10'), false);
+    assert.equal(isLoopbackAddress(undefined), false);
+  });
+
+  it('写权限限制和自动复测计划可持久化与清除', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'openclaw-write-suppression-'));
+    const db = new SyncStateDb(path.join(root, 'state.db'));
+    try {
+      db.setRemoteWriteSuppression('mapping-1', 1000, '权限不足', 2, 5000, 2000);
+      const state = db.getMappingState('mapping-1');
+      assert.equal(state?.remoteWriteSuppressedAt, 1000);
+      assert.equal(state?.remoteWriteProbeFailures, 2);
+      assert.equal(state?.remoteWriteNextProbeAt, 5000);
+      assert.equal(state?.remoteWriteLastProbeAt, 2000);
+      assert.equal(db.countRemoteWriteSuppressions(), 1);
+      db.clearRemoteWriteSuppression('mapping-1');
+      assert.equal(db.countRemoteWriteSuppressions(), 0);
+    } finally {
+      db.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('并发配置拒绝 0/负数并限制超大值', () => {
     assert.equal(boundedPositiveInteger(0, 3, 10, 'test'), 3);
     assert.equal(boundedPositiveInteger(-2, 3, 10, 'test'), 3);
@@ -743,6 +814,7 @@ describe('核心同步编排', () => {
     try {
       const stats = await engine.runSync();
       assert.equal(stats.uploaded, 1);
+      assert.equal(stats.remoteWritesSucceeded, 1);
       assert.equal(stats.failed, 0);
       assert.deepEqual(uploaded, bytes);
       assert.equal(db.getFileState('push-test', 'doc.md')?.remoteFileId, 'remote-1');
@@ -841,6 +913,8 @@ describe('核心同步编排', () => {
       assert.equal(stats.failed, 1);
       assert.equal(stats.skipped, 9);
       assert.equal(engine.getPermanentFailure()?.category, 'permission');
+      assert.equal(engine.getPermanentFailureOp(), 'upload-new');
+      assert.equal(stats.remoteWritesSucceeded, 0);
     } finally {
       db.close();
     }

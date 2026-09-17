@@ -45,6 +45,7 @@ const constants_1 = require("./constants");
 const consoleTee_1 = require("./consoleTee");
 const fileWatcher_1 = require("./fileWatcher");
 const localFs_1 = require("./localFs");
+const managementApi_1 = require("./managementApi");
 const remoteFs_1 = require("./remoteFs");
 const scheduler_1 = require("./scheduler");
 const syncEngine_1 = require("./syncEngine");
@@ -61,6 +62,59 @@ async function waitFor(predicate, timeoutMs = 3_000) {
     }
 }
 (0, node_test_1.describe)('资源安全边界', () => {
+    (0, node_test_1.it)('写权限上限与配置方向取安全交集', () => {
+        assert.equal((0, scheduler_1.resolveEffectiveSyncDirection)('bidirectional', false), 'bidirectional');
+        assert.equal((0, scheduler_1.resolveEffectiveSyncDirection)('bidirectional', true), 'pull');
+        assert.equal((0, scheduler_1.resolveEffectiveSyncDirection)('push', true), 'none');
+        assert.equal((0, scheduler_1.resolveEffectiveSyncDirection)('pull', true), 'pull');
+    });
+    (0, node_test_1.it)('只把明确的远端写权限拒绝降级为只读', () => {
+        const permission = (0, syncErrorPolicy_1.classifyPermanentSyncFailure)('saveFileByPath failed: API error 0: 权限不足');
+        assert.equal((0, syncErrorPolicy_1.isRemoteWritePermissionFailure)(permission, 'upload-new'), true);
+        assert.equal((0, syncErrorPolicy_1.isRemoteWritePermissionFailure)(permission, 'download-new'), false);
+        assert.equal((0, syncErrorPolicy_1.isLegacyRemoteWritePermissionReason)('saveFileByPath failed: API error 0: 权限不足'), true);
+        assert.equal((0, syncErrorPolicy_1.isLegacyRemoteWritePermissionReason)('远端初始化失败: API error 0: 权限不足'), false);
+    });
+    (0, node_test_1.it)('复测优先级不会被定时或 watch 覆盖', () => {
+        assert.equal((0, scheduler_1.mergeSyncTriggerReason)('permission-probe', 'timer'), 'permission-probe');
+        assert.equal((0, scheduler_1.mergeSyncTriggerReason)('timer', 'permission-probe'), 'permission-probe');
+        assert.equal((0, scheduler_1.mergeSyncTriggerReason)('watch', 'manual'), 'manual');
+        assert.equal((0, scheduler_1.mergeSyncTriggerReason)('timer', 'watch'), 'watch');
+    });
+    (0, node_test_1.it)('写权限复测按有上限的退避计划执行', () => {
+        assert.equal((0, scheduler_1.remoteWriteProbeDelayMs)(0), 30 * 60_000);
+        assert.equal((0, scheduler_1.remoteWriteProbeDelayMs)(1), 2 * 60 * 60_000);
+        assert.equal((0, scheduler_1.remoteWriteProbeDelayMs)(2), 6 * 60 * 60_000);
+        assert.equal((0, scheduler_1.remoteWriteProbeDelayMs)(3), 24 * 60 * 60_000);
+        assert.equal((0, scheduler_1.remoteWriteProbeDelayMs)(99), 24 * 60 * 60_000);
+    });
+    (0, node_test_1.it)('绕过写入抑制的复测接口只允许回环地址', () => {
+        assert.equal((0, managementApi_1.isLoopbackAddress)('127.0.0.1'), true);
+        assert.equal((0, managementApi_1.isLoopbackAddress)('127.1.2.3'), true);
+        assert.equal((0, managementApi_1.isLoopbackAddress)('::1'), true);
+        assert.equal((0, managementApi_1.isLoopbackAddress)('::ffff:127.0.0.1'), true);
+        assert.equal((0, managementApi_1.isLoopbackAddress)('192.168.12.10'), false);
+        assert.equal((0, managementApi_1.isLoopbackAddress)(undefined), false);
+    });
+    (0, node_test_1.it)('写权限限制和自动复测计划可持久化与清除', async () => {
+        const root = await (0, promises_1.mkdtemp)(path.join(os.tmpdir(), 'openclaw-write-suppression-'));
+        const db = new syncStateDb_1.SyncStateDb(path.join(root, 'state.db'));
+        try {
+            db.setRemoteWriteSuppression('mapping-1', 1000, '权限不足', 2, 5000, 2000);
+            const state = db.getMappingState('mapping-1');
+            assert.equal(state?.remoteWriteSuppressedAt, 1000);
+            assert.equal(state?.remoteWriteProbeFailures, 2);
+            assert.equal(state?.remoteWriteNextProbeAt, 5000);
+            assert.equal(state?.remoteWriteLastProbeAt, 2000);
+            assert.equal(db.countRemoteWriteSuppressions(), 1);
+            db.clearRemoteWriteSuppression('mapping-1');
+            assert.equal(db.countRemoteWriteSuppressions(), 0);
+        }
+        finally {
+            db.close();
+            await (0, promises_1.rm)(root, { recursive: true, force: true });
+        }
+    });
     (0, node_test_1.it)('并发配置拒绝 0/负数并限制超大值', () => {
         assert.equal((0, config_1.boundedPositiveInteger)(0, 3, 10, 'test'), 3);
         assert.equal((0, config_1.boundedPositiveInteger)(-2, 3, 10, 'test'), 3);
@@ -677,6 +731,7 @@ async function waitFor(predicate, timeoutMs = 3_000) {
         try {
             const stats = await engine.runSync();
             assert.equal(stats.uploaded, 1);
+            assert.equal(stats.remoteWritesSucceeded, 1);
             assert.equal(stats.failed, 0);
             assert.deepEqual(uploaded, bytes);
             assert.equal(db.getFileState('push-test', 'doc.md')?.remoteFileId, 'remote-1');
@@ -761,6 +816,8 @@ async function waitFor(predicate, timeoutMs = 3_000) {
             assert.equal(stats.failed, 1);
             assert.equal(stats.skipped, 9);
             assert.equal(engine.getPermanentFailure()?.category, 'permission');
+            assert.equal(engine.getPermanentFailureOp(), 'upload-new');
+            assert.equal(stats.remoteWritesSucceeded, 0);
         }
         finally {
             db.close();

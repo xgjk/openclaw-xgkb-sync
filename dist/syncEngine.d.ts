@@ -1,7 +1,7 @@
 import { LocalFsAdapter } from './localFs';
 import { RemoteFsAdapter } from './remoteFs';
 import { SyncStateDb } from './syncStateDb';
-import { SyncMapping, SyncStats } from './types';
+import { SyncMapping, SyncOp, SyncStats } from './types';
 import { type PermanentSyncFailure } from './syncErrorPolicy';
 type ProgressCallback = (msg: string) => void;
 /**
@@ -27,6 +27,7 @@ export declare class SyncEngine {
     private readonly massSyncProtectionEnabled;
     private readonly maxUploadFilesPerSync;
     private readonly maxDownloadFilesPerSync;
+    private readonly protectLocalChangesInPull;
     private readonly persistedFolderPaths;
     /** pull/bidirectional 本轮 sync 写入本地的路径，供 FileWatcher resume 后 echo 过滤 */
     private pullLocalTouchPaths;
@@ -41,6 +42,7 @@ export declare class SyncEngine {
     private remoteFileIdOwners;
     /** 本轮首次明确的鉴权/权限/参数类永久错误；一旦出现便停止剩余远端写操作。 */
     private permanentFailure;
+    private permanentFailureOp;
     constructor(localFs: LocalFsAdapter, remoteFs: RemoteFsAdapter, db: SyncStateDb, mapping: SyncMapping, opts?: {
         downloadConcurrency?: number;
         uploadConcurrency?: number;
@@ -48,6 +50,7 @@ export declare class SyncEngine {
         massSyncProtectionEnabled?: boolean;
         maxUploadFilesPerSync?: number;
         maxDownloadFilesPerSync?: number;
+        protectLocalChangesInPull?: boolean;
     });
     private delay;
     private addErrorDetails;
@@ -56,6 +59,7 @@ export declare class SyncEngine {
     /** 本轮 sync 中 pull 侧写入本地的路径（供 chokidar echo 过滤） */
     getPullLocalTouchPaths(): string[];
     getPermanentFailure(): PermanentSyncFailure | null;
+    getPermanentFailureOp(): SyncOp | null;
     private capturePermanentFailure;
     private finishAfterPermanentFailure;
     private notePullLocalTouch;

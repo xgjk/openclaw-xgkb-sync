@@ -2,6 +2,8 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.classifyPermanentSyncFailure = classifyPermanentSyncFailure;
 exports.permanentCircuitDelayMs = permanentCircuitDelayMs;
+exports.isRemoteWritePermissionFailure = isRemoteWritePermissionFailure;
+exports.isLegacyRemoteWritePermissionReason = isLegacyRemoteWritePermissionReason;
 const AUTHENTICATION_PATTERNS = [
     /(?:HTTP|status|code|API\s+error)\s*[:=#]?\s*401\b/i,
     /unauthori[sz]ed/i,
@@ -46,5 +48,26 @@ function classifyPermanentSyncFailure(message) {
 function permanentCircuitDelayMs(failureLevel, baseMs, maxMs) {
     const safeLevel = Math.max(1, Math.floor(failureLevel));
     return Math.min(maxMs, baseMs * Math.pow(2, safeLevel - 1));
+}
+const REMOTE_WRITE_OPS = new Set([
+    'upload-new',
+    'upload-update',
+    'delete-remote',
+    'rename-remote',
+    'move-remote',
+]);
+/** 只有明确发生在远端写操作上的权限拒绝才允许安全降级为只读。 */
+function isRemoteWritePermissionFailure(failure, op) {
+    return failure?.category === 'permission' && !!op && REMOTE_WRITE_OPS.has(op);
+}
+/**
+ * 兼容升级前没有记录 op 的熔断状态。只有包含明确写 API/操作名的权限错误才迁移，
+ * 避免把读取或初始化权限错误错误地降级成可继续拉取。
+ */
+function isLegacyRemoteWritePermissionReason(message) {
+    const failure = classifyPermanentSyncFailure(message);
+    if (failure?.category !== 'permission')
+        return false;
+    return /saveFileByPath|saveFileByParentId|updateFileVersion|updateFileName|moveFile|deleteFile|upload-(?:new|update)/i.test(message);
 }
 //# sourceMappingURL=syncErrorPolicy.js.map

@@ -39,7 +39,12 @@ export class SyncStateDb {
         resolved_project_id     TEXT,
         circuit_breaker_level   INTEGER,
         circuit_breaker_until   INTEGER,
-        circuit_breaker_reason  TEXT
+        circuit_breaker_reason  TEXT,
+        remote_write_suppressed_at     INTEGER,
+        remote_write_suppressed_reason TEXT,
+        remote_write_probe_failures    INTEGER,
+        remote_write_next_probe_at     INTEGER,
+        remote_write_last_probe_at     INTEGER
       );
 
       CREATE TABLE IF NOT EXISTS sync_file_state (
@@ -101,6 +106,11 @@ export class SyncStateDb {
       'ALTER TABLE sync_mapping_state ADD COLUMN circuit_breaker_level INTEGER',
       'ALTER TABLE sync_mapping_state ADD COLUMN circuit_breaker_until INTEGER',
       'ALTER TABLE sync_mapping_state ADD COLUMN circuit_breaker_reason TEXT',
+      'ALTER TABLE sync_mapping_state ADD COLUMN remote_write_suppressed_at INTEGER',
+      'ALTER TABLE sync_mapping_state ADD COLUMN remote_write_suppressed_reason TEXT',
+      'ALTER TABLE sync_mapping_state ADD COLUMN remote_write_probe_failures INTEGER',
+      'ALTER TABLE sync_mapping_state ADD COLUMN remote_write_next_probe_at INTEGER',
+      'ALTER TABLE sync_mapping_state ADD COLUMN remote_write_last_probe_at INTEGER',
     ];
     for (const sql of migrations) {
       try {
@@ -223,6 +233,64 @@ export class SyncStateDb {
     );
   }
 
+  setRemoteWriteSuppression(
+    mappingId: string,
+    at: number,
+    reason: string,
+    probeFailures: number,
+    nextProbeAt: number,
+    lastProbeAt?: number | null,
+  ): void {
+    this.assertOpen();
+    this.db.run(
+      `INSERT INTO sync_mapping_state
+         (mapping_id, remote_write_suppressed_at, remote_write_suppressed_reason,
+          remote_write_probe_failures, remote_write_next_probe_at, remote_write_last_probe_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(mapping_id) DO UPDATE SET
+         remote_write_suppressed_at = COALESCE(remote_write_suppressed_at, excluded.remote_write_suppressed_at),
+         remote_write_suppressed_reason = excluded.remote_write_suppressed_reason,
+         remote_write_probe_failures = excluded.remote_write_probe_failures,
+         remote_write_next_probe_at = excluded.remote_write_next_probe_at,
+         remote_write_last_probe_at = COALESCE(excluded.remote_write_last_probe_at, remote_write_last_probe_at)`,
+      [mappingId, at, reason, probeFailures, nextProbeAt, lastProbeAt ?? null],
+    );
+  }
+
+  deferRemoteWriteProbe(mappingId: string, lastProbeAt: number, nextProbeAt: number): void {
+    this.assertOpen();
+    this.db.run(
+      `UPDATE sync_mapping_state
+       SET remote_write_last_probe_at = ?, remote_write_next_probe_at = ?
+       WHERE mapping_id = ? AND remote_write_suppressed_at IS NOT NULL`,
+      [lastProbeAt, nextProbeAt, mappingId],
+    );
+  }
+
+  clearRemoteWriteSuppression(mappingId: string): void {
+    this.assertOpen();
+    this.db.run(
+      `UPDATE sync_mapping_state
+       SET remote_write_suppressed_at = NULL,
+           remote_write_suppressed_reason = NULL,
+           remote_write_probe_failures = NULL,
+           remote_write_next_probe_at = NULL,
+           remote_write_last_probe_at = NULL
+       WHERE mapping_id = ?`,
+      [mappingId],
+    );
+  }
+
+  countRemoteWriteSuppressions(): number {
+    this.assertOpen();
+    const rows = this.db.all(
+      `SELECT COUNT(*) AS count
+       FROM sync_mapping_state
+       WHERE remote_write_suppressed_at IS NOT NULL`,
+    ) as unknown as Array<{ count: number }>;
+    return Number(rows[0]?.count ?? 0);
+  }
+
   /**
    * 完全重置 mapping 的同步状态：
    * 1. 删除所有文件记录（sync_file_state）
@@ -251,7 +319,12 @@ export class SyncStateDb {
              index_content_hash    = NULL,
              circuit_breaker_level = NULL,
              circuit_breaker_until = NULL,
-             circuit_breaker_reason = NULL
+             circuit_breaker_reason = NULL,
+             remote_write_suppressed_at = NULL,
+             remote_write_suppressed_reason = NULL,
+             remote_write_probe_failures = NULL,
+             remote_write_next_probe_at = NULL,
+             remote_write_last_probe_at = NULL
          WHERE mapping_id = ?`,
         [mappingId],
       );
@@ -581,6 +654,11 @@ interface RawMappingState {
   circuit_breaker_level: number | null;
   circuit_breaker_until: number | null;
   circuit_breaker_reason: string | null;
+  remote_write_suppressed_at: number | null;
+  remote_write_suppressed_reason: string | null;
+  remote_write_probe_failures: number | null;
+  remote_write_next_probe_at: number | null;
+  remote_write_last_probe_at: number | null;
 }
 
 interface RawFileState {
@@ -615,6 +693,11 @@ function rowToMappingState(row: RawMappingState): MappingState {
     circuitBreakerLevel: row.circuit_breaker_level,
     circuitBreakerUntil: row.circuit_breaker_until,
     circuitBreakerReason: row.circuit_breaker_reason,
+    remoteWriteSuppressedAt: row.remote_write_suppressed_at,
+    remoteWriteSuppressedReason: row.remote_write_suppressed_reason,
+    remoteWriteProbeFailures: row.remote_write_probe_failures,
+    remoteWriteNextProbeAt: row.remote_write_next_probe_at,
+    remoteWriteLastProbeAt: row.remote_write_last_probe_at,
   };
 }
 

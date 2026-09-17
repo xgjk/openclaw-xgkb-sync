@@ -50,6 +50,8 @@ function formatSyncTriggerReason(reason) {
             return 'startup';
         case 'manual':
             return 'manual';
+        case 'permission-probe':
+            return 'permission-probe';
     }
 }
 //# sourceMappingURL=watchHelpers.js.map

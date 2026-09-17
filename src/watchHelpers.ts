@@ -57,5 +57,7 @@ export function formatSyncTriggerReason(reason: SyncTriggerReason): string {
       return 'startup';
     case 'manual':
       return 'manual';
+    case 'permission-probe':
+      return 'permission-probe';
   }
 }

@@ -1,6 +1,7 @@
 import { SyncScheduler } from './scheduler';
 import { SyncConfig } from './types';
 import type { NodeIdentityInfo } from './nodeIdentity';
+export declare function isLoopbackAddress(address?: string | null): boolean;
 export type ReloadResult = {
     ok: true;
     config: SyncConfig;
@@ -43,6 +44,7 @@ export declare class ManagementApi {
     private handleReload;
     private handleSyncAll;
     private handleSyncOne;
+    private handleRecheckRemoteWrite;
     private handleGetConfig;
     private handleUpdateConfig;
     private handleListMappings;
