@@ -35,6 +35,8 @@ recover_previous_service() {
     log "upgrade FAILED; restoring previous revision $PREVIOUS_REF and restarting service"
     git checkout --detach "$PREVIOUS_REF"
     npm ci --include=dev
+    # 某些 npm 版本会仅因内部规范化而改写 lockfile；预检已确保它不是用户改动。
+    git checkout -- package-lock.json
     npm run build
     start_service "$NODE_BIN" "$MGMT_PORT"
   fi
@@ -211,6 +213,8 @@ git checkout --detach "$TARGET_REF"
 
 # npm ci uses the committed lockfile and must not dirty package-lock.json.
 npm ci --include=dev
+# 某些 npm 版本会仅因内部规范化而改写 lockfile；预检已确保它不是用户改动。
+git checkout -- package-lock.json
 npm run build
 
 start_service "$NODE_BIN" "$MGMT_PORT"
