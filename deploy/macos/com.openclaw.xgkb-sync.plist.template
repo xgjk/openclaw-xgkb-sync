@@ -19,9 +19,5 @@
   <true/>
   <key>KeepAlive</key>
   <true/>
-  <key>StandardOutPath</key>
-  <string>@HOME@/Library/Logs/openclaw-xgkb-sync.stdout.log</string>
-  <key>StandardErrorPath</key>
-  <string>@HOME@/Library/Logs/openclaw-xgkb-sync.stderr.log</string>
 </dict>
 </plist>

@@ -133,6 +133,7 @@ export declare const DEFAULT_LOG_DIR = "logs";
 /** 默认日志文件名前缀（实际为 `{baseName}-YYYY-MM-DD.log`） */
 export declare const DEFAULT_LOG_BASE_NAME = "openclaw-sync";
 /** 单个日志文件大小上限（字节），超出后同日递增段号 `.1`、`.2`… */
+/** 单个按日日志分段上限；超过后使用同日期的 .1、.2… 分段。 */
 export declare const MAX_LOG_FILE_BYTES: number;
 /** 同一日志前缀的总磁盘上限；轮转时删除最旧分段，当前分段永不删除。 */
 export declare const MAX_LOG_TOTAL_BYTES: number;

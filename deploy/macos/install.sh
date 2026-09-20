@@ -31,7 +31,7 @@ log "安装依赖并编译..."
 npm install --include=dev
 npm run build
 
-mkdir -p "$PLIST_DIR" "$ROOT/logs" "$HOME/Library/Logs"
+mkdir -p "$PLIST_DIR" "$ROOT/logs"
 
 sed \
   -e "s|@ROOT@|${ROOT}|g" \
@@ -54,7 +54,7 @@ PORT="$("$NODE_BIN" -e "try{const c=require('./config.json');process.stdout.writ
 if lsof -ti:"$PORT" >/dev/null 2>&1; then
   log "服务已监听端口 $PORT"
 else
-  log "端口 $PORT 未监听，请查看 ~/Library/Logs/openclaw-xgkb-sync.stderr.log"
+  log "端口 $PORT 未监听，请查看 $ROOT/logs/service-YYYY-MM-DD.log"
   exit 1
 fi
 

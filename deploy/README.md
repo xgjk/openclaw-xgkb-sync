@@ -46,7 +46,7 @@ npm run build
 - 常用命令：
   ```bash
   launchctl print gui/$(id -u)/com.openclaw.xgkb-sync
-  tail -f ~/Library/Logs/openclaw-xgkb-sync.stderr.log
+  tail -f /path/to/openclaw-xgkb-sync/logs/service-$(date +%F).log
   launchctl kickstart -k gui/$(id -u)/com.openclaw.xgkb-sync
   ```
 

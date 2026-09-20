@@ -495,8 +495,8 @@ curl -X POST http://10.0.0.5:9090/sync
 1. **systemd + journald（推荐 Linux）**
    `journalctl -u openclaw-xgkb-sync -f`，无需改命令行。
 
-2. **launchd + 标准输出文件（推荐 macOS）**
-   使用 `StandardOutPath` / `StandardErrorPath`，或使用下文「macOS 部署」中的 `--log-file` 与 plist 示例。
+2. **launchd + 本进程双写（推荐 macOS）**
+   使用下文 plist 中的 `--log-file`。应用日志按自然日切分，单文件最多 50MB；不要同时配置 launchd 的 `StandardOutPath` / `StandardErrorPath`，否则会产生不轮转的重复日志。
 
 3. **本进程双写**
    设置 `OPENCLAW_SYNC_LOG_FILE` 环境变量或 `--log-file` 参数，控制台与文件同时输出。
@@ -556,7 +556,7 @@ npm start
 node dist/index.js --config /path/to/config.json
 ```
 
-日志可选：`--log-file "$HOME/Library/Logs/openclaw-xgkb-sync.log"` 或环境变量 `OPENCLAW_SYNC_LOG_FILE`（与 Linux 说明一致）。
+日志可选：`--log-file "$HOME/Library/Logs/openclaw-xgkb-sync.log"` 或环境变量 `OPENCLAW_SYNC_LOG_FILE`（与 Linux 说明一致）。应用日志按自然日切分，单个分段最多 50MB。
 
 #### 3. 登录时自动启动（launchd，推荐）
 
@@ -590,10 +590,6 @@ which node
   <true/>
   <key>KeepAlive</key>
   <true/>
-  <key>StandardOutPath</key>
-  <string>/Users/YOUR_USER/Library/Logs/openclaw-xgkb-sync.stdout.log</string>
-  <key>StandardErrorPath</key>
-  <string>/Users/YOUR_USER/Library/Logs/openclaw-xgkb-sync.stderr.log</string>
 </dict>
 </plist>
 ```
