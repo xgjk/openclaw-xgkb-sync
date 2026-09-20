@@ -20,6 +20,27 @@ exec >> "$LOG_FILE" 2>&1
 
 log() { echo "[auto-upgrade] $(date '+%Y-%m-%d %H:%M:%S') $*"; }
 
+PREVIOUS_REF=""
+TARGET_REF=""
+SERVICE_STOPPED=false
+UPGRADE_COMPLETE=false
+NODE_BIN=""
+MGMT_PORT=""
+
+recover_previous_service() {
+  local status=$?
+  set +e
+  trap - ERR
+  if [[ "$SERVICE_STOPPED" == true && "$UPGRADE_COMPLETE" != true ]]; then
+    log "upgrade FAILED; restoring previous revision $PREVIOUS_REF and restarting service"
+    git checkout --detach "$PREVIOUS_REF"
+    npm ci --include=dev
+    npm run build
+    start_service "$NODE_BIN" "$MGMT_PORT"
+  fi
+  exit "$status"
+}
+
 resolve_node_bin() {
   if [[ -n "${OPENCLAW_SYNC_NODE:-}" && -x "${OPENCLAW_SYNC_NODE}" ]]; then
     echo "${OPENCLAW_SYNC_NODE}"
@@ -171,20 +192,29 @@ setup_path_for_node "$NODE_BIN"
 MGMT_PORT="$(read_management_port "$NODE_BIN")"
 
 detect_runtime
-stop_service "$MGMT_PORT"
-
-git fetch --tags origin
-if git rev-parse "v${TARGET}" >/dev/null 2>&1; then
-  git checkout -f "v${TARGET}"
-elif git rev-parse "${TARGET}" >/dev/null 2>&1; then
-  git checkout -f "${TARGET}"
-else
-  git pull origin main || git pull origin master
+# 服务仍在运行时完成所有不会改动工作区的预检；失败时绝不停止现有服务。
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  log "upgrade aborted: working tree has tracked changes; service left running"
+  exit 1
 fi
+git fetch --tags origin
+TARGET_REF="$(git rev-parse --verify --quiet "refs/tags/v${TARGET}^{commit}")" || {
+  log "upgrade aborted: release tag v${TARGET} not found after fetch; service left running"
+  exit 1
+}
+PREVIOUS_REF="$(git rev-parse HEAD)"
 
-npm install --include=dev
+trap recover_previous_service ERR
+stop_service "$MGMT_PORT"
+SERVICE_STOPPED=true
+git checkout --detach "$TARGET_REF"
+
+# npm ci uses the committed lockfile and must not dirty package-lock.json.
+npm ci --include=dev
 npm run build
 
 start_service "$NODE_BIN" "$MGMT_PORT"
+UPGRADE_COMPLETE=true
+trap - ERR
 
 log "======== upgrade finished ========"
