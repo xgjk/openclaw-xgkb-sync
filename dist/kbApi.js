@@ -1,7 +1,16 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.KbApiClient = void 0;
+exports.hasKbDownloadBlockMarker = hasKbDownloadBlockMarker;
 const constants_1 = require("./constants");
+/**
+ * 文档库有时用 HTTP 200 + 业务消息表示下载被风控拦截，且没有稳定的 resultCode。
+ * 标记可能出现在 resultMsg 或 detailMsg 中；这是协议约定的唯一匹配依据。
+ */
+function hasKbDownloadBlockMarker(...messages) {
+    return messages.some((message) => typeof message === 'string' &&
+        (message.includes('##HARD_BLOCK##') || message.includes('##CONFIRM_BLOCK##')));
+}
 function truncateForLog(s, max = constants_1.API_ERROR_LOG_MAX_CHARS) {
     if (s.length <= max)
         return s;
@@ -54,6 +63,12 @@ class KbApiClient {
     }
     delay(ms) {
         return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+    downloadBlockedError() {
+        const remainingMs = this.limiter?.downloadBlockRemainingMs ?? 0;
+        return remainingMs > 0
+            ? `下载因服务端拦截处于冷却中，剩余约 ${Math.ceil(remainingMs / 60_000)} 分钟`
+            : undefined;
     }
     async request(method, apiPath, params) {
         const requestId = ++KbApiClient.requestSeq;
@@ -147,18 +162,34 @@ class KbApiClient {
                     };
                 }
                 const result = parsed;
+                // 保留两个字段，避免拦截标记仅位于 detailMsg 时在下游错误链中丢失。
+                const resultMsg = [result.resultMsg, result.detailMsg]
+                    .filter((message) => typeof message === 'string')
+                    .filter((message, index, messages) => messages.indexOf(message) === index)
+                    .join(' | ');
                 if (result.resultCode !== 1) {
                     const dataStr = result.data !== undefined && result.data !== null
                         ? truncateForLog(JSON.stringify(result.data), constants_1.API_ERROR_MESSAGE_BODY_MAX)
                         : '';
-                    const shortErr = `API error ${result.resultCode}: ${result.resultMsg}` + (dataStr ? ` | data=${dataStr}` : '');
+                    const shortErr = `API error ${result.resultCode}: ${resultMsg}` + (dataStr ? ` | data=${dataStr}` : '');
+                    // 下载风控以消息标记表示，不能按普通临时错误重试；否则会延长服务端封锁。
+                    if (hasKbDownloadBlockMarker(result.resultMsg, result.detailMsg)) {
+                        console.warn(`[KbApi] request#${requestId} 下载被服务端拦截，不重试 method=${method} path=${apiPath}\n` +
+                            `  params: ${paramsSummary()}\n` +
+                            `  msg: ${resultMsg}`);
+                        if (apiPath === constants_1.API_PATHS.getDownloadInfo ||
+                            apiPath === constants_1.API_PATHS.getFullFileContent) {
+                            this.limiter?.onDownloadBlocked(constants_1.DOWNLOAD_BLOCK_COOLDOWN_MS);
+                        }
+                        return { ok: false, error: shortErr };
+                    }
                     // 业务层限流（如 610012）：可恢复，触发限速器冷却后重试
                     if (constants_1.RATE_LIMIT_RESULT_CODES.has(result.resultCode)) {
                         console.warn(`[KbApi] request#${requestId} 业务层限流 code=${result.resultCode} method=${method} path=${apiPath}` +
                             ` attempt=${attempt + 1}/${constants_1.MAX_RETRIES} elapsed=${Date.now() - attemptStart}ms\n` +
                             `  url: ${urlForLog}\n` +
                             `  params: ${paramsSummary()}\n` +
-                            `  msg: ${result.resultMsg}`);
+                            `  msg: ${resultMsg}`);
                         this.limiter?.onRateLimited();
                         lastError = shortErr;
                         lastErrorWasRateLimit = true;
@@ -171,7 +202,7 @@ class KbApiClient {
                             ` attempt=${attempt + 1}/${constants_1.MAX_RETRIES} elapsed=${Date.now() - attemptStart}ms\n` +
                             `  url: ${urlForLog}\n` +
                             `  params: ${paramsSummary()}\n` +
-                            `  msg: ${result.resultMsg}`);
+                            `  msg: ${resultMsg}`);
                         lastError = shortErr;
                         continue;
                     }
@@ -243,6 +274,9 @@ class KbApiClient {
      * 传 forceDownload=true 时 downloadUrl 为 OSS 签名直链，可直接 fetch 获取原始字节。
      */
     async getDownloadInfo(fileId, forceDownload = true) {
+        const blockedError = this.downloadBlockedError();
+        if (blockedError)
+            return { ok: false, error: blockedError };
         return this.request('GET', constants_1.API_PATHS.getDownloadInfo, {
             fileId,
             forceDownload,
@@ -250,6 +284,9 @@ class KbApiClient {
     }
     /** 读取文件全文（AI 提取通道，仅作兜底，优先用 getDownloadInfo） */
     async getFullFileContent(fileId) {
+        const blockedError = this.downloadBlockedError();
+        if (blockedError)
+            return { ok: false, error: blockedError };
         return this.request('GET', constants_1.API_PATHS.getFullFileContent, { fileId });
     }
     /**

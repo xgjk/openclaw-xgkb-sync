@@ -1,4 +1,4 @@
-import { KbApiClient } from './kbApi';
+import { hasKbDownloadBlockMarker, KbApiClient } from './kbApi';
 import { FileUploader } from './fileUploader';
 import { normalizeMoveFileResult, warnMoveFileResponseGaps } from './kbMoveFileContract';
 import { normalizeUpdateFileNameResult } from './kbRenameFileContract';
@@ -426,6 +426,14 @@ export class RemoteFsAdapter {
       } finally {
         clearTimeout(timeout);
       }
+    }
+
+    // HARD_BLOCK / CONFIRM_BLOCK 表示服务端明确拒绝下载；不可再打全文兜底接口。
+    if (!infoResult.ok && hasKbDownloadBlockMarker(infoResult.error)) {
+      console.warn(
+        `${this.logPrefix} getDownloadInfo 被服务端拦截，跳过 getFullFileContent (fileId=${fileId})`,
+      );
+      return infoResult;
     }
 
     console.warn(

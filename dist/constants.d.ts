@@ -82,6 +82,11 @@ export declare const DEFAULT_RATE_LIMIT_BURST = 8;
 /** 收到 429 后限速器默认冷却时间（毫秒） */
 export declare const RATE_LIMIT_COOLDOWN_MS = 60000;
 /**
+ * 下载接口返回 HARD_BLOCK / CONFIRM_BLOCK 后的 appKey 级冷却时间（毫秒）。
+ * 服务端提示约一小时，但 15 分钟后可由正常同步周期进行一次低成本探测。
+ */
+export declare const DOWNLOAD_BLOCK_COOLDOWN_MS: number;
+/**
  * 知识库业务层限流错误码集合。
  * 收到这些 resultCode 时应视为可恢复的限流，触发限速器冷却后重试，而非永久错误。
  * 610012 = "请求太过频繁，请稍候再试！"（按 appKey 全局限流）

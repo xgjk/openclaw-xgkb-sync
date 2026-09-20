@@ -17,6 +17,8 @@ export class RateLimiter {
   private readonly refillRatePerMs: number;
   private lastRefill: number;
   private pauseUntil = 0;
+  /** 下载风控拦截的冷却期；仅阻断下载，不影响同 appKey 的上传等其他操作。 */
+  private downloadBlockUntil = 0;
   private readonly cooldownMs: number;
   private readonly label: string;
 
@@ -101,6 +103,19 @@ export class RateLimiter {
   /** 距冷却结束的剩余毫秒数（已结束则为 0） */
   get cooldownRemainingMs(): number {
     return Math.max(0, this.pauseUntil - Date.now());
+  }
+
+  /** 设置 appKey 级下载冷却。多个 mapping 共用同一 limiter，因此会共同生效。 */
+  onDownloadBlocked(cooldownMs: number): void {
+    this.downloadBlockUntil = Math.max(this.downloadBlockUntil, Date.now() + cooldownMs);
+    console.warn(
+      `[${this.label}] 下载被服务端拦截，暂停下载 ${Math.ceil(cooldownMs / 1000)}s` +
+        `（恢复约 ${new Date(this.downloadBlockUntil).toLocaleTimeString('zh-CN')}）`,
+    );
+  }
+
+  get downloadBlockRemainingMs(): number {
+    return Math.max(0, this.downloadBlockUntil - Date.now());
   }
 }
 

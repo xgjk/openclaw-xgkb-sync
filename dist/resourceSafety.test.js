@@ -44,9 +44,11 @@ const config_1 = require("./config");
 const constants_1 = require("./constants");
 const consoleTee_1 = require("./consoleTee");
 const fileWatcher_1 = require("./fileWatcher");
+const kbApi_1 = require("./kbApi");
 const localFs_1 = require("./localFs");
 const managementApi_1 = require("./managementApi");
 const remoteFs_1 = require("./remoteFs");
+const rateLimiter_1 = require("./rateLimiter");
 const scheduler_1 = require("./scheduler");
 const syncEngine_1 = require("./syncEngine");
 const syncStateDb_1 = require("./syncStateDb");
@@ -647,6 +649,61 @@ async function waitFor(predicate, timeoutMs = 3_000) {
     });
 });
 (0, node_test_1.describe)('远端正文内存边界', () => {
+    (0, node_test_1.it)('下载阻断标记可来自 resultMsg 或 detailMsg，且不会触发全文兜底', async () => {
+        assert.equal((0, kbApi_1.hasKbDownloadBlockMarker)('x ##HARD_BLOCK##'), true);
+        assert.equal((0, kbApi_1.hasKbDownloadBlockMarker)(undefined, 'x ##CONFIRM_BLOCK##'), true);
+        assert.equal((0, kbApi_1.hasKbDownloadBlockMarker)('ordinary failure'), false);
+        let fallbackCalls = 0;
+        const fakeApi = {
+            getDownloadInfo: async () => ({
+                ok: false,
+                error: 'API error 0: 下载已被拦截 ##HARD_BLOCK##',
+            }),
+            getFullFileContent: async () => {
+                fallbackCalls++;
+                return { ok: true, value: 'must not be read' };
+            },
+        };
+        const result = await new remoteFs_1.RemoteFsAdapter(fakeApi, {}).readFileBuffer('file-1');
+        assert.equal(result.ok, false);
+        assert.equal(fallbackCalls, 0);
+    });
+    (0, node_test_1.it)('detailMsg 的下载阻断标记会终止 API 重试', async () => {
+        const originalFetch = globalThis.fetch;
+        const originalWarn = console.warn;
+        let requests = 0;
+        globalThis.fetch = (async () => {
+            requests++;
+            return Response.json({
+                resultCode: 610012,
+                resultMsg: '请求被拒绝',
+                detailMsg: '请稍后再试 ##CONFIRM_BLOCK##',
+                data: null,
+            });
+        });
+        console.warn = () => undefined;
+        try {
+            const limiter = new rateLimiter_1.RateLimiter({
+                requestsPerMinute: 60,
+                burst: 1,
+                cooldownMs: 1_000,
+            });
+            const client = new kbApi_1.KbApiClient('http://kb.invalid', 'test', limiter);
+            const result = await client.getDownloadInfo('file-1');
+            assert.equal(result.ok, false);
+            if (!result.ok)
+                assert.match(result.error, /##CONFIRM_BLOCK##/);
+            const cooldownResult = await client.getDownloadInfo('file-2');
+            assert.equal(cooldownResult.ok, false);
+            if (!cooldownResult.ok)
+                assert.match(cooldownResult.error, /冷却中/);
+            assert.equal(requests, 1);
+        }
+        finally {
+            globalThis.fetch = originalFetch;
+            console.warn = originalWarn;
+        }
+    });
     (0, node_test_1.it)('流式读取超过单文件上限时中止，未超过时保持原始字节', async () => {
         const originalFetch = globalThis.fetch;
         const bytes = Uint8Array.from([0xff, 0x00, 0x61, 0xc3, 0x28]);

@@ -1,6 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.RemoteFsAdapter = void 0;
+const kbApi_1 = require("./kbApi");
 const fileUploader_1 = require("./fileUploader");
 const kbMoveFileContract_1 = require("./kbMoveFileContract");
 const kbRenameFileContract_1 = require("./kbRenameFileContract");
@@ -320,6 +321,11 @@ class RemoteFsAdapter {
             finally {
                 clearTimeout(timeout);
             }
+        }
+        // HARD_BLOCK / CONFIRM_BLOCK 表示服务端明确拒绝下载；不可再打全文兜底接口。
+        if (!infoResult.ok && (0, kbApi_1.hasKbDownloadBlockMarker)(infoResult.error)) {
+            console.warn(`${this.logPrefix} getDownloadInfo 被服务端拦截，跳过 getFullFileContent (fileId=${fileId})`);
+            return infoResult;
         }
         console.warn(`${this.logPrefix} getDownloadInfo falling back to getFullFileContent (fileId=${fileId}): ` +
             `${infoResult.ok ? 'no downloadUrl' : infoResult.error}`);

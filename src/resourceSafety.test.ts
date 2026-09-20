@@ -13,10 +13,11 @@ import {
 } from './constants';
 import { pruneOldLogSegments } from './consoleTee';
 import { compactWatchRoots, FileWatcher, SharedFileWatcherBackend } from './fileWatcher';
-import type { KbApiClient } from './kbApi';
+import { hasKbDownloadBlockMarker, KbApiClient } from './kbApi';
 import { LocalFsAdapter } from './localFs';
 import { isLoopbackAddress } from './managementApi';
 import { RemoteFsAdapter } from './remoteFs';
+import { RateLimiter } from './rateLimiter';
 import {
   mergeSyncTriggerReason,
   remoteWriteProbeDelayMs,
@@ -718,6 +719,63 @@ describe('本地快照单次遍历', () => {
 });
 
 describe('远端正文内存边界', () => {
+  it('下载阻断标记可来自 resultMsg 或 detailMsg，且不会触发全文兜底', async () => {
+    assert.equal(hasKbDownloadBlockMarker('x ##HARD_BLOCK##'), true);
+    assert.equal(hasKbDownloadBlockMarker(undefined, 'x ##CONFIRM_BLOCK##'), true);
+    assert.equal(hasKbDownloadBlockMarker('ordinary failure'), false);
+
+    let fallbackCalls = 0;
+    const fakeApi = {
+      getDownloadInfo: async () => ({
+        ok: false as const,
+        error: 'API error 0: 下载已被拦截 ##HARD_BLOCK##',
+      }),
+      getFullFileContent: async () => {
+        fallbackCalls++;
+        return { ok: true as const, value: 'must not be read' };
+      },
+    } as unknown as KbApiClient;
+
+    const result = await new RemoteFsAdapter(fakeApi, {}).readFileBuffer('file-1');
+    assert.equal(result.ok, false);
+    assert.equal(fallbackCalls, 0);
+  });
+
+  it('detailMsg 的下载阻断标记会终止 API 重试', async () => {
+    const originalFetch = globalThis.fetch;
+    const originalWarn = console.warn;
+    let requests = 0;
+    globalThis.fetch = (async () => {
+      requests++;
+      return Response.json({
+        resultCode: 610012,
+        resultMsg: '请求被拒绝',
+        detailMsg: '请稍后再试 ##CONFIRM_BLOCK##',
+        data: null,
+      });
+    }) as typeof fetch;
+    console.warn = () => undefined;
+
+    try {
+      const limiter = new RateLimiter({
+        requestsPerMinute: 60,
+        burst: 1,
+        cooldownMs: 1_000,
+      });
+      const client = new KbApiClient('http://kb.invalid', 'test', limiter);
+      const result = await client.getDownloadInfo('file-1');
+      assert.equal(result.ok, false);
+      if (!result.ok) assert.match(result.error, /##CONFIRM_BLOCK##/);
+      const cooldownResult = await client.getDownloadInfo('file-2');
+      assert.equal(cooldownResult.ok, false);
+      if (!cooldownResult.ok) assert.match(cooldownResult.error, /冷却中/);
+      assert.equal(requests, 1);
+    } finally {
+      globalThis.fetch = originalFetch;
+      console.warn = originalWarn;
+    }
+  });
+
   it('流式读取超过单文件上限时中止，未超过时保持原始字节', async () => {
     const originalFetch = globalThis.fetch;
     const bytes = Uint8Array.from([0xff, 0x00, 0x61, 0xc3, 0x28]);

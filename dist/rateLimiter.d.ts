@@ -17,6 +17,8 @@ export declare class RateLimiter {
     private readonly refillRatePerMs;
     private lastRefill;
     private pauseUntil;
+    /** 下载风控拦截的冷却期；仅阻断下载，不影响同 appKey 的上传等其他操作。 */
+    private downloadBlockUntil;
     private readonly cooldownMs;
     private readonly label;
     constructor(opts: {
@@ -40,5 +42,8 @@ export declare class RateLimiter {
     get isCoolingDown(): boolean;
     /** 距冷却结束的剩余毫秒数（已结束则为 0） */
     get cooldownRemainingMs(): number;
+    /** 设置 appKey 级下载冷却。多个 mapping 共用同一 limiter，因此会共同生效。 */
+    onDownloadBlocked(cooldownMs: number): void;
+    get downloadBlockRemainingMs(): number;
 }
 //# sourceMappingURL=rateLimiter.d.ts.map

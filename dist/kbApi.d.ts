@@ -1,6 +1,11 @@
 import { ApiResult, BatchGetContentItem, BatchGetMetaParams, CreateFolderParams, DownloadInfoVO, FileMeta, FileListItem, ListChangesParams, ListChangesResponse, ListDescendantFilesParams, ListDescendantFilesResponse, MoveFileParams, MoveFileResult, SaveFileToProjectParams, SaveResourceParams, SliceCheckResult, UpdateFileNameParams, UpdateFileNameResult, UpdateFileVersionParams, UploadContentParams, UploadContentResult, UploadFileSliceParams } from './types';
 import { RateLimiter } from './rateLimiter';
 /**
+ * 文档库有时用 HTTP 200 + 业务消息表示下载被风控拦截，且没有稳定的 resultCode。
+ * 标记可能出现在 resultMsg 或 detailMsg 中；这是协议约定的唯一匹配依据。
+ */
+export declare function hasKbDownloadBlockMarker(...messages: unknown[]): boolean;
+/**
  * 玄关知识库 Open API 客户端（Node.js 版）
  * 使用 Node 18+ 内置 fetch，移除 Obsidian requestUrl 依赖。
  */
@@ -11,6 +16,7 @@ export declare class KbApiClient {
     private readonly limiter?;
     constructor(serverUrl: string, appKey: string, limiter?: RateLimiter);
     private delay;
+    private downloadBlockedError;
     private request;
     /** 获取个人知识库空间 ID */
     getPersonalProjectId(): Promise<ApiResult<string>>;

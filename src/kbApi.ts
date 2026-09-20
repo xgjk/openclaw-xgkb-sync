@@ -27,6 +27,7 @@ import {
   API_ERROR_MESSAGE_BODY_MAX,
   API_PATHS,
   API_SLOW_REQUEST_LOG_MS,
+  DOWNLOAD_BLOCK_COOLDOWN_MS,
   MAX_RETRIES,
   RATE_LIMIT_RESULT_CODES,
   REQUEST_TIMEOUT_MS,
@@ -34,6 +35,18 @@ import {
   TRANSIENT_RESULT_CODES,
 } from './constants';
 import { RateLimiter } from './rateLimiter';
+
+/**
+ * 文档库有时用 HTTP 200 + 业务消息表示下载被风控拦截，且没有稳定的 resultCode。
+ * 标记可能出现在 resultMsg 或 detailMsg 中；这是协议约定的唯一匹配依据。
+ */
+export function hasKbDownloadBlockMarker(...messages: unknown[]): boolean {
+  return messages.some(
+    (message) =>
+      typeof message === 'string' &&
+      (message.includes('##HARD_BLOCK##') || message.includes('##CONFIRM_BLOCK##')),
+  );
+}
 
 function truncateForLog(s: string, max = API_ERROR_LOG_MAX_CHARS): string {
   if (s.length <= max) return s;
@@ -88,6 +101,13 @@ export class KbApiClient {
 
   private delay(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  private downloadBlockedError(): string | undefined {
+    const remainingMs = this.limiter?.downloadBlockRemainingMs ?? 0;
+    return remainingMs > 0
+      ? `下载因服务端拦截处于冷却中，剩余约 ${Math.ceil(remainingMs / 60_000)} 分钟`
+      : undefined;
   }
 
   private async request<T>(
@@ -198,9 +218,16 @@ export class KbApiClient {
 
         const result = parsed as {
           resultCode: number;
-          resultMsg: string;
+          resultMsg?: unknown;
+          detailMsg?: unknown;
           data: T;
         };
+
+        // 保留两个字段，避免拦截标记仅位于 detailMsg 时在下游错误链中丢失。
+        const resultMsg = [result.resultMsg, result.detailMsg]
+          .filter((message): message is string => typeof message === 'string')
+          .filter((message, index, messages) => messages.indexOf(message) === index)
+          .join(' | ');
 
         if (result.resultCode !== 1) {
           const dataStr =
@@ -208,7 +235,23 @@ export class KbApiClient {
               ? truncateForLog(JSON.stringify(result.data), API_ERROR_MESSAGE_BODY_MAX)
               : '';
           const shortErr =
-            `API error ${result.resultCode}: ${result.resultMsg}` + (dataStr ? ` | data=${dataStr}` : '');
+            `API error ${result.resultCode}: ${resultMsg}` + (dataStr ? ` | data=${dataStr}` : '');
+
+          // 下载风控以消息标记表示，不能按普通临时错误重试；否则会延长服务端封锁。
+          if (hasKbDownloadBlockMarker(result.resultMsg, result.detailMsg)) {
+            console.warn(
+              `[KbApi] request#${requestId} 下载被服务端拦截，不重试 method=${method} path=${apiPath}\n` +
+                `  params: ${paramsSummary()}\n` +
+                `  msg: ${resultMsg}`,
+            );
+            if (
+              apiPath === API_PATHS.getDownloadInfo ||
+              apiPath === API_PATHS.getFullFileContent
+            ) {
+              this.limiter?.onDownloadBlocked(DOWNLOAD_BLOCK_COOLDOWN_MS);
+            }
+            return { ok: false, error: shortErr };
+          }
 
           // 业务层限流（如 610012）：可恢复，触发限速器冷却后重试
           if (RATE_LIMIT_RESULT_CODES.has(result.resultCode)) {
@@ -217,7 +260,7 @@ export class KbApiClient {
                 ` attempt=${attempt + 1}/${MAX_RETRIES} elapsed=${Date.now() - attemptStart}ms\n` +
                 `  url: ${urlForLog}\n` +
                 `  params: ${paramsSummary()}\n` +
-                `  msg: ${result.resultMsg}`,
+                `  msg: ${resultMsg}`,
             );
             this.limiter?.onRateLimited();
             lastError = shortErr;
@@ -233,7 +276,7 @@ export class KbApiClient {
                 ` attempt=${attempt + 1}/${MAX_RETRIES} elapsed=${Date.now() - attemptStart}ms\n` +
                 `  url: ${urlForLog}\n` +
                 `  params: ${paramsSummary()}\n` +
-                `  msg: ${result.resultMsg}`,
+                `  msg: ${resultMsg}`,
             );
             lastError = shortErr;
             continue;
@@ -336,6 +379,8 @@ export class KbApiClient {
     fileId: string,
     forceDownload = true,
   ): Promise<ApiResult<DownloadInfoVO>> {
+    const blockedError = this.downloadBlockedError();
+    if (blockedError) return { ok: false, error: blockedError };
     return this.request<DownloadInfoVO>('GET', API_PATHS.getDownloadInfo, {
       fileId,
       forceDownload,
@@ -344,6 +389,8 @@ export class KbApiClient {
 
   /** 读取文件全文（AI 提取通道，仅作兜底，优先用 getDownloadInfo） */
   async getFullFileContent(fileId: string): Promise<ApiResult<string>> {
+    const blockedError = this.downloadBlockedError();
+    if (blockedError) return { ok: false, error: blockedError };
     return this.request<string>('GET', API_PATHS.getFullFileContent, { fileId });
   }
 
