@@ -2,6 +2,7 @@ import { hasKbDownloadBlockMarker, KbApiClient } from './kbApi';
 import { FileUploader } from './fileUploader';
 import { normalizeMoveFileResult, warnMoveFileResponseGaps } from './kbMoveFileContract';
 import { normalizeUpdateFileNameResult } from './kbRenameFileContract';
+import { rewriteDownloadUrl } from './downloadUrlRewrite';
 import {
   ApiResult,
   FileListItem,
@@ -402,7 +403,9 @@ export class RemoteFsAdapter {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS * 2);
       try {
-        const resp = await fetch(infoResult.value.downloadUrl, { signal: controller.signal });
+        // 运维可配置 download-url-rewrites.json 替换 OSS 域名；TTL 缓存，缺失亦负缓存
+        const downloadUrl = rewriteDownloadUrl(infoResult.value.downloadUrl);
+        const resp = await fetch(downloadUrl, { signal: controller.signal });
         if (!resp.ok) {
           return {
             ok: false,

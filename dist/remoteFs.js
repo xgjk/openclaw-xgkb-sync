@@ -5,6 +5,7 @@ const kbApi_1 = require("./kbApi");
 const fileUploader_1 = require("./fileUploader");
 const kbMoveFileContract_1 = require("./kbMoveFileContract");
 const kbRenameFileContract_1 = require("./kbRenameFileContract");
+const downloadUrlRewrite_1 = require("./downloadUrlRewrite");
 const constants_1 = require("./constants");
 const pathSanitize_1 = require("./pathSanitize");
 const pathSyncScope_1 = require("./pathSyncScope");
@@ -295,7 +296,9 @@ class RemoteFsAdapter {
             const controller = new AbortController();
             const timeout = setTimeout(() => controller.abort(), constants_1.REQUEST_TIMEOUT_MS * 2);
             try {
-                const resp = await fetch(infoResult.value.downloadUrl, { signal: controller.signal });
+                // 运维可配置 download-url-rewrites.json 替换 OSS 域名；TTL 缓存，缺失亦负缓存
+                const downloadUrl = (0, downloadUrlRewrite_1.rewriteDownloadUrl)(infoResult.value.downloadUrl);
+                const resp = await fetch(downloadUrl, { signal: controller.signal });
                 if (!resp.ok) {
                     return {
                         ok: false,

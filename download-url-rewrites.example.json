@@ -1,0 +1,7 @@
+[
+  {
+    "_comment": "下载直链域名替换：from 的 origin 命中后换成 to；path/query（含签名）原样保留。复制为本目录 download-url-rewrites.json 后由运维维护；自动升级不会覆盖。默认最多约 5 分钟生效。",
+    "from": "https://new-minio-cluster.meditube.hk",
+    "to": "https://hk-al-minio.mediportal.com.cn"
+  }
+]
