@@ -741,6 +741,27 @@ describe('远端正文内存边界', () => {
     assert.equal(fallbackCalls, 0);
   });
 
+  it('权限不足与高峰期排队不会触发全文兜底', async () => {
+    for (const error of [
+      'API error 0: 权限不足',
+      'API error 0: 高峰期下载排队等待中，剩余约 8 分钟',
+      '请求失败(重试3次): 请求超时(>30000ms)',
+    ]) {
+      let fallbackCalls = 0;
+      const fakeApi = {
+        getDownloadInfo: async () => ({ ok: false as const, error }),
+        getFullFileContent: async () => {
+          fallbackCalls++;
+          return { ok: true as const, value: 'must not be read' };
+        },
+      } as unknown as KbApiClient;
+
+      const result = await new RemoteFsAdapter(fakeApi, {}).readFileBuffer('file-1');
+      assert.equal(result.ok, false);
+      assert.equal(fallbackCalls, 0, `unexpected fallback for: ${error}`);
+    }
+  });
+
   it('detailMsg 的下载阻断标记会终止 API 重试', async () => {
     const originalFetch = globalThis.fetch;
     const originalWarn = console.warn;

@@ -1050,8 +1050,9 @@ export class SyncScheduler {
       };
     }
 
-    // 仅在无系统性失败时推进水位
-    if (stats.failed === 0 && stats.newSince) {
+    // 仅在无系统性失败、且无下载退避挂起时推进水位
+    const deferredDownloads = stats.deferredDownloads ?? 0;
+    if (stats.failed === 0 && deferredDownloads === 0 && stats.newSince) {
       const guardWarning =
         (stats.blockedRemoteDeletes ?? 0) > 0
           ? `远端删除保护: 本地工作区异常，已阻断 ${stats.blockedRemoteDeletes} 项远端删除并改为拉取，请确认 localRoot 是否正常`
@@ -1065,15 +1066,20 @@ export class SyncScheduler {
         lastError: guardWarning,
         lastStats: stats,
       });
-    } else if (stats.failed > 0) {
+    } else if (stats.failed > 0 || deferredDownloads > 0) {
       const errSummary = stats.errors.slice(0, 3).join('; ');
+      const reasonParts: string[] = [];
+      if (stats.failed > 0) reasonParts.push(`${stats.failed} 个文件失败: ${errSummary}`);
+      if (deferredDownloads > 0) {
+        reasonParts.push(`${deferredDownloads} 个下载退避中，待重试`);
+      }
       this.db.upsertMappingState({
         mappingId: mapping.mappingId,
-        lastError: `${stats.failed} 个文件失败: ${errSummary}`,
+        lastError: reasonParts.join('；'),
         lastStats: stats,
       });
       console.warn(
-        `[Scheduler][${mapping.mappingId}] 存在 ${stats.failed} 个失败文件，水位未推进，下轮将重试`,
+        `[Scheduler][${mapping.mappingId}] ${reasonParts.join('；')}，水位未推进，下轮将重试`,
       );
     }
 

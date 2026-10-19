@@ -58,6 +58,9 @@ class SyncStateDb {
         local_dev             TEXT,
         local_ino             TEXT,
         remote_relative_path  TEXT,
+        download_fail_count   INTEGER,
+        download_next_retry_at INTEGER,
+        download_fail_class   TEXT,
         PRIMARY KEY (mapping_id, local_path)
       );
 
@@ -107,6 +110,9 @@ class SyncStateDb {
             'ALTER TABLE sync_mapping_state ADD COLUMN remote_write_probe_failures INTEGER',
             'ALTER TABLE sync_mapping_state ADD COLUMN remote_write_next_probe_at INTEGER',
             'ALTER TABLE sync_mapping_state ADD COLUMN remote_write_last_probe_at INTEGER',
+            'ALTER TABLE sync_file_state ADD COLUMN download_fail_count INTEGER',
+            'ALTER TABLE sync_file_state ADD COLUMN download_next_retry_at INTEGER',
+            'ALTER TABLE sync_file_state ADD COLUMN download_fail_class TEXT',
         ];
         for (const sql of migrations) {
             try {
@@ -298,8 +304,9 @@ class SyncStateDb {
         this.db.run(`INSERT OR REPLACE INTO sync_file_state
          (mapping_id, local_path, remote_file_id, remote_folder_id,
           local_mtime, remote_mtime, content_hash, sync_status, last_sync_at, last_error,
-          local_dev, local_ino, remote_relative_path)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+          local_dev, local_ino, remote_relative_path,
+          download_fail_count, download_next_retry_at, download_fail_class)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
             state.mappingId,
             state.localPath,
             state.remoteFileId ?? null,
@@ -313,6 +320,9 @@ class SyncStateDb {
             state.localDev ?? null,
             state.localIno ?? null,
             state.remoteRelativePath ?? null,
+            state.downloadFailCount ?? null,
+            state.downloadNextRetryAt ?? null,
+            state.downloadFailClass ?? null,
         ]);
     }
     /**
@@ -550,6 +560,9 @@ function rowToFileState(row) {
         localDev: toInoStr(row.local_dev),
         localIno: toInoStr(row.local_ino),
         remoteRelativePath: row.remote_relative_path,
+        downloadFailCount: row.download_fail_count,
+        downloadNextRetryAt: row.download_next_retry_at,
+        downloadFailClass: row.download_fail_class,
     };
 }
 function rowToFolderState(row) {

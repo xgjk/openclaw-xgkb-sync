@@ -3,6 +3,7 @@ import { FileUploader } from './fileUploader';
 import { normalizeMoveFileResult, warnMoveFileResponseGaps } from './kbMoveFileContract';
 import { normalizeUpdateFileNameResult } from './kbRenameFileContract';
 import { rewriteDownloadUrl } from './downloadUrlRewrite';
+import { classifyDownloadFailure } from './downloadRetryPolicy';
 import {
   ApiResult,
   FileListItem,
@@ -437,6 +438,18 @@ export class RemoteFsAdapter {
         `${this.logPrefix} getDownloadInfo 被服务端拦截，跳过 getFullFileContent (fileId=${fileId})`,
       );
       return infoResult;
+    }
+
+    // 权限不足 / 高峰期排队 / 超时等：禁止改打全文通道（大 HTML 会 ~60s 超时并放大重试压力）。
+    if (!infoResult.ok) {
+      const classified = classifyDownloadFailure(infoResult.error);
+      if (!classified.allowFullContentFallback) {
+        console.warn(
+          `${this.logPrefix} getDownloadInfo 失败 class=${classified.failClass}，跳过 getFullFileContent (fileId=${fileId}): ` +
+            infoResult.error,
+        );
+        return infoResult;
+      }
     }
 
     console.warn(

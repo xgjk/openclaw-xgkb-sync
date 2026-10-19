@@ -87,6 +87,17 @@ export declare const RATE_LIMIT_COOLDOWN_MS = 60000;
  */
 export declare const DOWNLOAD_BLOCK_COOLDOWN_MS: number;
 /**
+ * 单文件下载最大尝试次数（含首次）。超过后对该远端版本放弃自动重试，避免定时任务持续打接口。
+ * 远端 mtime 变化视为新版本，计数清零后可再试。
+ */
+export declare const MAX_DOWNLOAD_ATTEMPTS = 5;
+/** 下载失败退避基础间隔（毫秒）；实际为 base * 2^(failCount-1)，并受上限约束。 */
+export declare const DOWNLOAD_RETRY_BASE_MS: number;
+/** 下载失败退避上限（毫秒） */
+export declare const DOWNLOAD_RETRY_MAX_MS: number;
+/** 权限 / 硬拦截类下载失败的最小退避（毫秒） */
+export declare const DOWNLOAD_PERMISSION_RETRY_BASE_MS: number;
+/**
  * 知识库业务层限流错误码集合。
  * 收到这些 resultCode 时应视为可恢复的限流，触发限速器冷却后重试，而非永久错误。
  * 610012 = "请求太过频繁，请稍候再试！"（按 appKey 全局限流）

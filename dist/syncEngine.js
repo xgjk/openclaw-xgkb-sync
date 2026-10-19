@@ -43,6 +43,7 @@ const fileIndexService_1 = require("./fileIndexService");
 const pathSyncScope_1 = require("./pathSyncScope");
 const syncDecide_1 = require("./syncDecide");
 const localRootGuard_1 = require("./localRootGuard");
+const downloadRetryPolicy_1 = require("./downloadRetryPolicy");
 const syncErrorPolicy_1 = require("./syncErrorPolicy");
 const syncSafety_1 = require("./syncSafety");
 /**
@@ -141,6 +142,11 @@ class SyncEngine {
         // 文件级参数错误可能只影响一个路径；仅鉴权/权限问题足以证明整个 mapping 继续请求无意义。
         if (failure.category === 'validation')
             return;
+        // 单文件读权限走文件级重试上限，不熔断整个 mapping（否则其余文件也被拖死）。
+        if (failure.category === 'permission' &&
+            (op === 'download-new' || op === 'download-update')) {
+            return;
+        }
         this.permanentFailure = failure;
         this.permanentFailureOp = op ?? null;
         console.error(`[SyncEngine][${this.mapping.mappingId}] 检测到永久远端错误 category=${failure.category}，` +
@@ -178,6 +184,7 @@ class SyncEngine {
             moved: 0,
             remoteWritesSucceeded: 0,
             localTombstoned: 0,
+            deferredDownloads: 0,
         };
     }
     refreshTombstonedRemoteFileIds(recordMap) {
@@ -388,13 +395,36 @@ class SyncEngine {
                 prog(`决策中 ${idx}/${allPaths.size}...`);
             }
             const local = localMap.get(path);
-            const remote = remoteMap.get(path);
             const record = recordMap.get(path);
-            const op = this.decide(path, local, remote, record);
-            if (op === 'skip')
+            // 增量图可能不含待重试失败文件：用状态库中的 remoteFileId 合成远端条目，避免永久跳过
+            let remote = remoteMap.get(path);
+            if (!remote &&
+                record?.syncStatus === 'failed' &&
+                record.remoteFileId &&
+                !local) {
+                remote = {
+                    path,
+                    name: path.split('/').pop() ?? path,
+                    mtime: record.remoteMtime ?? 0,
+                    remoteFileId: record.remoteFileId,
+                    remoteFolderId: record.remoteFolderId ?? '',
+                };
+            }
+            const decided = this.decide(path, local, remote, record);
+            const gated = (0, syncDecide_1.applyDownloadRetryGate)(decided, record, remote);
+            if (gated.gate === 'defer') {
+                this.stats.deferredDownloads = (this.stats.deferredDownloads ?? 0) + 1;
+                skipCount++;
+                continue;
+            }
+            if (gated.gate === 'abandon') {
+                skipCount++;
+                continue;
+            }
+            if (gated.op === 'skip')
                 skipCount++;
             else
-                plans.push({ path, local, remote, record, op });
+                plans.push({ path, local, remote, record, op: gated.op });
         }
         const plannedDeleteRemote = plans.filter((p) => p.op === 'delete-remote').length;
         const deleteGuard = (0, localRootGuard_1.evaluateRemoteDeleteGuard)({
@@ -1378,18 +1408,67 @@ class SyncEngine {
             console.error(`[SyncEngine][${this.mapping.mappingId}] 同步失败 rel=${path} op=${op}${errno ? ` syscallCode=${errno}` : ''}\n` +
                 `  localAbsPath: ${localAbsPath}\n` +
                 `  error: ${msg}`);
+            const isDownloadOp = op === 'download-new' || op === 'download-update';
             const failRecords = plan.isDirectory && plan.affectedRecords?.length
                 ? plan.affectedRecords
                 : record
                     ? [record]
                     : [];
-            for (const r of failRecords) {
+            if (isDownloadOp && failRecords.length === 0 && remote) {
+                // download-new 尚无历史记录时也要落库，否则无法累计失败次数 / 停重试
+                const retry = (0, downloadRetryPolicy_1.nextDownloadFailureState)({ previousFailCount: 0, errorMessage: msg });
                 this.db.upsertFileState({
-                    ...r,
+                    mappingId: this.mapping.mappingId,
+                    localPath: path,
+                    remoteFileId: remote.remoteFileId,
+                    remoteFolderId: remote.remoteFolderId,
+                    remoteMtime: remote.mtime,
                     syncStatus: 'failed',
                     lastError: msg,
                     lastSyncAt: Date.now(),
+                    downloadFailCount: retry.downloadFailCount,
+                    downloadNextRetryAt: retry.downloadNextRetryAt,
+                    downloadFailClass: retry.downloadFailClass,
                 });
+                if (retry.abandoned) {
+                    console.warn(`[SyncEngine][${this.mapping.mappingId}] 下载已达最大重试次数，停止自动重试 rel=${path}` +
+                        ` class=${retry.downloadFailClass} failCount=${retry.downloadFailCount}`);
+                }
+                return;
+            }
+            for (const r of failRecords) {
+                if (isDownloadOp) {
+                    const remoteVersionAdvanced = !!remote &&
+                        (remote.mtime ?? 0) > (r.remoteMtime ?? 0) + constants_1.MTIME_TOLERANCE_MS;
+                    const retry = (0, downloadRetryPolicy_1.nextDownloadFailureState)({
+                        previousFailCount: remoteVersionAdvanced ? 0 : r.downloadFailCount,
+                        errorMessage: msg,
+                    });
+                    this.db.upsertFileState({
+                        ...r,
+                        remoteFileId: remote?.remoteFileId ?? r.remoteFileId,
+                        remoteFolderId: remote?.remoteFolderId ?? r.remoteFolderId,
+                        remoteMtime: remote?.mtime ?? r.remoteMtime,
+                        syncStatus: 'failed',
+                        lastError: msg,
+                        lastSyncAt: Date.now(),
+                        downloadFailCount: retry.downloadFailCount,
+                        downloadNextRetryAt: retry.downloadNextRetryAt,
+                        downloadFailClass: retry.downloadFailClass,
+                    });
+                    if (retry.abandoned) {
+                        console.warn(`[SyncEngine][${this.mapping.mappingId}] 下载已达最大重试次数，停止自动重试 rel=${path}` +
+                            ` class=${retry.downloadFailClass} failCount=${retry.downloadFailCount}`);
+                    }
+                }
+                else {
+                    this.db.upsertFileState({
+                        ...r,
+                        syncStatus: 'failed',
+                        lastError: msg,
+                        lastSyncAt: Date.now(),
+                    });
+                }
             }
         }
     }
@@ -1490,6 +1569,7 @@ class SyncEngine {
             syncStatus: 'done',
             lastSyncAt: Date.now(),
             lastError: null,
+            ...(0, downloadRetryPolicy_1.clearDownloadRetryState)(),
         });
         this.persistFileFolderState(path, remote.remoteFolderId);
         this.stats.downloaded++;
@@ -1511,6 +1591,7 @@ class SyncEngine {
                 syncStatus: 'done',
                 lastSyncAt: now,
                 lastError: null,
+                ...(0, downloadRetryPolicy_1.clearDownloadRetryState)(),
             });
         }
         else {
@@ -1525,6 +1606,7 @@ class SyncEngine {
                 syncStatus: 'done',
                 lastSyncAt: now,
                 lastError: null,
+                ...(0, downloadRetryPolicy_1.clearDownloadRetryState)(),
             });
         }
         this.stats.downloaded++;

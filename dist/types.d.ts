@@ -570,6 +570,15 @@ export interface FileState {
      * NULL = 尚未记录（旧记录或路径未变化）。
      */
     remoteRelativePath?: string | null;
+    /**
+     * 连续下载失败次数（含首次失败）。达到 MAX_DOWNLOAD_ATTEMPTS 后对该远端版本停止自动重试。
+     * 远端 mtime 推进后清零。
+     */
+    downloadFailCount?: number | null;
+    /** 最早允许再次尝试下载的时间戳；未到点本轮 skip，不打接口。 */
+    downloadNextRetryAt?: number | null;
+    /** 最近一次下载失败分类（queue / permission / timeout 等）。 */
+    downloadFailClass?: string | null;
 }
 export interface LocalDirEntry {
     path: string;
@@ -653,5 +662,10 @@ export interface SyncStats {
     localTombstoned?: number;
     /** 因本地工作区异常而被阻断并改为拉取的远端删除计划数 */
     blockedRemoteDeletes?: number;
+    /**
+     * 因下载退避未到期而本轮跳过的文件数。
+     * >0 时不推进水位，避免增量同步丢掉待重试文件。
+     */
+    deferredDownloads?: number;
 }
 //# sourceMappingURL=types.d.ts.map

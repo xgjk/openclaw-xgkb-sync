@@ -36,4 +36,14 @@ export declare function shouldBlockDownloadForRemoteIdentity(input: {
     tombstonedRemoteFileIds: ReadonlySet<string>;
     remoteFileIdOwners: ReadonlyMap<string, FileState>;
 }): boolean;
+export interface DownloadRetryGateApplication {
+    op: SyncOp;
+    /** proceed=照常下载；defer=未到点跳过；abandon=已达上限放弃；unaffected=非下载 op */
+    gate: 'proceed' | 'defer' | 'abandon' | 'unaffected';
+}
+/**
+ * 下载计划在入队前再过一遍重试门闸：退避未到期或已达最大次数则改为 skip。
+ * defer/abandon 均不打接口；defer 应由调用方阻止水位推进。
+ */
+export declare function applyDownloadRetryGate(op: SyncOp, record: FileState | undefined, remote: RemoteFileEntry | undefined, now?: number): DownloadRetryGateApplication;
 //# sourceMappingURL=syncDecide.d.ts.map

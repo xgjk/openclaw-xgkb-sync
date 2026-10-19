@@ -1,4 +1,5 @@
 import { MTIME_TOLERANCE_MS } from './constants';
+import { gateDownloadRetry } from './downloadRetryPolicy';
 import { FileState, LocalFileEntry, RemoteFileEntry, SyncOp } from './types';
 
 export interface DecideSyncOpInput {
@@ -75,6 +76,8 @@ export function decideSyncOp(input: DecideSyncOpInput): SyncOp {
   if (!local && !remote) {
     // 异常偏空时不写 tombstone，避免「挂载丢失」被永久记成用户删除
     if (workspaceAnomaly) return 'skip';
+    // 下载失败记录应由调用方合成 remote 后再决策；此处兜底保留，勿 tombstone
+    if (record.syncStatus === 'failed' && record.remoteFileId) return 'skip';
     return 'tombstone-local';
   }
 
@@ -82,6 +85,10 @@ export function decideSyncOp(input: DecideSyncOpInput): SyncOp {
   if (!local && remote) {
     // 异常偏空：不 tombstone、不拉回，等本地恢复后再对账
     if (workspaceAnomaly) return 'skip';
+    // 下载失败留下的记录：继续按下载重试，勿误记 tombstone
+    if (record.syncStatus === 'failed' && record.remoteFileId) {
+      return dir === 'push' ? 'skip' : 'download-new';
+    }
     return 'tombstone-local';
   }
 
@@ -136,4 +143,29 @@ export function shouldBlockDownloadForRemoteIdentity(input: {
   if (tombstonedRemoteFileIds.has(remoteFileId)) return true;
   const owner = remoteFileIdOwners.get(remoteFileId);
   return !!(owner && owner.localPath !== path);
+}
+
+export interface DownloadRetryGateApplication {
+  op: SyncOp;
+  /** proceed=照常下载；defer=未到点跳过；abandon=已达上限放弃；unaffected=非下载 op */
+  gate: 'proceed' | 'defer' | 'abandon' | 'unaffected';
+}
+
+/**
+ * 下载计划在入队前再过一遍重试门闸：退避未到期或已达最大次数则改为 skip。
+ * defer/abandon 均不打接口；defer 应由调用方阻止水位推进。
+ */
+export function applyDownloadRetryGate(
+  op: SyncOp,
+  record: FileState | undefined,
+  remote: RemoteFileEntry | undefined,
+  now = Date.now(),
+): DownloadRetryGateApplication {
+  if (op !== 'download-new' && op !== 'download-update') {
+    return { op, gate: 'unaffected' };
+  }
+  if (!remote) return { op, gate: 'proceed' };
+  const gate = gateDownloadRetry({ record, remote, now });
+  if (gate === 'proceed') return { op, gate };
+  return { op: 'skip', gate };
 }

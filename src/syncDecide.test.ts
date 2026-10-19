@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { decideSyncOp, shouldBlockDownloadForRemoteIdentity } from './syncDecide';
+import {
+  applyDownloadRetryGate,
+  decideSyncOp,
+  shouldBlockDownloadForRemoteIdentity,
+} from './syncDecide';
+import { MAX_DOWNLOAD_ATTEMPTS } from './constants';
 import { FileState, LocalFileEntry, RemoteFileEntry } from './types';
 
 function local(path: string, mtime = 1000): LocalFileEntry {
@@ -96,6 +101,53 @@ describe('decideSyncOp — 本地删除 tombstone', () => {
       });
       assert.equal(op, 'tombstone-local', syncDirection);
     }
+  });
+
+  it('本地缺 + 远端在 + 下载失败记录 → 继续 download-new（非 tombstone）', () => {
+    const op = decideSyncOp({
+      path: 'a.md',
+      local: undefined,
+      remote: remote('a.md', 'rid-1'),
+      record: record('a.md', {
+        syncStatus: 'failed',
+        downloadFailCount: 2,
+        lastError: '请求超时',
+      }),
+      syncDirection: 'bidirectional',
+      workspaceAnomaly: false,
+      tombstonedRemoteFileIds: emptyIds,
+      remoteFileIdOwners: emptyOwners,
+    });
+    assert.equal(op, 'download-new');
+  });
+
+  it('applyDownloadRetryGate：达上限则 skip，未到期 defer', () => {
+    const abandoned = applyDownloadRetryGate(
+      'download-new',
+      record('a.md', {
+        syncStatus: 'failed',
+        downloadFailCount: MAX_DOWNLOAD_ATTEMPTS,
+        remoteMtime: 1000,
+      }),
+      remote('a.md', 'rid-1', 1000),
+      Date.now(),
+    );
+    assert.equal(abandoned.op, 'skip');
+    assert.equal(abandoned.gate, 'abandon');
+
+    const deferred = applyDownloadRetryGate(
+      'download-update',
+      record('a.md', {
+        syncStatus: 'failed',
+        downloadFailCount: 2,
+        downloadNextRetryAt: Date.now() + 60_000,
+        remoteMtime: 1000,
+      }),
+      remote('a.md', 'rid-1', 1000),
+      Date.now(),
+    );
+    assert.equal(deferred.op, 'skip');
+    assert.equal(deferred.gate, 'defer');
   });
 
   it('已 tombstone + 本地仍缺 → skip（绝不 download）', () => {

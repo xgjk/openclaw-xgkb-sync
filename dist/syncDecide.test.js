@@ -6,6 +6,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const strict_1 = __importDefault(require("node:assert/strict"));
 const node_test_1 = require("node:test");
 const syncDecide_1 = require("./syncDecide");
+const constants_1 = require("./constants");
 function local(path, mtime = 1000) {
     return { path, name: path.split('/').pop() ?? path, mtime, size: 1, dev: '1', ino: '1' };
 }
@@ -81,6 +82,40 @@ const emptyOwners = new Map();
             });
             strict_1.default.equal(op, 'tombstone-local', syncDirection);
         }
+    });
+    (0, node_test_1.it)('本地缺 + 远端在 + 下载失败记录 → 继续 download-new（非 tombstone）', () => {
+        const op = (0, syncDecide_1.decideSyncOp)({
+            path: 'a.md',
+            local: undefined,
+            remote: remote('a.md', 'rid-1'),
+            record: record('a.md', {
+                syncStatus: 'failed',
+                downloadFailCount: 2,
+                lastError: '请求超时',
+            }),
+            syncDirection: 'bidirectional',
+            workspaceAnomaly: false,
+            tombstonedRemoteFileIds: emptyIds,
+            remoteFileIdOwners: emptyOwners,
+        });
+        strict_1.default.equal(op, 'download-new');
+    });
+    (0, node_test_1.it)('applyDownloadRetryGate：达上限则 skip，未到期 defer', () => {
+        const abandoned = (0, syncDecide_1.applyDownloadRetryGate)('download-new', record('a.md', {
+            syncStatus: 'failed',
+            downloadFailCount: constants_1.MAX_DOWNLOAD_ATTEMPTS,
+            remoteMtime: 1000,
+        }), remote('a.md', 'rid-1', 1000), Date.now());
+        strict_1.default.equal(abandoned.op, 'skip');
+        strict_1.default.equal(abandoned.gate, 'abandon');
+        const deferred = (0, syncDecide_1.applyDownloadRetryGate)('download-update', record('a.md', {
+            syncStatus: 'failed',
+            downloadFailCount: 2,
+            downloadNextRetryAt: Date.now() + 60_000,
+            remoteMtime: 1000,
+        }), remote('a.md', 'rid-1', 1000), Date.now());
+        strict_1.default.equal(deferred.op, 'skip');
+        strict_1.default.equal(deferred.gate, 'defer');
     });
     (0, node_test_1.it)('已 tombstone + 本地仍缺 → skip（绝不 download）', () => {
         for (const syncDirection of ['push', 'pull', 'bidirectional']) {
