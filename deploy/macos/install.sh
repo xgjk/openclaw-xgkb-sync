@@ -28,7 +28,7 @@ log "项目目录: $ROOT"
 log "Node: $NODE_BIN ($("$NODE_BIN" -v))"
 
 log "安装依赖并编译..."
-npm install --include=dev
+npm ci --include=dev
 npm run build
 
 mkdir -p "$PLIST_DIR" "$ROOT/logs"
@@ -63,4 +63,4 @@ if command -v curl >/dev/null 2>&1; then
 fi
 
 log "完成。状态: launchctl print $DOMAIN/$LABEL"
-log "手动升级: git pull && npm install --include=dev && npm run build && launchctl kickstart -k $DOMAIN/$LABEL"
+log "手动升级: git pull && npm ci --include=dev && npm run build && launchctl kickstart -k $DOMAIN/$LABEL"

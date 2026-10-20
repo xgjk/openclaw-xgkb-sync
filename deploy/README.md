@@ -3,7 +3,7 @@
 面向 **Linux / macOS / Windows**，不依赖 Docker。一键安装后：
 
 - **开机（或登录）自动启动** sync 服务
-- **手动升级**：`git pull` → `npm install --include=dev` → `npm run build` → 重启服务
+- **手动升级**：`git pull` → `npm ci --include=dev` → `npm run build` → 重启服务
 - **自动升级**（可选）：`config.json` 中 `autoUpgradeEnabled: true`（默认），中心心跳发现新版本且同步空闲时执行 `scripts/auto-upgrade.sh` / `.ps1`
 
 ## 首次安装
@@ -11,7 +11,7 @@
 ```bash
 git clone https://github.com/xgjk/openclaw-xgkb-sync.git
 cd openclaw-xgkb-sync
-npm install --include=dev
+npm ci --include=dev
 npm run build
 # 浏览器打开 http://127.0.0.1:9090/ 配置 AppKey 与 mapping
 ```
@@ -65,7 +65,7 @@ npm run build
 ```bash
 cd openclaw-xgkb-sync
 git pull origin main
-npm install --include=dev
+npm ci --include=dev
 npm run build
 # Linux:  systemctl --user restart openclaw-xgkb-sync
 # macOS:  launchctl kickstart -k gui/$(id -u)/com.openclaw.xgkb-sync

@@ -79,7 +79,15 @@ export function maybeScheduleAutoUpgrade(
     opts.log?.(`[AutoUpgrade] 启动升级脚本失败: ${e instanceof Error ? e.message : String(e)}`);
   });
 
-  // 脚本负责停服与重启；本进程可能被 SIGTERM，不再在这里 reset upgradeInFlight
+  child.on('exit', (code, signal) => {
+    if (code === 0) return;
+    upgradeInFlight = false;
+    lastAttemptedTarget = null;
+    const reason = signal ? `signal=${signal}` : `exitCode=${code ?? 'unknown'}`;
+    opts.log?.(`[AutoUpgrade] 升级脚本异常退出（${reason}），后续心跳将允许重试`);
+  });
+
+  // 成功路径由脚本停服并重启；旧进程会被 SIGTERM，不应在 code=0 时触发重复升级。
 }
 
 /** 通过解释器启动，避免 Mac/Linux clone 后 .sh 无 +x 导致 EACCES */

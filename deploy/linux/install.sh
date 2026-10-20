@@ -28,7 +28,7 @@ log "项目目录: $ROOT"
 log "Node: $NODE_BIN ($("$NODE_BIN" -v))"
 
 log "安装依赖并编译..."
-npm install --include=dev
+npm ci --include=dev
 npm run build
 
 mkdir -p "$UNIT_DIR" "$ROOT/logs"
@@ -62,5 +62,5 @@ if command -v curl >/dev/null 2>&1; then
   curl -sf "http://127.0.0.1:${PORT}/health" >/dev/null && log "健康检查通过: http://127.0.0.1:${PORT}/health" || log "健康检查未通过，请稍后重试"
 fi
 
-log "完成。手动升级: git pull && npm install --include=dev && npm run build && systemctl --user restart $SERVICE_NAME"
+log "完成。手动升级: git pull && npm ci --include=dev && npm run build && systemctl --user restart $SERVICE_NAME"
 log "自动升级: config.json 保持 autoUpgradeEnabled=true（默认），心跳空闲时执行 scripts/auto-upgrade.sh"

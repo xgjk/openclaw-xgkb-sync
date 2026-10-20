@@ -28,8 +28,8 @@ Log "Node: $nodeBin"
 Set-Location $ProjectRoot
 
 Log "安装依赖并编译..."
-npm install --include=dev
-if ($LASTEXITCODE -ne 0) { throw "npm install 失败" }
+npm ci --include=dev
+if ($LASTEXITCODE -ne 0) { throw "npm ci 失败" }
 npm run build
 if ($LASTEXITCODE -ne 0) { throw "npm run build 失败" }
 
@@ -97,5 +97,5 @@ try {
 }
 
 Log "完成。查看任务: Get-ScheduledTask -TaskName $TaskName"
-Log "手动升级: git pull; npm install --include=dev; npm run build; Stop-ScheduledTask $TaskName; Start-ScheduledTask $TaskName"
+Log "手动升级: git pull; npm ci --include=dev; npm run build; Stop-ScheduledTask $TaskName; Start-ScheduledTask $TaskName"
 Log "自动升级: config.json 保持 autoUpgradeEnabled=true，心跳空闲时执行 scripts/auto-upgrade.ps1"

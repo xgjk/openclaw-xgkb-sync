@@ -149,8 +149,8 @@ try {
     if ($LASTEXITCODE -ne 0) { git pull origin master }
   }
 
-  npm install --include=dev
-  if ($LASTEXITCODE -ne 0) { throw "npm install failed" }
+  npm ci --include=dev
+  if ($LASTEXITCODE -ne 0) { throw "npm ci failed" }
   npm run build
   if ($LASTEXITCODE -ne 0) { throw "npm run build failed" }
 

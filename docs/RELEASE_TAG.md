@@ -2,7 +2,7 @@
 
 用于 `openclaw-xgkb-sync` 发布新版本：与 `package.json` 的 `version`、GitHub Tag、sync-manage Nacos 的 `openclaw.sync.latest-version` 保持一致。
 
-自动升级脚本会执行：`git fetch --tags` → `git checkout v{version}` → `npm install` → `npm run build` → `pm2 restart`。
+自动升级脚本会执行：`git fetch --tags` → `git checkout v{version}` → `npm ci` → `npm run build` → `pm2 restart`。
 
 ---
 

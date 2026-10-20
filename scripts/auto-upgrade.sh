@@ -195,7 +195,15 @@ MGMT_PORT="$(read_management_port "$NODE_BIN")"
 
 detect_runtime
 # 服务仍在运行时完成所有不会改动工作区的预检；失败时绝不停止现有服务。
-if ! git diff --quiet || ! git diff --cached --quiet; then
+if ! git diff --cached --quiet; then
+  log "upgrade aborted: working tree has staged changes; service left running"
+  exit 1
+fi
+TRACKED_CHANGES="$(git diff --name-only)"
+if [[ "$TRACKED_CHANGES" == "package-lock.json" ]]; then
+  log "only package-lock.json changed; restoring the release lockfile before upgrade"
+  git checkout -- package-lock.json
+elif [[ -n "$TRACKED_CHANGES" ]]; then
   log "upgrade aborted: working tree has tracked changes; service left running"
   exit 1
 fi
